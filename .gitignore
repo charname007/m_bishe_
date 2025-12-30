@@ -5,3 +5,5 @@
 /.smart-env/multi/欢迎_md.ajson
 /.space/waypoints.json
 /.makemd/superstate.mdc
+/.*
+!.gitignore
