@@ -7,3 +7,4 @@
 /.makemd/superstate.mdc
 /.*
 !.gitignore
+code/.kilocode/mcp.json
