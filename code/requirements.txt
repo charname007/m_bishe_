@@ -1,0 +1,9 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+selenium>=4.15.0
+fake-useragent>=1.4.0
+pandas>=2.1.0
+aiohttp>=3.9.0
+asyncio>=3.4.3
+
