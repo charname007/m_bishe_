@@ -17,4 +17,8 @@
 - $q_1 \xrightarrow{a} q_3$
 - $q_2 \xrightarrow{a} q_0$
 - $q_3 \xrightarrow{a} q_1$
-就不行）
+就不行
+
+结果全等（合并）
+
+与行为全等（分割）的差别）
