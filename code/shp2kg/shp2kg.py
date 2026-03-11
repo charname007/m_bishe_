@@ -998,6 +998,10 @@ class SpatialRelationCalculator:
             # ✅ 优化：查询时对bounds进行buffer，扩大搜索范围防止漏判
             # 但索引内部仍然使用原始bounds，保证索引效率
             search_bounds = geom_a.buffer(adjacency_tolerance).bounds
+            
+            #candidates是经过索引后实体周围的候选集，后续再通过几何方法精确判断关系
+            #，因此不需要遍历全部，所以时间复杂度不是n^2，而是n*log(n)（索引查询）+ k（候选集大小，远小于n）。
+            
             candidates = list(idx.intersection(search_bounds))
 
             for j in candidates:
