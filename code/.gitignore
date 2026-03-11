@@ -22,6 +22,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.env
 
 # 数据文件
 data/
@@ -29,12 +30,28 @@ data/
 *.csv
 *.log
 
+# shapefiles
+shp2kg/shapefiles/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qix
+*.qmd
+*.sbn
+*.qgz
+
+
+
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.serena/
 
 # 配置文件（包含敏感信息）
 config_local.py
@@ -44,7 +61,19 @@ chromedriver.exe
 chromedriver
 *.exe
 
+
+
+
+#gitignore
+.gitignore
+
 # 其他
 .DS_Store
 Thumbs.db
 
+
+
+
+
+*.dbf
+*.shp
