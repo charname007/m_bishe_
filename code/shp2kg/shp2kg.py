@@ -159,6 +159,10 @@ class GeoEntityLoader:
 
         print(f"\n[总计] 加载实体: {len(self.entities)} 个")
         return self.entities
+    
+    def all_entities_names(self):
+        """返回所有实体的名称列表"""
+        return [ent['name'] for ent in self.entities.values()]
 
 
 # ============================================================
