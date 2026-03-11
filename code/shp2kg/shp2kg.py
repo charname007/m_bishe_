@@ -161,9 +161,20 @@ class GeoEntityLoader:
         return self.entities
     
     def all_entities_names(self):
-        """返回所有实体的名称列表"""
-        return [ent['name'] for ent in self.entities.values()]
+        """返回所有实体的名称列表（改进版）"""
+        # 定义无效名称集合
+        invalid_names = {"未命名", "null", "None"}
 
+        names = []
+        for ent in self.entities.values():
+            # 使用 .get() 避免 KeyError
+            name = ent.get('name')
+
+            # 检查是否存在、是否为字符串、是否不在无效列表中
+            if name and isinstance(name, str) and name not in invalid_names:
+                names.append(name)
+
+        return names
 
 # ============================================================
 # 第二部分：空间关系计算（核心！）
