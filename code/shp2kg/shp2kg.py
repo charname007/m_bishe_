@@ -161,7 +161,10 @@ class GeoEntityLoader:
         return self.entities
     
     def all_entities_names(self):
-        """返回所有实体的名称列表（改进版）"""
+        """返回所有实体的名称列表（改进版）
+        用于之后的实体匹配
+        （需要到时候导出为一个文件）
+        """
         # 定义无效名称集合
         invalid_names = {"未命名", "null", "None"}
 
