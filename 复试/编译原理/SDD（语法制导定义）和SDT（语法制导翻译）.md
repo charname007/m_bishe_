@@ -7,3 +7,18 @@ SDT 明确指出执行时机
 若自底向上，则 SDT 通常只用综合属性
 否则综合属性和继承属性合用
 
+
+
+## SDD 示例（L-SDD）
+
+| **产生式**                   | **语义规则**                                                |
+| ------------------------- | ------------------------------------------------------- |
+| 1) $L \to E \mathbf{n}$   | $L.val = E.val$                                         |
+| 2) $E \to T E'$           | $E'.inh = T.val$<br>$E.val = E'.syn$                    |
+| 3) $E' \to + T E'_1$      | $E'_1.inh = E'.inh + T.val$<br>$E'.syn = E'_1.syn$      |
+| 4) $E' \to \epsilon$      | $E'.syn = E'.inh$                                       |
+| 5) $T \to F T'$           | $T'.inh = F.val$<br>$T.val = T'.syn$                    |
+| 6) $T' \to * F T'_1$      | $T'_1.inh = T'.inh \times F.val$<br>$T'.syn = T'_1.syn$ |
+| 7) $T' \to \epsilon$      | $T'.syn = T'.inh$                                       |
+| 8) $F \to ( E )$          | $F.val = E.val$                                         |
+| 9) $F \to \mathbf{digit}$ | $F.val = \mathbf{digit}.lexval$                         |
