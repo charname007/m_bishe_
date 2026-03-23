@@ -8,3 +8,7 @@
 /.*
 !.gitignore
 code/.kilocode/mcp.json
+
+/复试/面试/计算机科学与技术复试问题总结.pptx
+/复试/面试/~$计算机科学与技术复试问题总结.pptx
+/.gitignore
