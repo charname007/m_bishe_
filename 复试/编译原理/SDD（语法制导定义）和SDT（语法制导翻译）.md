@@ -22,3 +22,5 @@ SDT 明确指出执行时机
 | 7) $T' \to \epsilon$      | $T'.syn = T'.inh$                                       |
 | 8) $F \to ( E )$          | $F.val = E.val$                                         |
 | 9) $F \to \mathbf{digit}$ | $F.val = \mathbf{digit}.lexval$                         |
+
+对于 L-SDT ，例如 $S\to \{{a_{1}}\}A\{{a_{2}}\}B\{{a_{3}}\}C\{{a_{4}}\}$ 一般产生式前的为继承属性赋值，a 1->A, a 2->B, a 3->C, 而最后则是 S 的综合属性赋值 a 4
