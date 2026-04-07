@@ -2,8 +2,12 @@
 LangGraph节点函数 - 四步骤工作流节点
 使用LangChain的with_structured_output进行结构化输出
 """
-from typing import Dict, List, Any, Optional
+import math
+import re
+from collections import defaultdict
 from difflib import SequenceMatcher
+from typing import Dict, List, Any, Optional
+
 from loguru import logger
 
 from langchain_core.messages import HumanMessage
@@ -29,7 +33,7 @@ def create_ner_node(llm: Any):
     # 使用with_structured_output获取结构化输出
     structured_llm = llm.with_structured_output(EntityRecognitionResult)
 
-    def ner_node(state: CorpusState) -> Dict:
+    async def ner_node(state: CorpusState) -> Dict:
         """Step 1: 命名实体识别"""
         logger.info(f"[NER] 处理语料: {state['corpus_id']}")
 
@@ -37,8 +41,8 @@ def create_ner_node(llm: Any):
             # 使用ChatPromptTemplate生成消息
             messages = NER_PROMPT.invoke({"raw_text": state["raw_text"]})
 
-            # 调用LLM获取结构化输出
-            result: EntityRecognitionResult = structured_llm.invoke(messages)
+            # 调用LLM获取结构化输出（异步）
+            result: EntityRecognitionResult = await structured_llm.ainvoke(messages)
 
             logger.debug(f"[NER] 结果: {result}")
 
@@ -66,7 +70,7 @@ def create_re_node(llm: Any):
     """创建RE节点"""
     structured_llm = llm.with_structured_output(RelationExtractionResult)
 
-    def re_node(state: CorpusState) -> Dict:
+    async def re_node(state: CorpusState) -> Dict:
         """Step 2: 关系抽取"""
         logger.info(f"[RE] 处理语料: {state['corpus_id']}")
 
@@ -83,8 +87,8 @@ def create_re_node(llm: Any):
                 "entities": format_entities(state["entities"]),
             })
 
-            # 调用LLM获取结构化输出
-            result: RelationExtractionResult = structured_llm.invoke(messages)
+            # 调用LLM获取结构化输出（异步）
+            result: RelationExtractionResult = await structured_llm.ainvoke(messages)
 
             triples = [
                 {
@@ -110,7 +114,7 @@ def create_eval_1_node(llm: Any):
     """创建第一次评估节点"""
     structured_llm = llm.with_structured_output(EvalResultFirst)
 
-    def eval_1_node(state: CorpusState) -> Dict:
+    async def eval_1_node(state: CorpusState) -> Dict:
         """Step 3a: 第一次评估"""
         logger.info(f"[Eval1] 处理语料: {state['corpus_id']}")
 
@@ -124,8 +128,8 @@ def create_eval_1_node(llm: Any):
             "raw_text": state["raw_text"],
         })
 
-        # 谷用LLM获取结构化输出
-        result: EvalResultFirst = structured_llm.invoke(messages)
+        # 调用LLM获取结构化输出（异步）
+        result: EvalResultFirst = await structured_llm.ainvoke(messages)
 
         scores = [
             {
@@ -143,7 +147,7 @@ def create_eval_1_node(llm: Any):
 
         logger.debug(f"[Eval1] 结果: {len(scores)}个评分")
 
-        return {"eval_scores": scores}
+        return {"eval_scores": scores, "current_step": StepEnum.EVAL}
 
     return eval_1_node
 
@@ -152,7 +156,7 @@ def create_eval_2_node(llm: Any):
     """创建第二次评估节点（自检）"""
     structured_llm = llm.with_structured_output(EvalResultSecond)
 
-    def eval_2_node(state: CorpusState) -> Dict:
+    async def eval_2_node(state: CorpusState) -> Dict:
         """Step 3b: 第二次评估（自检）"""
         logger.info(f"[Eval2] 处理语料: {state['corpus_id']}")
 
@@ -179,8 +183,8 @@ def create_eval_2_node(llm: Any):
             "raw_text": state["raw_text"],
         })
 
-        # 调用LLM获取结构化输出
-        result: EvalResultSecond = structured_llm.invoke(messages)
+        # 调用LLM获取结构化输出（异步）
+        result: EvalResultSecond = await structured_llm.ainvoke(messages)
 
         # 更新评分
         final_scores = [
@@ -261,7 +265,7 @@ def create_label_node(llm: Any):
     """创建属性标注节点"""
     structured_llm = llm.with_structured_output(LabelResult)
 
-    def label_node(state: CorpusState) -> Dict:
+    async def label_node(state: CorpusState) -> Dict:
         """Step 4: 属性标注"""
         logger.info(f"[Label] 处理语料: {state['corpus_id']}")
 
@@ -280,8 +284,8 @@ def create_label_node(llm: Any):
             "relations": format_triples(state["corrected_triples"]),
         })
 
-        # 调用LLM获取结构化输出
-        result: LabelResult = structured_llm.invoke(messages)
+        # 调用LLM获取结构化输出（异步）
+        result: LabelResult = await structured_llm.ainvoke(messages)
 
         entity_attrs = {
             name: {"类别": attrs.类别, "细分": attrs.细分}
@@ -330,8 +334,6 @@ def normalize_relation_key(key: str) -> Optional[str]:
 
     返回标准格式: "<武汉大学, 位于, 珞喻路>"
     """
-    import re
-
     if not key:
         return None
 
@@ -394,7 +396,6 @@ def apply_corrections(original_triples: List[Dict], corrections: List[Any]) -> t
 
 def create_coordinator_node(corpus_per_worker: int = 10, max_workers: int = 10):
     """创建调度器节点"""
-    import math
 
     def coordinator_node(state: KGState) -> Dict:
         """MAP阶段入口 - 计算Worker数量并分配语料"""
@@ -496,52 +497,90 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
 
 
 def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
-    """实体去重，发现别名"""
+    """
+    实体去重，发现别名
+
+    使用阻塞（blocking）策略优化相似度比较：
+    1. 按首字符分组，只比较同组内的实体
+    2. 额外处理简称别名（可能跨组）
+    """
     unique_entities = []
     aliases = {}
     processed = set()
 
     entity_names = list({e["name"] for e in entities})
+    name_to_entities = defaultdict(list)
+    for e in entities:
+        name_to_entities[e["name"]].append(e)
 
+    # 按首字符分块（blocking）
+    blocks: Dict[str, List[str]] = defaultdict(list)
     for name in entity_names:
-        if name in processed:
-            continue
+        if name:
+            # 使用首字符作为block key（中文按首字，英文按首字母）
+            block_key = name[0].lower() if name else ''
+            blocks[block_key].append(name)
 
-        # 找到所有相似的实体名
-        similar_names = [name]
-        for other_name in entity_names:
-            if other_name != name and other_name not in processed:
-                if is_similar(name, other_name, threshold):
-                    similar_names.append(other_name)
-                    processed.add(other_name)
+    def find_similar_in_block(name: str, block: List[str]) -> List[str]:
+        """在单个block内查找相似实体"""
+        similar = []
+        for other in block:
+            if other != name and other not in processed:
+                if is_similar(name, other, threshold):
+                    similar.append(other)
+        return similar
 
-        processed.add(name)
+    # 按block处理，减少比较次数
+    for block_key, block_names in blocks.items():
+        for name in block_names:
+            if name in processed:
+                continue
 
-        # 选择最长的名称作为标准名
-        standard_name = max(similar_names, key=len)
+            # 在同block内查找相似实体
+            similar_names = [name] + find_similar_in_block(name, block_names)
 
-        # 收集所有出现信息
-        occurrences = [e for e in entities if e["name"] in similar_names]
-        entity_type = occurrences[0]["type"] if occurrences else None
-        entity_attrs = {}
-        for occ in occurrences:
-            if occ.get("attrs"):
-                entity_attrs.update(occ["attrs"])
+            # 额外检查：简称别名可能跨block（如"武大"和"武汉大学"）
+            # 只检查长度差异大的情况
+            for other_name in entity_names:
+                if other_name != name and other_name not in processed:
+                    # 简称检查：较短名称是较长名称的子串
+                    if len(name) != len(other_name):
+                        shorter, longer = (name, other_name) if len(name) < len(other_name) else (other_name, name)
+                        if shorter in longer and len(shorter) >= len(longer) * 0.4:
+                            if other_name not in similar_names:
+                                similar_names.append(other_name)
 
-        # 记录别名
-        other_names = [n for n in similar_names if n != standard_name]
-        if other_names:
-            aliases[standard_name] = other_names
+            for n in similar_names:
+                processed.add(n)
 
-        unique_entities.append({
-            "name": standard_name,
-            "type": entity_type,
-            "category": entity_attrs.get("细分", ""),
-            "aliases": other_names,
-            "occurrence_count": len(occurrences),
-            "corpus_ids": list(set(o["corpus_id"] for o in occurrences)),
-            "attrs": entity_attrs,
-        })
+            # 选择最长的名称作为标准名
+            standard_name = max(similar_names, key=len)
+
+            # 收集所有出现信息
+            occurrences = []
+            for n in similar_names:
+                occurrences.extend(name_to_entities.get(n, []))
+
+            entity_type = occurrences[0]["type"] if occurrences else None
+            entity_attrs = {}
+            for occ in occurrences:
+                if occ.get("attrs"):
+                    entity_attrs.update(occ["attrs"])
+
+            # 记录别名
+            other_names = [n for n in similar_names if n != standard_name]
+            if other_names:
+                aliases[standard_name] = other_names
+
+            unique_entities.append({
+                "name": standard_name,
+                "type": entity_type,
+                "category": entity_attrs.get("细分", ""),
+                "aliases": other_names,
+                "occurrence_count": len(occurrences),
+                "corpus_ids": list(set(o["corpus_id"] for o in occurrences)),
+                "attrs": entity_attrs,
+            })
 
     return unique_entities, aliases
 

@@ -2,6 +2,7 @@
 LangGraph工作流定义 - 使用StateGraph构建知识图谱抽取工作流
 """
 import asyncio
+import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional, cast
@@ -24,6 +25,143 @@ from .nodes import (
 )
 
 
+# ===== 配置常量 =====
+
+class WorkflowConfig:
+    """工作流配置"""
+    # Worker配置
+    CORPUS_PER_WORKER = 10
+    MAX_WORKERS = 10
+
+    # 评估阈值
+    EVAL_PASSED_THRESHOLD = 3.5
+
+    # 相似度阈值
+    DEFAULT_SIMILARITY_THRESHOLD = 0.85
+
+    # 文本验证配置
+    MAX_TEXT_LENGTH = 10000  # 最大文本长度
+    MIN_TEXT_LENGTH = 1      # 最小文本长度
+
+
+def _validate_corpus_text(text: str) -> str:
+    """
+    验证并清理语料文本
+
+    Args:
+        text: 原始文本
+
+    Returns:
+        清理后的文本
+
+    Raises:
+        ValueError: 文本无效
+    """
+    if not text or not isinstance(text, str):
+        raise ValueError("语料文本不能为空")
+
+    # 去除首尾空白
+    text = text.strip()
+
+    # 检查长度
+    if len(text) < WorkflowConfig.MIN_TEXT_LENGTH:
+        raise ValueError(f"语料文本长度不足（最小 {WorkflowConfig.MIN_TEXT_LENGTH} 字符）")
+
+    if len(text) > WorkflowConfig.MAX_TEXT_LENGTH:
+        logger.warning(f"语料文本过长（{len(text)} 字符），将被截断")
+        text = text[:WorkflowConfig.MAX_TEXT_LENGTH]
+
+    # 移除危险字符（防止注入攻击）
+    # 保留中文、英文、数字、标点符号
+    import re
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+
+    return text
+
+
+def _validate_corpus_id(corpus_id: Any) -> str:
+    """
+    验证语料ID
+
+    Args:
+        corpus_id: 原始ID
+
+    Returns:
+        验证后的ID字符串
+    """
+    if corpus_id is None:
+        return f"auto_{uuid.uuid4().hex[:8]}"
+
+    corpus_id = str(corpus_id).strip()
+    if not corpus_id:
+        return f"auto_{uuid.uuid4().hex[:8]}"
+
+    # 限制ID长度
+    if len(corpus_id) > 100:
+        corpus_id = corpus_id[:100]
+
+    return corpus_id
+
+
+def _get_database_config() -> Dict[str, Any]:
+    """
+    获取数据库配置
+
+    Returns:
+        包含所有数据库连接参数的字典
+
+    Raises:
+        ValueError: 必需的环境变量未设置
+    """
+    # Neo4j密码是必需的
+    neo4j_password = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PWD")
+    if not neo4j_password:
+        raise ValueError("Neo4j密码未设置，请配置环境变量 NEO4J_PASSWORD")
+
+    # PostgreSQL密码是必需的
+    pg_password = os.getenv("PG_PASSWORD")
+    if not pg_password:
+        raise ValueError("PostgreSQL密码未设置，请配置环境变量 PG_PASSWORD")
+
+    return {
+        # Neo4j配置（兼容多种环境变量命名）
+        "neo4j_uri": (
+            os.getenv("NEO4J_URI") or
+            os.getenv("NEO4J_URL") or
+            "bolt://localhost:7687"
+        ),
+        "neo4j_user": (
+            os.getenv("NEO4J_USER") or
+            os.getenv("NEO4J_USERNAME") or
+            "neo4j"
+        ),
+        "neo4j_password": neo4j_password,
+        # PostgreSQL配置
+        "pg_host": os.getenv("PG_HOST", "localhost"),
+        "pg_port": int(os.getenv("PG_PORT", "5432")),
+        "pg_database": os.getenv("PG_DATABASE", "kg"),
+        "pg_user": os.getenv("PG_USER", "postgres"),
+        "pg_password": pg_password,
+    }
+
+
+# ===== 条件路由函数（模块级，便于测试） =====
+
+def route_after_ner(state: CorpusState) -> str:
+    """
+    NER后路由：失败则END，成功则继续RE
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称或END
+    """
+    if state.get("error") or state.get("current_step") == StepEnum.DONE:
+        return END
+    return "re"
+
+
 # ===== 单条语料工作流 =====
 
 def build_corpus_workflow(llm: Any) -> CompiledStateGraph:
@@ -39,13 +177,6 @@ def build_corpus_workflow(llm: Any) -> CompiledStateGraph:
     eval_1_node = create_eval_1_node(llm)
     eval_2_node = create_eval_2_node(llm)
     label_node = create_label_node(llm)
-
-    # 条件路由函数 - 根据current_step和error决定下一步
-    def route_after_ner(state: CorpusState) -> str:
-        """NER后路由：失败则END，成功则继续RE"""
-        if state.get("error") or state.get("current_step") == StepEnum.DONE:
-            return END  # 直接返回 END 常量
-        return "re"
 
     # 创建StateGraph
     builder = StateGraph(CorpusState)
@@ -93,9 +224,13 @@ def build_distributed_workflow(llm: Any, config: Optional[Dict] = None) -> Compi
         async def process_corpus(corpus: Dict) -> Dict:
             """处理单条语料"""
             try:
+                # 验证输入
+                corpus_id = _validate_corpus_id(corpus.get("id"))
+                raw_text = _validate_corpus_text(corpus.get("text", ""))
+
                 initial_state: CorpusState = {
-                    "corpus_id": corpus.get("id", "unknown"),
-                    "raw_text": corpus.get("text", ""),
+                    "corpus_id": corpus_id,
+                    "raw_text": raw_text,
                     "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
                     "triples": [],
                     "eval_scores": [],
@@ -107,13 +242,20 @@ def build_distributed_workflow(llm: Any, config: Optional[Dict] = None) -> Compi
                     "error": None,
                 }
                 # 为每条语料生成唯一的 thread_id，避免并发状态串扰
-                config = {"configurable": {"thread_id": f"corpus_{corpus.get('id', uuid.uuid4().hex)}"}}
-                result = await corpus_workflow.ainvoke(initial_state, config)
+                thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+                result = await corpus_workflow.ainvoke(initial_state, thread_config)  # type: ignore
                 return result
+            except ValueError as e:
+                # 输入验证错误
+                logger.warning(f"语料验证失败: {e}")
+                return {
+                    "corpus_id": _validate_corpus_id(corpus.get("id")),
+                    "error": f"输入验证失败: {e}",
+                }
             except Exception as e:
                 logger.error(f"处理语料失败: {e}")
                 return {
-                    "corpus_id": corpus.get("id", "unknown"),
+                    "corpus_id": _validate_corpus_id(corpus.get("id")),
                     "error": str(e),
                 }
 
@@ -177,25 +319,20 @@ def build_distributed_workflow(llm: Any, config: Optional[Dict] = None) -> Compi
         """FINALIZE阶段 - 输出到数据库"""
         from ..kg.neo4j_client import Neo4jClient
         from ..kg.postgres_client import PostgresClient
-        import os
 
         neo4j_stats = {"merged_entities": 0, "merged_relations": 0}
         postgres_stats = {"inserted": 0}
 
-        # 获取数据库配置（兼容多种环境变量命名）
-        neo4j_uri = os.getenv("NEO4J_URI") or os.getenv("NEO4J_URL") or "bolt://localhost:7687"
-        neo4j_user = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or "neo4j"
-        neo4j_password = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PWD") or "password"
-
-        pg_host = os.getenv("PG_HOST", "localhost")
-        pg_port = int(os.getenv("PG_PORT", "5432"))
-        pg_database = os.getenv("PG_DATABASE", "kg")
-        pg_user = os.getenv("PG_USER", "postgres")
-        pg_password = os.getenv("PG_PASSWORD", "password")
-
         try:
+            # 获取数据库配置
+            db_config = _get_database_config()
+
             # 写入 Neo4j
-            with Neo4jClient(neo4j_uri, neo4j_user, neo4j_password) as neo4j:
+            with Neo4jClient(
+                db_config["neo4j_uri"],
+                db_config["neo4j_user"],
+                db_config["neo4j_password"]
+            ) as neo4j:
                 # 创建索引
                 neo4j.create_indexes()
 
@@ -210,7 +347,13 @@ def build_distributed_workflow(llm: Any, config: Optional[Dict] = None) -> Compi
                     neo4j_stats["merged_relations"] = relation_stats.get("merged", 0)
 
             # 写入 PostgreSQL
-            with PostgresClient(pg_host, pg_port, pg_database, pg_user, pg_password) as pg:
+            with PostgresClient(
+                db_config["pg_host"],
+                db_config["pg_port"],
+                db_config["pg_database"],
+                db_config["pg_user"],
+                db_config["pg_password"]
+            ) as pg:
                 # 创建表结构
                 pg.create_tables()
 
