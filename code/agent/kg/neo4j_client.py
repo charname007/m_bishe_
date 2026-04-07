@@ -92,7 +92,9 @@ class Neo4jClient:
                 "relation": "位于",
                 "tail": "珞喻路",
                 "evidence": "武汉大学在珞喻路上",
-                "corpus_ids": ["001"]
+                "corpus_ids": ["001"],
+                "relation_type": "位置关系",
+                "relation_subtype": "内部"
             }
         """
         with self.driver.session() as session:
@@ -110,6 +112,8 @@ class Neo4jClient:
                 ON CREATE SET
                     r.evidence = $evidence,
                     r.corpus_ids = $corpus_ids,
+                    r.relation_type = $relation_type,
+                    r.relation_subtype = $relation_subtype,
                     r.created_at = datetime(),
                     r.source = 'xiaohongshu'
                 ON MATCH SET
@@ -118,6 +122,16 @@ class Neo4jClient:
                         THEN apoc.coll.toSet(r.corpus_ids + $corpus_ids)
                         ELSE r.corpus_ids
                     END,
+                    r.relation_type = CASE
+                        WHEN $relation_type IS NOT NULL AND $relation_type <> ''
+                        THEN $relation_type
+                        ELSE r.relation_type
+                    END,
+                    r.relation_subtype = CASE
+                        WHEN $relation_subtype IS NOT NULL AND $relation_subtype <> ''
+                        THEN $relation_subtype
+                        ELSE r.relation_subtype
+                    END,
                     r.updated_at = datetime()
                 RETURN r
             """,
@@ -125,7 +139,9 @@ class Neo4jClient:
                 relation=triple["relation"],
                 tail=triple["tail"],
                 evidence=triple.get("evidence", ""),
-                corpus_ids=triple.get("corpus_ids", [])
+                corpus_ids=triple.get("corpus_ids", []),
+                relation_type=triple.get("relation_type", ""),
+                relation_subtype=triple.get("relation_subtype", "")
             )
             return result.single() is not None
 

@@ -1,7 +1,7 @@
 """
-Pydantic模型定义 - 各阶段结构化输出类型
+Pydantic模型定义 - 用于LangChain with_structured_output
 """
-from typing import List, Dict, Optional, Literal
+from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
 
 
@@ -32,9 +32,16 @@ class RelationExtractionResult(BaseModel):
 
 # ===== Eval阶段输出模型 =====
 
+class TripleForEval(BaseModel):
+    """用于评估的三元组"""
+    head: str = Field(description="头实体名称")
+    relation: str = Field(description="关系类型")
+    tail: str = Field(description="尾实体名称")
+
+
 class TripleScore(BaseModel):
     """单个三元组的评分"""
-    triple: Triple = Field(description="被评分的三元组")
+    triple: TripleForEval = Field(description="被评分的三元组")
     SEM: int = Field(ge=1, le=5, description="语义准确性评分(1-5)")
     FAC: int = Field(ge=1, le=5, description="事实真实性评分(1-5)")
     CON: int = Field(ge=1, le=5, description="一致性评分(1-5)")
@@ -47,8 +54,8 @@ class EvalResultFirst(BaseModel):
 
 class Correction(BaseModel):
     """三元组修正"""
-    original: Triple = Field(description="原始三元组")
-    corrected: Triple = Field(description="修正后的三元组")
+    original: TripleForEval = Field(description="原始三元组")
+    corrected: TripleForEval = Field(description="修正后的三元组")
     reason: str = Field(description="修正原因")
 
 
@@ -83,38 +90,3 @@ class LabelResult(BaseModel):
         default_factory=dict,
         description="关系属性字典，键为三元组字符串如'<A, 关系, B>'"
     )
-
-
-# ===== 批量处理输出模型 =====
-
-class CorpusResult(BaseModel):
-    """单条语料处理结果"""
-    corpus_id: str = Field(description="语料ID")
-    entities: EntityRecognitionResult = Field(description="实体识别结果")
-    triples: List[Triple] = Field(default_factory=list, description="关系抽取结果")
-
-
-class BatchResult(BaseModel):
-    """批量处理结果"""
-    results: List[CorpusResult] = Field(default_factory=list, description="语料处理结果列表")
-
-
-# ===== 创建Output Parser =====
-
-from langchain_core.output_parsers import PydanticOutputParser
-
-# NER解析器
-ner_parser = PydanticOutputParser(pydantic_object=EntityRecognitionResult)
-
-# RE解析器
-re_parser = PydanticOutputParser(pydantic_object=RelationExtractionResult)
-
-# Eval解析器
-eval_first_parser = PydanticOutputParser(pydantic_object=EvalResultFirst)
-eval_second_parser = PydanticOutputParser(pydantic_object=EvalResultSecond)
-
-# Label解析器
-label_parser = PydanticOutputParser(pydantic_object=LabelResult)
-
-# 批量处理解析器
-batch_parser = PydanticOutputParser(pydantic_object=BatchResult)

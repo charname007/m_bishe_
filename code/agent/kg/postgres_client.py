@@ -84,6 +84,8 @@ class PostgresClient:
                     fac_score INTEGER,
                     con_score INTEGER,
                     passed_eval BOOLEAN,
+                    relation_type VARCHAR(50),
+                    relation_subtype VARCHAR(50),
                     corpus_ids TEXT[],
                     created_at TIMESTAMP DEFAULT NOW(),
                     FOREIGN KEY (batch_id) REFERENCES extraction_batches(batch_id)
@@ -107,6 +109,18 @@ class PostgresClient:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_batch ON entities(batch_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_triples_batch ON triples(batch_id)")
+
+            # 添加新列（如果不存在）- 兼容旧表结构
+            # triples 表新增 relation_type 和 relation_subtype 列
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'triples' AND column_name IN ('relation_type', 'relation_subtype')
+            """)
+            existing_columns = [row[0] for row in cur.fetchall()]
+            if 'relation_type' not in existing_columns:
+                cur.execute("ALTER TABLE triples ADD COLUMN relation_type VARCHAR(50)")
+            if 'relation_subtype' not in existing_columns:
+                cur.execute("ALTER TABLE triples ADD COLUMN relation_subtype VARCHAR(50)")
 
             self.conn.commit()
             logger.debug("PostgreSQL表结构创建完成")
@@ -178,6 +192,8 @@ class PostgresClient:
                     t.get("fac_score", 0),
                     t.get("con_score", 0),
                     t.get("passed_eval", True),
+                    t.get("relation_type", ""),
+                    t.get("relation_subtype", ""),
                     t.get("corpus_ids", [])
                 )
                 for t in triples
@@ -186,7 +202,7 @@ class PostgresClient:
             execute_values(cur, """
                 INSERT INTO triples
                 (batch_id, head_entity, relation, tail_entity, evidence,
-                 sem_score, fac_score, con_score, passed_eval, corpus_ids)
+                 sem_score, fac_score, con_score, passed_eval, relation_type, relation_subtype, corpus_ids)
                 VALUES %s
             """, data)
 
