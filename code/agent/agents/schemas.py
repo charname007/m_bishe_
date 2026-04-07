@@ -101,7 +101,7 @@ class BatchResult(BaseModel):
 
 # ===== 创建Output Parser =====
 
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 
 # NER解析器
 ner_parser = PydanticOutputParser(pydantic_object=EntityRecognitionResult)
