@@ -1,5 +1,6 @@
 """
 LangGraph工作流定义 - 使用StateGraph构建知识图谱抽取工作流
+P1改进：添加 RetryPolicy 支持自动重试
 """
 import asyncio
 import os
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Optional, cast
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import RetryPolicy
 
 from loguru import logger
 
@@ -20,37 +22,25 @@ from .nodes import (
     create_re_node,
     create_eval_1_node,
     create_eval_2_node,
+    create_eval_simplified_node,  # P2改进：简化评估节点
     create_label_node,
     create_coordinator_node,
     create_aggregator_node,
 )
 
 
-# ===== 配置常量 =====
-
-class WorkflowConfig:
-    """工作流配置"""
-    # Worker配置
-    CORPUS_PER_WORKER = 10
-    MAX_WORKERS = 10
-
-    # 评估阈值
-    EVAL_PASSED_THRESHOLD = 3.5
-
-    # 相似度阈值
-    DEFAULT_SIMILARITY_THRESHOLD = 0.85
-
-    # 文本验证配置
-    MAX_TEXT_LENGTH = 10000  # 最大文本长度
-    MIN_TEXT_LENGTH = 1      # 最小文本长度
+# ===== 配置 =====
+# P2改进：使用 ExtractionConfig 替代硬编码的 WorkflowConfig
+from .config import ExtractionConfig, DEFAULT_CONFIG
 
 
-def _validate_corpus_text(text: str) -> str:
+def _validate_corpus_text(text: str, config: ExtractionConfig = DEFAULT_CONFIG) -> str:
     """
     验证并清理语料文本
 
     Args:
         text: 原始文本
+        config: 配置实例
 
     Returns:
         清理后的文本
@@ -65,12 +55,12 @@ def _validate_corpus_text(text: str) -> str:
     text = text.strip()
 
     # 检查长度
-    if len(text) < WorkflowConfig.MIN_TEXT_LENGTH:
-        raise ValueError(f"语料文本长度不足（最小 {WorkflowConfig.MIN_TEXT_LENGTH} 字符）")
+    if len(text) < config.min_text_length:
+        raise ValueError(f"语料文本长度不足（最小 {config.min_text_length} 字符）")
 
-    if len(text) > WorkflowConfig.MAX_TEXT_LENGTH:
+    if len(text) > config.max_text_length:
         logger.warning(f"语料文本过长（{len(text)} 字符），将被截断")
-        text = text[:WorkflowConfig.MAX_TEXT_LENGTH]
+        text = text[:config.max_text_length]
 
     # 移除危险字符（防止注入攻击）
     # 保留中文、英文、数字、标点符号
@@ -164,37 +154,81 @@ def route_after_ner(state: CorpusState) -> str:
 
 # ===== 单条语料工作流 =====
 
-def build_corpus_workflow(llm: Any) -> CompiledStateGraph:
+# P1改进：定义 LLM 调用节点的 RetryPolicy
+def _should_retry_llm(error: Exception) -> bool:
+    """判断是否应该重试 LLM 调用"""
+    # 连接错误、超时、API 限流等临时故障应重试
+    retryable_types = (ConnectionError, TimeoutError)
+    retryable_messages = ["rate limit", "timeout", "connection", "503", "429"]
+
+    if isinstance(error, retryable_types):
+        return True
+
+    error_msg = str(error).lower()
+    return any(msg in error_msg for msg in retryable_messages)
+
+
+LLM_RETRY_POLICY = RetryPolicy(
+    initial_interval=1.0,      # 初始等待 1 秒
+    backoff_factor=2.0,        # 每次翻倍
+    max_interval=30.0,         # 最大等待 30 秒
+    max_attempts=3,            # 最多重试 3 次
+    jitter=True,               # 添加随机抖动防止雪崩
+    retry_on=_should_retry_llm
+)
+
+
+def build_corpus_workflow(llm: Any, use_simplified_eval: bool = True) -> CompiledStateGraph:
     """
     构建单条语料处理工作流
 
-    流程: START → NER → (条件判断) → RE → Eval1 → Eval2 → Label → END
+    流程: START → NER → (条件判断) → RE → Eval → Label → END
     NER失败时直接END，跳过后续节点
+
+    P1改进：为 LLM 调用节点添加 RetryPolicy，自动处理临时故障
+    P2改进：支持简化评估模式，减少 LLM 调用成本
+
+    Args:
+        llm: LangChain LLM 实例
+        use_simplified_eval: 是否使用简化评估（单次评估+规则校验），默认True
     """
     # 创建节点函数
     ner_node = create_ner_node(llm)
     re_node = create_re_node(llm)
-    eval_1_node = create_eval_1_node(llm)
-    eval_2_node = create_eval_2_node(llm)
     label_node = create_label_node(llm)
 
     # 创建StateGraph
     builder = StateGraph(CorpusState)
 
-    # 添加节点
-    builder.add_node("ner", ner_node)
-    builder.add_node("re", re_node)
-    builder.add_node("eval_1", eval_1_node)
-    builder.add_node("eval_2", eval_2_node)
-    builder.add_node("label", label_node)
+    # 添加基础节点
+    builder.add_node("ner", ner_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("re", re_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("label", label_node, retry_policy=LLM_RETRY_POLICY)
 
-    # 定义边 - 使用条件边实现失败跳过
-    builder.add_edge(START, "ner")
-    builder.add_conditional_edges("ner", route_after_ner)
-    builder.add_edge("re", "eval_1")
-    builder.add_edge("eval_1", "eval_2")
-    builder.add_edge("eval_2", "label")
-    builder.add_edge("label", END)
+    # P2改进：根据配置选择评估模式
+    if use_simplified_eval:
+        # 简化模式：单次评估 + 规则校验
+        eval_node = create_eval_simplified_node(llm)
+        builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
+
+        builder.add_edge(START, "ner")
+        builder.add_conditional_edges("ner", route_after_ner)
+        builder.add_edge("re", "eval")
+        builder.add_edge("eval", "label")
+        builder.add_edge("label", END)
+    else:
+        # 原模式：两轮评估
+        eval_1_node = create_eval_1_node(llm)
+        eval_2_node = create_eval_2_node(llm)
+        builder.add_node("eval_1", eval_1_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node("eval_2", eval_2_node, retry_policy=LLM_RETRY_POLICY)
+
+        builder.add_edge(START, "ner")
+        builder.add_conditional_edges("ner", route_after_ner)
+        builder.add_edge("re", "eval_1")
+        builder.add_edge("eval_1", "eval_2")
+        builder.add_edge("eval_2", "label")
+        builder.add_edge("label", END)
 
     # 编译并返回
     return builder.compile(checkpointer=InMemorySaver())
@@ -202,31 +236,42 @@ def build_corpus_workflow(llm: Any) -> CompiledStateGraph:
 
 # ===== 分布式工作流 =====
 
-def build_distributed_workflow(llm: Any, config: Optional[Dict] = None) -> CompiledStateGraph:
+def build_distributed_workflow(
+    llm: Any,
+    config: Optional[ExtractionConfig] = None
+) -> CompiledStateGraph:
     """
     构建分布式知识图谱构建工作流
 
     流程: START → Coordinator → Workers(并行) → Aggregator → Finalizer → END
+
+    改进：
+    - P0：预编译 corpus_workflow，避免重复编译开销
+    - P2：使用 ExtractionConfig 支持配置化
+
+    Args:
+        llm: LangChain LLM 实例
+        config: ExtractionConfig 配置实例，默认使用 DEFAULT_CONFIG
     """
-    config = config or {}
-    corpus_per_worker = config.get("corpus_per_worker", 10)
-    max_workers = config.get("max_workers", 10)
+    config = config or DEFAULT_CONFIG
 
     # 创建节点函数
-    coordinator_node = create_coordinator_node(corpus_per_worker, max_workers)
-    aggregator_node = create_aggregator_node()
+    coordinator_node = create_coordinator_node(config.corpus_per_worker, config.max_workers)
+    aggregator_node = create_aggregator_node(config.similarity_threshold)
+
+    # P0改进：预编译单条语料 workflow，避免在 workers_node 中重复编译
+    # P2改进：使用配置决定是否使用简化评估
+    corpus_workflow = build_corpus_workflow(llm, use_simplified_eval=config.use_simplified_eval)
 
     # Worker处理函数
     async def workers_node(state: KGState) -> Dict:
         """并行执行所有Worker - 按分片并行处理"""
-        corpus_workflow = build_corpus_workflow(llm)
-
         async def process_corpus(corpus: Dict) -> Dict:
             """处理单条语料"""
             try:
-                # 验证输入
+                # 验证输入 - P2改进：传入配置
                 corpus_id = _validate_corpus_id(corpus.get("id"))
-                raw_text = _validate_corpus_text(corpus.get("text", ""))
+                raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
                 initial_state: CorpusState = {
                     "corpus_id": corpus_id,
@@ -443,8 +488,124 @@ async def process_corpus(llm: Any, corpus: Dict) -> CorpusState:
     return cast(CorpusState, result)
 
 
-async def process_batch(llm: Any, corpus_list: List[Dict], config: Optional[Dict] = None) -> KGState:
-    """批量处理语料的便捷函数"""
+async def process_corpus_streaming(
+    llm: Any,
+    corpus: Dict,
+    callback: Optional[Any] = None,
+    config: Optional[ExtractionConfig] = None
+):
+    """
+    P3改进：流式处理单条语料，支持实时进度回调
+
+    Args:
+        llm: LangChain LLM 实例
+        corpus: 语料字典 {"id": "...", "text": "..."}
+        callback: 进度回调函数，接收事件字典
+        config: ExtractionConfig 配置实例
+
+    Yields:
+        事件字典，包含 step, corpus_id, status 等字段
+    """
+    config = config or DEFAULT_CONFIG
+    workflow = build_corpus_workflow(llm, use_simplified_eval=config.use_simplified_eval)
+
+    corpus_id = _validate_corpus_id(corpus.get("id"))
+    raw_text = _validate_corpus_text(corpus.get("text", ""), config)
+
+    initial_state: CorpusState = {
+        "corpus_id": corpus_id,
+        "raw_text": raw_text,
+        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+        "triples": [],
+        "eval_scores": [],
+        "eval_passed": False,
+        "corrected_triples": [],
+        "entity_attrs": {},
+        "relation_attrs": {},
+        "current_step": StepEnum.NER,
+        "error": None,
+    }
+
+    thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+
+    # 使用 stream_mode=["updates", "custom"] 同时获取节点输出和自定义事件
+    async for event in workflow.astream(initial_state, thread_config, stream_mode=["custom"]):
+        event_type, event_data = event
+
+        # 调用回调函数
+        if callback:
+            try:
+                callback(event_data)
+            except Exception as e:
+                logger.warning(f"回调函数执行失败: {e}")
+
+        yield event_data
+
+    # 获取最终结果
+    final_state = await workflow.aget_state(thread_config)
+    yield {
+        "step": "final",
+        "corpus_id": corpus_id,
+        "status": "completed",
+        "result": final_state.values
+    }
+
+
+async def process_batch_streaming(
+    llm: Any,
+    corpus_list: List[Dict],
+    callback: Optional[Any] = None,
+    config: Optional[ExtractionConfig] = None
+):
+    """
+    P3改进：流式批量处理语料
+
+    Args:
+        llm: LangChain LLM 实例
+        corpus_list: 语料列表
+        callback: 进度回调函数
+        config: ExtractionConfig 配置实例
+
+    Yields:
+        事件字典
+    """
+    config = config or DEFAULT_CONFIG
+
+    for i, corpus in enumerate(corpus_list):
+        yield {
+            "step": "batch",
+            "status": "processing",
+            "current_index": i,
+            "total_count": len(corpus_list),
+            "corpus_id": corpus.get("id", f"unknown_{i}")
+        }
+
+        async for event in process_corpus_streaming(llm, corpus, callback, config):
+            yield event
+
+    yield {
+        "step": "batch",
+        "status": "completed",
+        "total_count": len(corpus_list)
+    }
+
+
+async def process_batch(
+    llm: Any,
+    corpus_list: List[Dict],
+    config: Optional[ExtractionConfig] = None
+) -> KGState:
+    """
+    批量处理语料的便捷函数
+
+    P2改进：使用 ExtractionConfig 支持配置化
+
+    Args:
+        llm: LangChain LLM 实例
+        corpus_list: 语料列表
+        config: ExtractionConfig 配置实例
+    """
+    config = config or DEFAULT_CONFIG
     workflow = build_distributed_workflow(llm, config)
 
     initial_state: KGState = {

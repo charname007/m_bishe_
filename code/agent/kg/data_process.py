@@ -400,11 +400,33 @@ class DataProcessor:
                     logger.debug(f"表 {self.table_name} 添加字段 {col}")
 
             # 创建索引 - 使用安全标识符
-            idx_name = f"idx_{self.table_name}_process_status"
+            # PostgreSQL 索引名最大 63 字符，需要截断处理
+            idx_base = f"idx_{self.table_name[:50]}_status"
             query = sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}({})").format(
-                sql.Identifier(idx_name),
+                sql.Identifier(idx_base),
                 self._table_id,
                 self._status_id
+            )
+            cur.execute(query)
+
+            # 创建复合索引优化查询性能
+            # 1. (process_status, process_retry_count) 用于失败重试查询
+            idx_retry = f"idx_{self.table_name[:45]}_retry"
+            query = sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}({}, {})").format(
+                sql.Identifier(idx_retry),
+                self._table_id,
+                self._status_id,
+                self._retry_count_id
+            )
+            cur.execute(query)
+
+            # 2. (process_status, locked_at) 用于超时检测查询
+            idx_timeout = f"idx_{self.table_name[:45]}_timeout"
+            query = sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}({}, {})").format(
+                sql.Identifier(idx_timeout),
+                self._table_id,
+                self._status_id,
+                self._locked_at_id
             )
             cur.execute(query)
 
@@ -699,10 +721,11 @@ class AsyncDataProcessor:
         table_name: str,
         batch_size: int = 100,
         max_retries: int = 3,
-        timeout_minutes: int = 10
+        timeout_minutes: int = 10,
+        pk_column: str = "id"
     ):
         self.processor = DataProcessor(
-            pg_client, table_name, batch_size, max_retries, timeout_minutes
+            pg_client, table_name, batch_size, max_retries, timeout_minutes, pk_column
         )
 
     def set_pipeline(self, pipeline: Pipeline) -> "AsyncDataProcessor":
@@ -712,8 +735,8 @@ class AsyncDataProcessor:
 
     async def _run_sync(self, func: Callable, *args) -> Any:
         """在线程池运行同步函数"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, func, *args)
+        # Python 3.9+ 推荐使用 to_thread
+        return await asyncio.to_thread(func, *args)
 
     async def run(self) -> Dict[str, int]:
         """异步运行处理"""
@@ -732,49 +755,66 @@ class AsyncDataProcessor:
         if not self.processor.pipeline:
             raise ValueError("未设置处理管道")
 
-        results = {"success": 0, "failed": 0}
+        # 使用线程安全的列表收集结果
+        worker_results: List[Dict[str, int]] = []
         active_workers = set()
 
         async def worker(worker_idx: int):
             worker_id = f"async_worker_{worker_idx}"
             active_workers.add(worker_id)
 
-            while True:
-                # 获取待处理数据
-                rows = await self._run_sync(
-                    self.processor.fetch_pending,
-                    None, worker_id
-                )
+            # 本地计数器，避免竞态条件
+            local_success = 0
+            local_failed = 0
 
-                if not rows:
-                    break
+            try:
+                while True:
+                    # 获取待处理数据
+                    rows = await self._run_sync(
+                        self.processor.fetch_pending,
+                        None, worker_id
+                    )
 
-                # 异步运行管道
-                contexts = await self.processor.pipeline.run_batch_async(rows)
+                    if not rows:
+                        break
 
-                # 分类结果
-                success_ids = [ctx.row['id'] for ctx in contexts if ctx.success]
-                failed_items = [(ctx.row['id'], ctx.error) for ctx in contexts if not ctx.success]
+                    # 异步运行管道
+                    contexts = await self.processor.pipeline.run_batch_async(rows)
 
-                # 更新状态
-                await self._run_sync(self.processor._mark_processed, success_ids)
-                await self._run_sync(self.processor._mark_failed, failed_items)
+                    # 分类结果
+                    pk_col = self.processor.pk_column
+                    success_ids = [ctx.row[pk_col] for ctx in contexts if ctx.success]
+                    failed_items = [(ctx.row[pk_col], ctx.error) for ctx in contexts if not ctx.success]
 
-                results["success"] += len(success_ids)
-                results["failed"] += len(failed_items)
+                    # 更新状态
+                    await self._run_sync(self.processor._mark_processed, success_ids)
+                    await self._run_sync(self.processor._mark_failed, failed_items)
 
-                logger.debug(
-                    f"[{worker_id}] 批次完成: 成功 {len(success_ids)}, 失败 {len(failed_items)}"
-                )
+                    # 更新本地计数器
+                    local_success += len(success_ids)
+                    local_failed += len(failed_items)
 
-            active_workers.discard(worker_id)
+                    logger.debug(
+                        f"[{worker_id}] 批次完成: 成功 {len(success_ids)}, 失败 {len(failed_items)}"
+                    )
+            finally:
+                active_workers.discard(worker_id)
+                # 返回本地计数结果
+                worker_results.append({
+                    "success": local_success,
+                    "failed": local_failed
+                })
 
         # 启动所有 worker
         tasks = [worker(i) for i in range(workers)]
         await asyncio.gather(*tasks)
 
-        logger.info(f"并发处理完成: 成功 {results['success']}, 失败 {results['failed']}")
-        return results
+        # 汇总所有 worker 的结果（无竞态条件）
+        total_success = sum(r["success"] for r in worker_results)
+        total_failed = sum(r["failed"] for r in worker_results)
+
+        logger.info(f"并发处理完成: 成功 {total_success}, 失败 {total_failed}")
+        return {"success": total_success, "failed": total_failed}
 
     def get_stats(self) -> Dict[str, int]:
         """获取处理统计"""
@@ -855,6 +895,10 @@ class FilterStep(ProcessStep):
     def should_process(self, ctx: ProcessContext) -> bool:
         return self.predicate(ctx.row)
 
+    def process(self, ctx: ProcessContext) -> None:
+        """过滤步骤本身不执行任何操作，仅通过 should_process 控制流程"""
+        pass
+
 
 class SkipStep(ProcessStep):
     """
@@ -883,24 +927,39 @@ class LogStep(ProcessStep):
         self,
         message: str = "",
         level: str = "info",
-        include_row: bool = False
+        include_row: bool = False,
+        pk_column: str = "id"
     ):
         """
         Args:
             message: 日志消息
             level: 日志级别 (debug/info/warning/error)
             include_row: 是否包含数据行信息
+            pk_column: 主键字段名，默认 "id"
         """
         self.message = message
         self.level = level
         self.include_row = include_row
+        self.pk_column = pk_column
 
     def process(self, ctx: ProcessContext) -> None:
         if self.include_row:
-            msg = f"{self.message} | id={ctx.row.get('id')}"
+            pk_value = ctx.row.get(self.pk_column, "unknown")
+            msg = f"{self.message} | {self.pk_column}={pk_value}"
         else:
-            msg = self.message or f"处理数据 id={ctx.row.get('id')}"
-        logger.log(self.level, msg)
+            pk_value = ctx.row.get(self.pk_column, "unknown")
+            msg = self.message or f"处理数据 {self.pk_column}={pk_value}"
+
+        # 使用 loguru 的方法而非 logger.log()
+        level_map = {
+            "debug": logger.debug,
+            "info": logger.info,
+            "warning": logger.warning,
+            "error": logger.error,
+            "critical": logger.critical,
+        }
+        log_func = level_map.get(self.level.lower(), logger.info)
+        log_func(msg)
 
 
 class CallbackStep(ProcessStep):

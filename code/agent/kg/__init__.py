@@ -20,7 +20,7 @@ from .data_process import (
     RecordToTextStep,
     BatchRecordsToTextStep,
     BatchTextCollector,
-    validate_table_name,
+    validate_identifier,
     sanitize_error_message
 )
 
@@ -43,6 +43,6 @@ __all__ = [
     "RecordToTextStep",
     "BatchRecordsToTextStep",
     "BatchTextCollector",
-    "validate_table_name",
+    "validate_identifier",
     "sanitize_error_message"
 ]

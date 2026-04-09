@@ -5,24 +5,41 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.agents.workflow import (
-    WorkflowConfig,
     _validate_corpus_text,
     _validate_corpus_id,
     _get_database_config,
     route_after_ner,
 )
+from agent.agents.config import ExtractionConfig, DEFAULT_CONFIG
 from agent.agents.state import CorpusState, StepEnum
 
 
-class TestWorkflowConfig:
-    """测试工作流配置"""
+class TestExtractionConfig:
+    """测试配置类"""
 
-    def test_config_values(self):
-        """配置值应该合理"""
-        assert WorkflowConfig.CORPUS_PER_WORKER > 0
-        assert WorkflowConfig.MAX_WORKERS > 0
-        assert 0 < WorkflowConfig.EVAL_PASSED_THRESHOLD <= 5
-        assert 0 < WorkflowConfig.DEFAULT_SIMILARITY_THRESHOLD <= 1
+    def test_default_values(self):
+        """默认配置值应该合理"""
+        config = ExtractionConfig()
+        assert config.corpus_per_worker > 0
+        assert config.max_workers > 0
+        assert 0 < config.eval_threshold <= 5
+        assert 0 < config.similarity_threshold <= 1
+
+    def test_from_dict(self):
+        """从字典加载配置"""
+        config = ExtractionConfig.from_dict({
+            "eval_threshold": 4.0,
+            "max_workers": 5
+        })
+        assert config.eval_threshold == 4.0
+        assert config.max_workers == 5
+
+    def test_to_dict(self):
+        """转换为字典"""
+        config = ExtractionConfig(eval_threshold=4.5)
+        d = config.to_dict()
+        assert d["eval_threshold"] == 4.5
+        assert "corpus_per_worker" in d
 
 
 class TestValidateCorpusText:
@@ -52,7 +69,7 @@ class TestValidateCorpusText:
         """长文本截断"""
         long_text = "测试" * 10000  # 20000字符
         result = _validate_corpus_text(long_text)
-        assert len(result) == WorkflowConfig.MAX_TEXT_LENGTH
+        assert len(result) == DEFAULT_CONFIG.max_text_length
 
 
 class TestValidateCorpusId:

@@ -1,5 +1,6 @@
 """
 Pydantic模型定义 - 用于LangChain with_structured_output
+P2改进：简化评估模型，单次评估返回评分+可选修正
 """
 from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
@@ -64,6 +65,14 @@ class EvalResultSecond(BaseModel):
     need_correction: bool = Field(description="是否需要修正")
     corrections: List[Correction] = Field(default_factory=list, description="修正列表")
     final_scores: List[TripleScore] = Field(default_factory=list, description="最终评分")
+
+
+# P2改进：简化的单次评估模型（合并评分和修正）
+class EvalResultSimplified(BaseModel):
+    """简化的单次评估结果 - 包含评分和可选修正"""
+    scores: List[TripleScore] = Field(default_factory=list, description="评分列表")
+    need_correction: bool = Field(default=False, description="是否需要修正")
+    corrections: List[Correction] = Field(default_factory=list, description="修正列表（仅当need_correction=True时有效）")
 
 
 # ===== Label阶段输出模型 =====

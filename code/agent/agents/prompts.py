@@ -1,5 +1,6 @@
 """
 四步骤智能体工作流提示词模板 - 使用LangChain ChatPromptTemplate
+P2改进：简化评估提示词，单次评估包含评分和修正
 """
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -126,6 +127,41 @@ EVAL_2_USER = """## 任务
 EVAL_PROMPT_2 = ChatPromptTemplate.from_messages([
     ("system", EVAL_2_SYSTEM),
     ("human", EVAL_2_USER),
+])
+
+
+# P2改进：简化的单次评估提示词（合并评分和修正）
+EVAL_SIMPLIFIED_SYSTEM = """你是一位"地理语义评审专家"。你的任务是评估三元组并在发现错误时直接修正。"""
+
+EVAL_SIMPLIFIED_USER = """## 评估维度
+- 语义准确性(SEM): 三元组是否准确代表了原文意思？（1-5分）
+- 事实真实性(FAC): 是否符合地理常识？（1-5分）
+- 一致性(CON): 关系方向是否正确？（1-5分）
+
+评分标准：
+- 5分: 完全正确
+- 4分: 基本正确，有小瑕疵
+- 3分: 可接受
+- 2分: 有问题，需要修正
+- 1分: 错误，必须修正
+
+## 修正规则
+如果评分低于3分，请在corrections中给出修正后的三元组：
+- 修正关系类型（如：将"位于"改为"属于")
+- 修正关系方向（如：将<A, 位于, B>改为<B, 位于, A>)
+- 删除无效三元组（如：幻觉、无依据）
+
+## 待评估三元组
+{triples}
+
+## 原始文本
+{raw_text}
+
+请输出评估结果（JSON格式），包含评分和可选修正。"""
+
+EVAL_PROMPT_SIMPLIFIED = ChatPromptTemplate.from_messages([
+    ("system", EVAL_SIMPLIFIED_SYSTEM),
+    ("human", EVAL_SIMPLIFIED_USER),
 ])
 
 
