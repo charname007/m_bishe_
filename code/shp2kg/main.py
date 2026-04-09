@@ -8,7 +8,7 @@ from loguru import logger
 
 from config import settings
 from agent.agents import DistributedKGWorkflow, CoordinatorConfig
-from agent.kg import Neo4jClient, PostgresClient
+from kg import Neo4jClient, PostgresClient
 
 
 def create_llm_client():

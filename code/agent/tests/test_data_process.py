@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
 
-from agent.kg.data_process import (
+from kg.data_process import (
     validate_identifier,
     sanitize_error_message,
     ProcessContext,

@@ -528,10 +528,8 @@ async def process_corpus_streaming(
 
     thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
 
-    # 使用 stream_mode=["updates", "custom"] 同时获取节点输出和自定义事件
-    async for event in workflow.astream(initial_state, thread_config, stream_mode=["custom"]):
-        event_type, event_data = event
-
+    # 使用 stream_mode="custom" 获取 StreamWriter 写入的自定义事件
+    async for event_data in workflow.astream(initial_state, thread_config, stream_mode="custom"):
         # 调用回调函数
         if callback:
             try:

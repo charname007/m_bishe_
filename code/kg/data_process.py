@@ -1171,7 +1171,7 @@ class BatchTextCollector:
 # ==================== 使用示例 ====================
 
 if __name__ == "__main__":
-    from agent.kg.postgres_client import PostgresClient
+    from kg.postgres_client import PostgresClient
 
     # 连接数据库
     pg = PostgresClient(

@@ -358,5 +358,7 @@ class TestLabelNode:
             "error": None,
         }
 
-        result = await label_node(state)
+        # P3改进：节点函数需要 StreamWriter 参数
+        mock_writer = MagicMock()
+        result = await label_node(state, mock_writer)
         assert result["current_step"] == StepEnum.DONE
