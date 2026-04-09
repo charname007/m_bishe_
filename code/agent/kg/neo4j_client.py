@@ -146,30 +146,145 @@ class Neo4jClient:
             return result.single() is not None
 
     def batch_merge_entities(self, entities: List[Dict]) -> Dict:
-        """批量合并实体"""
-        success_count = 0
-        for entity in entities:
-            try:
-                if self.merge_entity(entity):
-                    success_count += 1
-            except Exception as e:
-                logger.error(f"合并实体失败 {entity['name']}: {e}")
+        """
+        批量合并实体 - 使用 UNWIND 批量操作
 
-        logger.info(f"实体合并完成: {success_count}/{len(entities)}")
-        return {"merged": success_count, "total": len(entities)}
+        性能优化：单次 Cypher 查询处理所有实体，而非逐个处理
+        """
+        if not entities:
+            return {"merged": 0, "total": 0}
+
+        try:
+            with self.driver.session() as session:
+                # 准备批量数据
+                batch_data = [
+                    {
+                        "name": e["name"],
+                        "type": e.get("type", "Unknown"),
+                        "category": e.get("category", ""),
+                        "aliases": e.get("aliases", []),
+                        "corpus_ids": e.get("corpus_ids", [])
+                    }
+                    for e in entities
+                ]
+
+                # 使用 UNWIND 批量合并
+                result = session.run("""
+                    UNWIND $entities AS entity
+                    MERGE (e:Entity {name: entity.name})
+                    ON CREATE SET
+                        e.type = entity.type,
+                        e.category = entity.category,
+                        e.aliases = entity.aliases,
+                        e.corpus_ids = entity.corpus_ids,
+                        e.created_at = datetime(),
+                        e.source = 'xiaohongshu'
+                    ON MATCH SET
+                        e.aliases = CASE
+                            WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
+                            THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                            ELSE e.aliases
+                        END,
+                        e.corpus_ids = CASE
+                            WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
+                            THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                            ELSE e.corpus_ids
+                        END,
+                        e.updated_at = datetime()
+                    RETURN count(e) as merged_count
+                """, entities=batch_data)
+
+                record = result.single()
+                merged_count = record["merged_count"] if record else 0
+
+                logger.info(f"实体合并完成: {merged_count}/{len(entities)}")
+                return {"merged": merged_count, "total": len(entities)}
+        except Exception as e:
+            logger.error(f"批量合并实体失败: {e}")
+            # 降级为逐个处理
+            success_count = 0
+            for entity in entities:
+                try:
+                    if self.merge_entity(entity):
+                        success_count += 1
+                except Exception as inner_e:
+                    logger.error(f"合并实体失败 {entity['name']}: {inner_e}")
+            return {"merged": success_count, "total": len(entities)}
 
     def batch_merge_relations(self, triples: List[Dict]) -> Dict:
-        """批量合并关系"""
-        success_count = 0
-        for triple in triples:
-            try:
-                if self.merge_relation(triple):
-                    success_count += 1
-            except Exception as e:
-                logger.error(f"合并关系失败 {triple}: {e}")
+        """
+        批量合并关系 - 使用 UNWIND 批量操作
 
-        logger.info(f"关系合并完成: {success_count}/{len(triples)}")
-        return {"merged": success_count, "total": len(triples)}
+        性能优化：单次 Cypher 查询处理所有三元组
+        """
+        if not triples:
+            return {"merged": 0, "total": 0}
+
+        try:
+            with self.driver.session() as session:
+                # 准备批量数据
+                batch_data = [
+                    {
+                        "head": t["head"],
+                        "relation": t["relation"],
+                        "tail": t["tail"],
+                        "evidence": t.get("evidence", ""),
+                        "corpus_ids": t.get("corpus_ids", []),
+                        "relation_type": t.get("relation_type", ""),
+                        "relation_subtype": t.get("relation_subtype", "")
+                    }
+                    for t in triples
+                ]
+
+                # 使用 UNWIND 批量合并
+                result = session.run("""
+                    UNWIND $triples AS triple
+                    MERGE (h:Entity {name: triple.head})
+                    MERGE (t:Entity {name: triple.tail})
+                    MERGE (h)-[r:RELATION {type: triple.relation}]->(t)
+                    ON CREATE SET
+                        r.evidence = triple.evidence,
+                        r.corpus_ids = triple.corpus_ids,
+                        r.relation_type = triple.relation_type,
+                        r.relation_subtype = triple.relation_subtype,
+                        r.created_at = datetime(),
+                        r.source = 'xiaohongshu'
+                    ON MATCH SET
+                        r.corpus_ids = CASE
+                            WHEN triple.corpus_ids IS NOT NULL AND size(triple.corpus_ids) > 0
+                            THEN apoc.coll.toSet(r.corpus_ids + triple.corpus_ids)
+                            ELSE r.corpus_ids
+                        END,
+                        r.relation_type = CASE
+                            WHEN triple.relation_type IS NOT NULL AND triple.relation_type <> ''
+                            THEN triple.relation_type
+                            ELSE r.relation_type
+                        END,
+                        r.relation_subtype = CASE
+                            WHEN triple.relation_subtype IS NOT NULL AND triple.relation_subtype <> ''
+                            THEN triple.relation_subtype
+                            ELSE r.relation_subtype
+                        END,
+                        r.updated_at = datetime()
+                    RETURN count(r) as merged_count
+                """, triples=batch_data)
+
+                record = result.single()
+                merged_count = record["merged_count"] if record else 0
+
+                logger.info(f"关系合并完成: {merged_count}/{len(triples)}")
+                return {"merged": merged_count, "total": len(triples)}
+        except Exception as e:
+            logger.error(f"批量合并关系失败: {e}")
+            # 降级为逐个处理
+            success_count = 0
+            for triple in triples:
+                try:
+                    if self.merge_relation(triple):
+                        success_count += 1
+                except Exception as inner_e:
+                    logger.error(f"合并关系失败 {triple}: {inner_e}")
+            return {"merged": success_count, "total": len(triples)}
 
     def query_entity(self, name: str) -> Optional[Dict]:
         """查询实体"""

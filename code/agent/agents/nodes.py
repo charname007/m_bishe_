@@ -10,8 +10,6 @@ from typing import Dict, List, Any, Optional
 
 from loguru import logger
 
-from langchain_core.messages import HumanMessage
-
 from .state import CorpusState, KGState, PhaseEnum, StepEnum
 from .schemas import (
     EntityRecognitionResult,
@@ -122,32 +120,36 @@ def create_eval_1_node(llm: Any):
             logger.debug(f"[Eval1] 无三元组，跳过")
             return {"eval_scores": [], "current_step": StepEnum.LABEL}
 
-        # 使用ChatPromptTemplate生成消息
-        messages = EVAL_PROMPT_1.invoke({
-            "triples": state["triples"],
-            "raw_text": state["raw_text"],
-        })
+        try:
+            # 使用ChatPromptTemplate生成消息
+            messages = EVAL_PROMPT_1.invoke({
+                "triples": state["triples"],
+                "raw_text": state["raw_text"],
+            })
 
-        # 调用LLM获取结构化输出（异步）
-        result: EvalResultFirst = await structured_llm.ainvoke(messages)
+            # 调用LLM获取结构化输出（异步）
+            result: EvalResultFirst = await structured_llm.ainvoke(messages)
 
-        scores = [
-            {
-                "triple": {
-                    "head": s.triple.head,
-                    "relation": s.triple.relation,
-                    "tail": s.triple.tail,
-                },
-                "SEM": s.SEM,
-                "FAC": s.FAC,
-                "CON": s.CON,
-            }
-            for s in result.scores
-        ]
+            scores = [
+                {
+                    "triple": {
+                        "head": s.triple.head,
+                        "relation": s.triple.relation,
+                        "tail": s.triple.tail,
+                    },
+                    "SEM": s.SEM,
+                    "FAC": s.FAC,
+                    "CON": s.CON,
+                }
+                for s in result.scores
+            ]
 
-        logger.debug(f"[Eval1] 结果: {len(scores)}个评分")
+            logger.debug(f"[Eval1] 结果: {len(scores)}个评分")
 
-        return {"eval_scores": scores, "current_step": StepEnum.EVAL}
+            return {"eval_scores": scores, "current_step": StepEnum.EVAL}
+        except Exception as e:
+            logger.error(f"[Eval1] 失败: {e}")
+            return {"eval_scores": [], "error": str(e), "current_step": StepEnum.EVAL}
 
     return eval_1_node
 
@@ -177,86 +179,95 @@ def create_eval_2_node(llm: Any):
                 "current_step": StepEnum.LABEL,
             }
 
-        # 使用ChatPromptTemplate生成消息
-        messages = EVAL_PROMPT_2.invoke({
-            "previous_scores": state["eval_scores"],
-            "raw_text": state["raw_text"],
-        })
+        try:
+            # 使用ChatPromptTemplate生成消息
+            messages = EVAL_PROMPT_2.invoke({
+                "previous_scores": state["eval_scores"],
+                "raw_text": state["raw_text"],
+            })
 
-        # 调用LLM获取结构化输出（异步）
-        result: EvalResultSecond = await structured_llm.ainvoke(messages)
+            # 调用LLM获取结构化输出（异步）
+            result: EvalResultSecond = await structured_llm.ainvoke(messages)
 
-        # 更新评分
-        final_scores = [
-            {
-                "triple": {
-                    "head": s.triple.head,
-                    "relation": s.triple.relation,
-                    "tail": s.triple.tail,
-                },
-                "SEM": s.SEM,
-                "FAC": s.FAC,
-                "CON": s.CON,
+            # 更新评分
+            final_scores = [
+                {
+                    "triple": {
+                        "head": s.triple.head,
+                        "relation": s.triple.relation,
+                        "tail": s.triple.tail,
+                    },
+                    "SEM": s.SEM,
+                    "FAC": s.FAC,
+                    "CON": s.CON,
+                }
+                for s in result.final_scores
+            ] if result.final_scores else state["eval_scores"]
+
+            # 创建评分查找字典
+            score_map = {}
+            for score_item in final_scores:
+                triple_key = (
+                    score_item["triple"]["head"],
+                    score_item["triple"]["relation"],
+                    score_item["triple"]["tail"],
+                )
+                score_map[triple_key] = {
+                    "sem_score": score_item["SEM"],
+                    "fac_score": score_item["FAC"],
+                    "con_score": score_item["CON"],
+                }
+
+            # 应用修正
+            correction_mapping = {}
+            if result.need_correction and result.corrections:
+                corrected_triples, correction_mapping = apply_corrections(state["triples"], result.corrections)
+            else:
+                corrected_triples = state["triples"]
+
+            # 将评分写入三元组
+            passed_threshold = 3.5
+            for triple in corrected_triples:
+                triple_key = (triple["head"], triple["relation"], triple["tail"])
+                scores_for_triple = score_map.get(triple_key)
+
+                # 如果新三元组没有直接评分，尝试从原始三元组继承
+                if not scores_for_triple and triple_key in correction_mapping:
+                    original_key = correction_mapping[triple_key]
+                    scores_for_triple = score_map.get(original_key, {})
+
+                if not scores_for_triple:
+                    scores_for_triple = {}
+
+                triple["sem_score"] = scores_for_triple.get("sem_score", 0)
+                triple["fac_score"] = scores_for_triple.get("fac_score", 0)
+                triple["con_score"] = scores_for_triple.get("con_score", 0)
+                # 计算该三元组的平均评分并设置 passed_eval
+                avg_triple_score = (triple["sem_score"] + triple["fac_score"] + triple["con_score"]) / 3
+                triple["passed_eval"] = avg_triple_score >= passed_threshold if avg_triple_score > 0 else False
+
+            # 计算平均评分判断是否通过
+            avg_score = sum(
+                s["SEM"] + s["FAC"] + s["CON"]
+                for s in final_scores
+            ) / (len(final_scores) * 3) if final_scores else 0
+
+            logger.debug(f"[Eval2] 平均评分: {avg_score}, 需修正: {result.need_correction}")
+
+            return {
+                "eval_scores": final_scores,
+                "corrected_triples": corrected_triples,
+                "eval_passed": avg_score >= 3.5,
+                "current_step": StepEnum.LABEL,
             }
-            for s in result.final_scores
-        ] if result.final_scores else state["eval_scores"]
-
-        # 创建评分查找字典
-        score_map = {}
-        for score_item in final_scores:
-            triple_key = (
-                score_item["triple"]["head"],
-                score_item["triple"]["relation"],
-                score_item["triple"]["tail"],
-            )
-            score_map[triple_key] = {
-                "sem_score": score_item["SEM"],
-                "fac_score": score_item["FAC"],
-                "con_score": score_item["CON"],
+        except Exception as e:
+            logger.error(f"[Eval2] 失败: {e}")
+            return {
+                "corrected_triples": state["triples"],
+                "eval_passed": False,
+                "error": str(e),
+                "current_step": StepEnum.LABEL,
             }
-
-        # 应用修正
-        correction_mapping = {}
-        if result.need_correction and result.corrections:
-            corrected_triples, correction_mapping = apply_corrections(state["triples"], result.corrections)
-        else:
-            corrected_triples = state["triples"]
-
-        # 将评分写入三元组
-        passed_threshold = 3.5
-        for triple in corrected_triples:
-            triple_key = (triple["head"], triple["relation"], triple["tail"])
-            scores_for_triple = score_map.get(triple_key)
-
-            # 如果新三元组没有直接评分，尝试从原始三元组继承
-            if not scores_for_triple and triple_key in correction_mapping:
-                original_key = correction_mapping[triple_key]
-                scores_for_triple = score_map.get(original_key, {})
-
-            if not scores_for_triple:
-                scores_for_triple = {}
-
-            triple["sem_score"] = scores_for_triple.get("sem_score", 0)
-            triple["fac_score"] = scores_for_triple.get("fac_score", 0)
-            triple["con_score"] = scores_for_triple.get("con_score", 0)
-            # 计算该三元组的平均评分并设置 passed_eval
-            avg_triple_score = (triple["sem_score"] + triple["fac_score"] + triple["con_score"]) / 3
-            triple["passed_eval"] = avg_triple_score >= passed_threshold if avg_triple_score > 0 else False
-
-        # 计算平均评分判断是否通过
-        avg_score = sum(
-            s["SEM"] + s["FAC"] + s["CON"]
-            for s in final_scores
-        ) / (len(final_scores) * 3) if final_scores else 0
-
-        logger.debug(f"[Eval2] 平均评分: {avg_score}, 需修正: {result.need_correction}")
-
-        return {
-            "eval_scores": final_scores,
-            "corrected_triples": corrected_triples,
-            "eval_passed": avg_score >= 3.5,
-            "current_step": StepEnum.LABEL,
-        }
 
     return eval_2_node
 
@@ -502,7 +513,7 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
 
     使用阻塞（blocking）策略优化相似度比较：
     1. 按首字符分组，只比较同组内的实体
-    2. 额外处理简称别名（可能跨组）
+    2. 预构建长度索引，优化跨 block 简称检查
     """
     unique_entities = []
     aliases = {}
@@ -521,6 +532,15 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
             block_key = name[0].lower() if name else ''
             blocks[block_key].append(name)
 
+    # 预构建长度索引：按长度分组，用于简称检查优化
+    length_index: Dict[int, List[str]] = defaultdict(list)
+    for name in entity_names:
+        if name:
+            length_index[len(name)].append(name)
+
+    # 获取所有可能的长度范围（用于简称检查）
+    all_lengths = sorted(length_index.keys())
+
     def find_similar_in_block(name: str, block: List[str]) -> List[str]:
         """在单个block内查找相似实体"""
         similar = []
@@ -530,25 +550,51 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
                     similar.append(other)
         return similar
 
+    def find_abbreviation_candidates(name: str, name_len: int) -> List[str]:
+        """
+        查找可能的简称别名（跨 block）
+        优化：只检查长度差异在合理范围内的实体
+        """
+        candidates = []
+        # 简称检查：较短名称是较长名称的子串，且长度比例 >= 0.4
+        min_ratio = 0.4
+
+        # 如果 name 是较短名称，查找包含它的较长名称
+        min_longer_len = int(name_len / min_ratio) + 1
+        for length in all_lengths:
+            if length > name_len and length <= min_longer_len:
+                for other in length_index[length]:
+                    if other != name and other not in processed:
+                        if name in other:
+                            candidates.append(other)
+
+        # 如果 name 是较长名称，查找包含在其中的较短名称
+        max_shorter_len = int(name_len * min_ratio)
+        for length in all_lengths:
+            if length < name_len and length >= max_shorter_len:
+                for other in length_index[length]:
+                    if other != name and other not in processed:
+                        if other in name:
+                            candidates.append(other)
+
+        return candidates
+
     # 按block处理，减少比较次数
     for block_key, block_names in blocks.items():
         for name in block_names:
             if name in processed:
                 continue
 
+            name_len = len(name)
+
             # 在同block内查找相似实体
             similar_names = [name] + find_similar_in_block(name, block_names)
 
-            # 额外检查：简称别名可能跨block（如"武大"和"武汉大学"）
-            # 只检查长度差异大的情况
-            for other_name in entity_names:
-                if other_name != name and other_name not in processed:
-                    # 简称检查：较短名称是较长名称的子串
-                    if len(name) != len(other_name):
-                        shorter, longer = (name, other_name) if len(name) < len(other_name) else (other_name, name)
-                        if shorter in longer and len(shorter) >= len(longer) * 0.4:
-                            if other_name not in similar_names:
-                                similar_names.append(other_name)
+            # 跨 block 简称检查（使用长度索引优化）
+            abbreviation_candidates = find_abbreviation_candidates(name, name_len)
+            for other in abbreviation_candidates:
+                if other not in similar_names:
+                    similar_names.append(other)
 
             for n in similar_names:
                 processed.add(n)

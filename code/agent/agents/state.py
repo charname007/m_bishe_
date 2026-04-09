@@ -110,12 +110,6 @@ class KGState(TypedDict):
     aggregated_entities: Annotated[List[Dict], replace_value]
     aggregated_triples: Annotated[List[Dict], replace_value]
     entity_aliases: Annotated[Dict[str, List[str]], replace_value]
-    cross_corpus_relations: Annotated[List[Dict], merge_list]
-
-    # ===== EVALUATE阶段：质量评估 =====
-    evaluator_results: Annotated[List[Dict], merge_list]
-    high_confidence_triples: Annotated[List[Dict], merge_list]
-    low_confidence_triples: Annotated[List[Dict], merge_list]
 
     # ===== FINALIZE阶段：结果输出 =====
     neo4j_stats: Annotated[Dict, replace_value]
@@ -129,7 +123,6 @@ class KGState(TypedDict):
     # ===== 元数据 =====
     start_time: Annotated[float, replace_value]
     end_time: Annotated[Optional[float], replace_value]
-    total_tokens: Annotated[int, replace_value]
 
 
 # ===== 实体/关系类型定义 =====

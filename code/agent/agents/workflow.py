@@ -3,6 +3,7 @@ LangGraph工作流定义 - 使用StateGraph构建知识图谱抽取工作流
 """
 import asyncio
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, cast
@@ -73,7 +74,6 @@ def _validate_corpus_text(text: str) -> str:
 
     # 移除危险字符（防止注入攻击）
     # 保留中文、英文、数字、标点符号
-    import re
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
 
     return text
@@ -457,10 +457,6 @@ async def process_batch(llm: Any, corpus_list: List[Dict], config: Optional[Dict
         "aggregated_entities": [],
         "aggregated_triples": [],
         "entity_aliases": {},
-        "cross_corpus_relations": [],
-        "evaluator_results": [],
-        "high_confidence_triples": [],
-        "low_confidence_triples": [],
         "neo4j_stats": {},
         "postgres_stats": {},
         "current_phase": PhaseEnum.INIT,
@@ -468,7 +464,6 @@ async def process_batch(llm: Any, corpus_list: List[Dict], config: Optional[Dict
         "failed_workers": [],
         "start_time": time.time(),
         "end_time": None,
-        "total_tokens": 0,
     }
 
     # 使用唯一 thread_id 避免状态串扰

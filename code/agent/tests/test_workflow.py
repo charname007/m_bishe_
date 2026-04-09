@@ -45,7 +45,7 @@ class TestValidateCorpusText:
 
     def test_whitespace_only_raises(self):
         """仅空白字符抛出异常"""
-        with pytest.raises(ValueError, match="不能为空"):
+        with pytest.raises(ValueError, match="长度不足"):
             _validate_corpus_text("   ")
 
     def test_truncates_long_text(self):
@@ -146,7 +146,8 @@ class TestRouteAfterNer:
             "error": "Something went wrong",
         }
         result = route_after_ner(state)
-        assert result == "END"
+        # LangGraph END 常量实际值是 "__end__"
+        assert result == "__end__"
 
     def test_routes_to_end_on_done(self):
         """DONE状态路由到END"""
@@ -164,4 +165,5 @@ class TestRouteAfterNer:
             "error": None,
         }
         result = route_after_ner(state)
-        assert result == "END"
+        # LangGraph END 常量实际值是 "__end__"
+        assert result == "__end__"

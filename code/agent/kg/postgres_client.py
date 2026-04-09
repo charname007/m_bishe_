@@ -1,6 +1,7 @@
 """
 PostgreSQL 关系数据库客户端
 """
+import json
 import psycopg2
 from psycopg2.extras import execute_values
 from typing import Dict, List, Optional, Any
@@ -114,7 +115,9 @@ class PostgresClient:
             # triples 表新增 relation_type 和 relation_subtype 列
             cur.execute("""
                 SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'triples' AND column_name IN ('relation_type', 'relation_subtype')
+                WHERE table_name = 'triples'
+                AND table_schema = CURRENT_SCHEMA()
+                AND column_name IN ('relation_type', 'relation_subtype')
             """)
             existing_columns = [row[0] for row in cur.fetchall()]
             if 'relation_type' not in existing_columns:
@@ -213,10 +216,9 @@ class PostgresClient:
     def insert_corpus_sources(self, batch_id: str,
                               corpus_states: List[Any]) -> int:
         """插入语料来源"""
-        import json
-
         with self.conn.cursor() as cur:
             for state in corpus_states:
+                # 使用 .get() 防止 KeyError，兼容失败语料
                 cur.execute("""
                     INSERT INTO corpus_sources
                     (corpus_id, batch_id, raw_text, entities, triples)
@@ -227,11 +229,11 @@ class PostgresClient:
                         entities = EXCLUDED.entities,
                         triples = EXCLUDED.triples
                 """, (
-                    state["corpus_id"],
+                    state.get("corpus_id", "unknown"),
                     batch_id,
-                    state["raw_text"],
-                    json.dumps(state["entities"], ensure_ascii=False),
-                    json.dumps(state["triples"], ensure_ascii=False)
+                    state.get("raw_text", ""),
+                    json.dumps(state.get("entities", {}), ensure_ascii=False),
+                    json.dumps(state.get("triples", []), ensure_ascii=False)
                 ))
 
             self.conn.commit()
