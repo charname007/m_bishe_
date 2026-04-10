@@ -21,15 +21,15 @@ class Settings:
         self.NEO4J_URI = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
         self.NEO4J_URL = os.getenv('NEO4J_URL')  # 兼容旧配置
         self.NEO4J_USER = os.getenv('NEO4J_USER', 'neo4j')
-        self.NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD')
-        self.NEO4J_DATABASE = os.getenv('NEO4J_DATABASE', 'neo4j')
+        self.NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD',default='cznb6666')
+        self.NEO4J_DATABASE = os.getenv('NEO4J_DATABASE', 'bishe')
 
         # ===== PostgreSQL 关系数据库配置 =====
         self.PG_HOST = os.getenv('PG_HOST', 'localhost')
         self.PG_PORT = int(os.getenv('PG_PORT', '5432'))
-        self.PG_DATABASE = os.getenv('PG_DATABASE', 'geokg')
-        self.PG_USER = os.getenv('PG_USER', 'postgres')
-        self.PG_PASSWORD = os.getenv('PG_PASSWORD')
+        self.PG_DATABASE = os.getenv('PG_DATABASE', 'bishe')
+        self.PG_USER = os.getenv('PG_USER', 'cznb6666')
+        self.PG_PASSWORD = os.getenv('PG_PASSWORD', 'cznb6666')
 
         # ===== 文件路径配置 =====
         self.SHPFILES_DIR = os.getenv('SHPFILES_DIR', './shpfiles')

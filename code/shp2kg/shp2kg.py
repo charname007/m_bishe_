@@ -8,29 +8,28 @@ import geopandas as gpd
 import numpy as np
 from scipy.spatial import Delaunay
 from shapely.geometry import Point, LineString, Polygon, MultiPolygon
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, transform
 import networkx as nx
 import matplotlib.pyplot as plt
-from collections import defaultdict
+from collections import defaultdict, Counter
 import json
 import warnings
 import sys
+import os
 from loguru import logger
+from pyproj import Transformer
+from rtree import index
+
 try:
     from config import settings
 except ImportError:
     # 如果没有 config 模块，使用默认配置
     class MockSettings:
         DEBUG = False
+        NEO4J_URI = 'bolt://localhost:7687'
+        NEO4J_USER = 'neo4j'
+        NEO4J_PASSWORD = 'password'
     settings = MockSettings()
-from shapely.ops import transform
-
-import numpy as np
-from pyproj import Transformer
-from shapely.ops import transform
-from scipy.spatial import Delaunay
-from rtree import index
-from collections import Counter
 
 warnings.filterwarnings('ignore')
 
@@ -53,7 +52,6 @@ logger.add(
 )
 
 # 文件日志（自动创建 logs 目录）
-import os
 log_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(log_dir, exist_ok=True)
 logger.add(
@@ -163,7 +161,7 @@ class GeoEntityLoader:
         for shp, name, etype in zip(shp_list, name_list, type_list):
             self.load_shp(shp, etype, name)
 
-        print(f"\n[总计] 加载实体: {len(self.entities)} 个")
+        logger.info(f"[总计] 加载实体: {len(self.entities)} 个")
         return self.entities
     
     def all_entities_names(self):
@@ -188,644 +186,6 @@ class GeoEntityLoader:
 # ============================================================
 # 第二部分：空间关系计算（核心！）
 # ============================================================
-
-# class SpatialRelationCalculator:
-#     """空间关系计算器 —— 拓扑 + 距离 + 方向 + 三角网近邻"""
-
-#     def __init__(self, entities, distance_threshold=500):
-#         """
-#         :param entities: 实体字典
-#         :param distance_threshold: 近邻距离阈值(米)
-#         """
-#         self.entities = entities
-#         self.distance_threshold = distance_threshold
-#         self.relations = []  # [(head_id, relation, tail_id, properties)]
-
-#     # ----- 2.1 拓扑关系（基于DE-9IM模型）-----
-#     def calc_topological_relations(self):
-#         """
-#         计算拓扑关系：包含、相交、相邻
-#         重点：
-#           - 街区 包含 建筑物/POI
-#           - 道路 穿过 街区
-#           - 建筑物 临近 道路
-#         """
-#         print("\n[拓扑关系] 计算中...")
-#         entity_list = list(self.entities.values())
-#         n = len(entity_list)
-
-#         # 建立空间索引加速
-#         from rtree import index
-#         idx = index.Index()
-#         for i, ent in enumerate(entity_list):
-#             idx.insert(i, ent['geometry'].bounds)
-
-#         relation_count = 0
-
-#         for i, ent_a in enumerate(entity_list):
-#             # 用空间索引筛选候选
-#             candidates = list(idx.intersection(
-#                 ent_a['geometry'].buffer(0.001).bounds))
-
-#             for j in candidates:
-#                 if j <= i:
-#                     continue
-#                 ent_b = entity_list[j]
-
-#                 geom_a = ent_a['geometry']
-#                 geom_b = ent_b['geometry']
-
-#                 try:
-#                     # ---- 包含关系 ----
-#                     if geom_a.contains(geom_b):
-#                         self.relations.append((
-#                             ent_a['id'], 'contains', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         self.relations.append((
-#                             ent_b['id'], 'within', ent_a['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 2
-
-#                     elif geom_b.contains(geom_a):
-#                         self.relations.append((
-#                             ent_b['id'], 'contains', ent_a['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         self.relations.append((
-#                             ent_a['id'], 'within', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 2
-
-#                     # ---- 相交关系 ----
-#                     elif geom_a.intersects(geom_b):
-#                         # 道路穿过街区
-#                         if ent_a['type'] == 'road' and ent_b['type'] == 'block':
-#                             self.relations.append((
-#                                 ent_a['id'], 'passes_through', ent_b['id'],
-#                                 {'relation_type': 'topological'}
-#                             ))
-#                         elif ent_b['type'] == 'road' and ent_a['type'] == 'block':
-#                             self.relations.append((
-#                                 ent_b['id'], 'passes_through', ent_a['id'],
-#                                 {'relation_type': 'topological'}
-#                             ))
-#                         else:
-#                             self.relations.append((
-#                                 ent_a['id'], 'intersects', ent_b['id'],
-#                                 {'relation_type': 'topological'}
-#                             ))
-#                         relation_count += 1
-
-#                     # ---- 相邻关系（共享边界）----
-#                     elif geom_a.touches(geom_b):
-#                         self.relations.append((
-#                             ent_a['id'], 'adjacent_to', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 1
-
-#                 except Exception as e:
-#                     continue
-
-#         print(f"  → 拓扑关系: {relation_count} 条")
-
-#     # ----- 2.2 Delaunay三角网近邻关系（重点！）-----
-#     def calc_delaunay_neighbors(self):
-#         """
-#         使用Delaunay三角剖分计算空间近邻关系
-
-#         原理：
-#         1. 提取所有实体质心坐标
-#         2. 构建Delaunay三角网
-#         3. 三角网中共享边的实体即为"空间近邻"
-#         4. 过滤距离过远的近邻（阈值控制）
-
-#         ┌──────────────────────────────────────┐
-#         │  为什么用三角网而不是KNN?              │
-#         │  - 三角网保证无交叉、覆盖凸包          │
-#         │  - 自动适应密度变化                    │
-#         │  - 数学性质好（最大化最小角）           │
-#         │  - 生成的邻居关系更符合地理直觉         │
-#         └──────────────────────────────────────┘
-#         """
-#         print("\n[三角网近邻] 构建Delaunay三角网...")
-
-#         # Step 1: 提取所有质心
-#         entity_ids = list(self.entities.keys())
-#         points = np.array([self.entities[eid]['centroid_coords']
-#                           for eid in entity_ids])
-
-#         if len(points) < 3:
-#             print("  → 实体数量不足3个，无法构建三角网")
-#             return
-
-#         # Step 2: 构建Delaunay三角网
-#         tri = Delaunay(points)
-#         print(f"  → 三角形数量: {len(tri.simplices)}")
-
-#         # Step 3: 提取三角网的边（即近邻对）
-#         neighbor_pairs = set()
-#         for simplex in tri.simplices:
-#             # 每个三角形有3条边 → 3对近邻
-#             for k in range(3):
-#                 i = simplex[k]
-#                 j = simplex[(k + 1) % 3]
-#                 pair = (min(i, j), max(i, j))
-#                 neighbor_pairs.add(pair)
-
-#         print(f"  → 候选近邻对: {len(neighbor_pairs)}")
-
-#         # Step 4: 过滤并生成关系
-#         relation_count = 0
-
-#         # 转投影坐标系计算真实距离（米）
-#         # 武汉大约在 EPSG:32649 (UTM Zone 49N)
-#         from pyproj import Transformer
-#         transformer = Transformer.from_crs(
-#             "EPSG:4326", "EPSG:32649", always_xy=True)
-
-#         # for i, j in neighbor_pairs:
-#         #     eid_a = entity_ids[i]
-#         #     eid_b = entity_ids[j]
-
-
-#         #     # 计算真实距离（米）
-#         #     xa, ya = points[i]
-#         #     xb, yb = points[j]
-#         #     xa_m, ya_m = transformer.transform(xa, ya)
-#         #     xb_m, yb_m = transformer.transform(xb, yb)
-#         #     distance = np.sqrt((xa_m - xb_m) ** 2 + (ya_m - yb_m) ** 2)
-#         points_m = np.array([transformer.transform(lon, lat) for lon, lat in points])
-
-#         for i, j in neighbor_pairs:
-#             distance = np.linalg.norm(points_m[i] - points_m[j])
-#             # 距离阈值过滤
-#             if distance <= self.distance_threshold:
-#                 self.relations.append((
-#                     eid_a, 'near', eid_b,
-#                     {
-#                         'relation_type': 'proximity',
-#                         'distance_m': round(distance, 2),
-#                         'method': 'delaunay'
-#                     }
-#                 ))
-#                 relation_count += 1
-
-#         print(f"  → 近邻关系（≤{self.distance_threshold}m）: {relation_count} 条")
-
-#         # 保存三角网供可视化
-#         self._delaunay_tri = tri
-#         self._delaunay_points = points
-#         self._delaunay_ids = entity_ids
-
-#     # ----- 2.3 方向关系 -----
-#     def calc_direction_relations(self, only_for='near'):
-#         """
-#         计算方向关系（八方向模型）
-#         只对已有近邻关系的实体对计算方向
-#         """
-#         print("\n[方向关系] 计算中...")
-
-#         # 收集已有near关系的实体对
-#         near_pairs = [(r[0], r[2]) for r in self.relations if r[1] == 'near']
-
-#         from pyproj import Transformer
-#         transformer = Transformer.from_crs(
-#             "EPSG:4326", "EPSG:32649", always_xy=True)
-
-#         direction_count = 0
-#         for eid_a, eid_b in near_pairs:
-#             ca = self.entities[eid_a]['centroid_coords']
-#             cb = self.entities[eid_b]['centroid_coords']
-
-#             # 投影坐标
-#             xa, ya = transformer.transform(ca[0], ca[1])
-#             xb, yb = transformer.transform(cb[0], cb[1])
-
-#             dx = xb - xa
-#             dy = yb - ya
-
-#             # 计算角度（北为0°，顺时针）
-#             angle = np.degrees(np.arctan2(dx, dy)) % 360
-
-#             # 八方向
-#             direction = self._angle_to_direction(angle)
-
-#             self.relations.append((
-#                 eid_a, f'{direction}_of', eid_b,
-#                 {
-#                     'relation_type': 'directional',
-#                     'angle': round(angle, 1)
-#                 }
-#             ))
-#             direction_count += 1
-
-#         print(f"  → 方向关系: {direction_count} 条")
-
-#     @staticmethod
-#     def _angle_to_direction(angle):
-#         """角度转八方向"""
-#         directions = [
-#             (337.5, 360, 'south'), (0, 22.5, 'south'),
-#             (22.5, 67.5, 'southwest'),
-#             (67.5, 112.5, 'west'),
-#             (112.5, 157.5, 'northwest'),
-#             (157.5, 202.5, 'north'),
-#             (202.5, 247.5, 'northeast'),
-#             (247.5, 292.5, 'east'),
-#             (292.5, 337.5, 'southeast'),
-#         ]
-#         for low, high, d in directions:
-#             if low <= angle < high:
-#                 return d
-#         return 'north'
-
-#     # ----- 2.4 语义关系（基于属性推断）-----
-#     def calc_semantic_relations(self):
-#         """根据属性推断语义关系"""
-#         print("\n[语义关系] 推断中...")
-#         count = 0
-
-#         # POI 属于某类型 (本体层关系)
-#         for eid, ent in self.entities.items():
-#             if ent['type'] == 'poi':
-#                 poi_type = ent['attributes'].get(
-#                     'type', ent['attributes'].get('fclass', ''))
-#                 if poi_type:
-#                     self.relations.append((
-#                         eid, 'has_category', f"category_{poi_type}",
-#                         {'relation_type': 'semantic', 'category': poi_type}
-#                     ))
-#                     count += 1
-
-#             # 道路等级
-#             if ent['type'] == 'road':
-#                 road_level = ent['attributes'].get('fclass',
-#                                                    ent['attributes'].get('highway', ''))
-#                 if road_level:
-#                     self.relations.append((
-#                         eid, 'has_road_level', f"level_{road_level}",
-#                         {'relation_type': 'semantic', 'level': road_level}
-#                     ))
-#                     count += 1
-
-#         print(f"  → 语义关系: {count} 条")
-
-#     def compute_all(self):
-#         """计算所有空间关系"""
-#         self.calc_topological_relations()
-#         self.calc_delaunay_neighbors()
-#         self.calc_direction_relations()
-#         self.calc_semantic_relations()
-
-#         print(f"\n{'='*50}")
-#         print(f"[总计] 关系总数: {len(self.relations)} 条")
-
-#         # 统计各类型
-#         type_count = defaultdict(int)
-#         for r in self.relations:
-#             type_count[r[1]] += 1
-#         for rtype, cnt in sorted(type_count.items(), key=lambda x: -x[1]):
-#             print(f"  {rtype}: {cnt}")
-
-#         return self.relations
-
-# class SpatialRelationCalculator:
-#     """空间关系计算器（改进版）"""
-
-#     def __init__(self, entities, distance_threshold=500,
-#                  src_crs="EPSG:4326", auto_proj_crs=True,poi_type_field='amenity', road_level_field='highway'):
-#         self.entities = entities
-#         self.distance_threshold = distance_threshold
-#         self.relations = []
-#         self.poi_type_field = poi_type_field
-#         self.road_level_field = road_level_field
-
-#         # ✅ 改进：自动计算投影坐标系
-#         if auto_proj_crs:
-#             center_lon = np.mean([e['centroid_coords'][0]
-#                                  for e in entities.values()])
-#             zone = int((center_lon + 180) / 6) + 1
-#             is_southern = np.mean([e['centroid_coords'][1]
-#                                   for e in entities.values()]) < 0
-#             dst_crs = f"EPSG:{32700 + zone if is_southern else 32600 + zone}"
-#             print(f"[坐标系] 自动选择: {dst_crs}")
-
-#         from pyproj import Transformer
-
-#         self.transformer = Transformer.from_crs(
-#             src_crs, dst_crs, always_xy=True)
-
-#         # ✅ 预计算投影坐标
-#         self._prepare_projected_coords()
-
-#     def _prepare_projected_coords(self):
-#         """预计算所有点的投影坐标及投影几何"""
-#         self.proj_coords = {}
-#         self.proj_geometries = {} # 新增：存储投影后的几何对象
-
-#         for eid, ent in self.entities.items():
-#             lon, lat = ent['centroid_coords']
-#             x, y = self.transformer.transform(lon, lat)
-#             self.proj_coords[eid] = np.array([x, y])
-
-#             # ✅ 关键修改：投影几何对象
-#             # 注意：如果geometry很复杂，这一步会比较耗时，但为了保证准确性是必须的
-#             self.proj_geometries[eid] = transform(self.transformer.transform, ent['geometry'])
-
-#     def calc_topological_relations(self):
-#         """✅ 保持原有逻辑，只添加容差处理"""
-#         print("\n[拓扑关系] 计算中...")
-#         from rtree import index
-
-#         idx = index.Index()
-#         entity_list = list(self.entities.values())
-#         tolerance = 0.00001  # ✅ 地理容差
-
-#         for i, ent_a in enumerate(entity_list):
-#             # 使用投影后的几何
-#             geom_a = self.proj_geometries[ent_a['id']]
-#             # 容差可以直接设为 1.0 (米)
-#             bounds = geom_a.buffer(1.0).bounds
-#             idx.insert(i, bounds)
-
-#         relation_count = 0
-#         for i, ent_a in enumerate(entity_list):
-#             candidates = list(idx.intersection(
-#                 ent_a['geometry'].buffer(tolerance).bounds))
-
-#             for j in candidates:
-#                 if j <= i:
-#                     continue
-
-#                 ent_b = entity_list[j]
-
-#                 try:
-#                     if ent_a['geometry'].contains(ent_b['geometry']):
-#                         self.relations.append((
-#                             ent_a['id'], 'contains', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         self.relations.append((
-#                             ent_b['id'], 'within', ent_a['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 2
-
-#                     elif ent_b['geometry'].contains(ent_a['geometry']):
-#                         self.relations.append((
-#                             ent_b['id'], 'contains', ent_a['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         self.relations.append((
-#                             ent_a['id'], 'within', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 2
-
-#                     elif ent_a['geometry'].intersects(ent_b['geometry']):
-#                         rel_type = 'topological'
-#                         if ent_a['type'] == 'road' and ent_b['type'] == 'block':
-#                             rel = 'passes_through'
-#                         elif ent_b['type'] == 'road' and ent_a['type'] == 'block':
-#                             ent_a, ent_b = ent_b, ent_a
-#                             rel = 'passes_through'
-#                         else:
-#                             rel = 'intersects'
-
-#                         self.relations.append((
-#                             ent_a['id'], rel, ent_b['id'],
-#                             {'relation_type': rel_type}
-#                         ))
-#                         relation_count += 1
-
-#                     elif ent_a['geometry'].touches(ent_b['geometry']):
-#                         self.relations.append((
-#                             ent_a['id'], 'adjacent_to', ent_b['id'],
-#                             {'relation_type': 'topological'}
-#                         ))
-#                         relation_count += 1
-
-#                 except Exception as e:
-#                     print(f"  ! 拓扑计算错误 {ent_a['id']}-{ent_b['id']}: {e}")
-#                     continue
-
-#         print(f"  → 拓扑关系: {relation_count} 条")
-
-#     def calc_delaunay_neighbors(self):
-#         """✅ 优化版：预计算投影坐标"""
-#         print("\n[三角网近邻] 构建Delaunay三角网...")
-
-#         entity_ids = list(self.entities.keys())
-#         points_m = np.array([self.proj_coords[eid] for eid in entity_ids])
-
-#         if len(points_m) < 3:
-#             print("  → 实体数量不足3个，无法构建三角网")
-#             return
-
-#         tri = Delaunay(points_m)
-#         print(f"  → 三角形数量: {len(tri.simplices)}")
-
-#         # 提取近邻对
-#         neighbor_pairs = set()
-#         for simplex in tri.simplices:
-#             for k in range(3):
-#                 i = simplex[k]
-#                 j = simplex[(k + 1) % 3]
-#                 pair = (min(i, j), max(i, j))
-#                 neighbor_pairs.add(pair)
-
-#         print(f"  → 候选近邻对: {len(neighbor_pairs)}")
-
-#         # ✅ 直接用预计算的投影坐标
-#         relation_count = 0
-#         for i, j in neighbor_pairs:
-#             eid_a = entity_ids[i]
-#             eid_b = entity_ids[j]
-
-#             distance = np.linalg.norm(points_m[i] - points_m[j])
-
-#             if distance <= self.distance_threshold:
-#                 self.relations.append((
-#                     eid_a, 'near', eid_b,
-#                     {
-#                         'relation_type': 'proximity',
-#                         'distance_m': round(distance, 2),
-#                         'method': 'delaunay'
-#                     }
-#                 ))
-#                 relation_count += 1
-
-#         print(f"  → 近邻关系（≤{self.distance_threshold}m）: {relation_count} 条")
-
-#         # 保存供可视化
-#         self._delaunay_tri = tri
-#         self._delaunay_points = points_m
-#         self._delaunay_ids = entity_ids
-
-#     def calc_direction_relations(self):
-#         """✅ 修正八方向"""
-#         print("\n[方向关系] 计算中...")
-
-#         near_pairs = [(r[0], r[2]) for r in self.relations if r[1] == 'near']
-
-#         direction_count = 0
-#         for eid_a, eid_b in near_pairs:
-#             p_a = self.proj_coords[eid_a]
-#             p_b = self.proj_coords[eid_b]
-
-#             dx = p_b[0] - p_a[0]
-#             dy = p_b[1] - p_a[1]
-
-#             # 北=0°，顺时针
-#             angle = np.degrees(np.arctan2(dx, dy)) % 360
-#             direction = self._angle_to_direction(angle)
-
-#             self.relations.append((
-#                 eid_a, f'{direction}_of', eid_b,
-#                 {
-#                     'relation_type': 'directional',
-#                     'angle': round(angle, 1)
-#                 }
-#             ))
-#             direction_count += 1
-            
-#             # 反向关系：B在A的相反方向
-#             opposite_direction = self._get_opposite_direction(direction)
-#             opposite_angle = (angle + 180) % 360
-
-#             self.relations.append((
-#                 eid_b, f'{opposite_direction}_of', eid_a,
-#                 {
-#                     'relation_type': 'directional',
-#                     'angle': round(opposite_angle, 1)
-#                 }
-#             ))
-#             direction_count += 1
-
-#         print(f"  → 方向关系: {direction_count} 条")
-
-#     @staticmethod
-#     def _angle_to_direction(angle):
-#         """✅ 修正的八方向"""
-#         directions = [
-#             (337.5, 360, 'north'), (0, 22.5, 'north'),
-#             (22.5, 67.5, 'northeast'),
-#             (67.5, 112.5, 'east'),
-#             (112.5, 157.5, 'southeast'),
-#             (157.5, 202.5, 'south'),
-#             (202.5, 247.5, 'southwest'),
-#             (247.5, 292.5, 'west'),
-#             (292.5, 337.5, 'northwest'),
-#         ]
-#         for low, high, d in directions:
-#             if low <= angle < high:
-#                 return d
-#         return 'north'
-
-#     @staticmethod
-#     def _get_opposite_direction(direction):
-#         """获取相反方向"""
-#         opposite_map = {
-#             'north': 'south',
-#             'northeast': 'southwest',
-#             'east': 'west',
-#             'southeast': 'northwest',
-#             'south': 'north',
-#             'southwest': 'northeast',
-#             'west': 'east',
-#             'northwest': 'southeast'
-#         }
-#         return opposite_map.get(direction, 'north')
-
-#     def calc_semantic_relations(self):
-#         """✅ 增强版"""
-#         print("\n[语义关系] 推断中...")
-#         count = 0
-
-#         # 1. 属性分类
-#         for eid, ent in self.entities.items():
-#             if ent['type'] == 'poi':
-#                 poi_type = ent['attributes'].get(self.poi_type_field, '')
-#                 if poi_type:
-#                     self.relations.append((
-#                         eid, 'has_category', f"category_{poi_type}",
-#                         {'relation_type': 'semantic', 'category': poi_type}
-#                     ))
-#                     count += 1
-
-#             if ent['type'] == 'road':
-#                 road_level = ent['attributes'].get(self.road_level_field, '')
-#                 if road_level:
-#                     self.relations.append((
-#                         eid, 'has_road_level', f"level_{road_level}",
-#                         {'relation_type': 'semantic', 'level': road_level}
-#                     ))
-#                     count += 1
-                    
-                    
-#         # 2. 关系推断
-
-#         for head, rel, tail, props in list(self.relations):
-#             if rel == 'contains':
-#                 head_ent = self.entities.get(head)
-#                 tail_ent = self.entities.get(tail)
-
-#                 if not head_ent or not tail_ent:
-#                     continue
-
-#                 head_type = head_ent['type']
-#                 tail_type = tail_ent['type']
-
-#                 # 街区包含建筑物
-#                 if head_type == 'block' and tail_type == 'building':
-#                     self.relations.append((
-#                         head, 'block_has_building', tail,
-#                         {'relation_type': 'semantic', 'inferred': True}
-#                     ))
-#                     count += 1
-
-#                 # 街区包含POI
-#                 elif head_type == 'block' and tail_type == 'poi':
-#                     self.relations.append((
-#                         head, 'block_has_poi', tail,
-#                         {'relation_type': 'semantic', 'inferred': True}
-#                     ))
-#                     count += 1
-
-#                 # 建筑物包含POI
-#                 elif head_type == 'building' and tail_type == 'poi':
-#                     self.relations.append((
-#                         head, 'building_has_poi', tail,
-#                         {'relation_type': 'semantic', 'inferred': True}
-#                     ))
-#                     count += 1
-
-#         print(f"  → 语义关系: {count} 条")
-
-#     def compute_all(self):
-#         """计算所有关系"""
-#         self.calc_topological_relations()
-#         self.calc_delaunay_neighbors()
-#         self.calc_direction_relations()
-#         self.calc_semantic_relations()
-
-#         print(f"\n{'='*60}")
-#         print(f"[总计] 关系总数: {len(self.relations)} 条")
-
-#         from collections import Counter
-#         type_count = Counter(r[1] for r in self.relations)
-#         for rtype, cnt in type_count.most_common():
-#             print(f"  {rtype:30s}: {cnt:5d}")
-
-#         return self.relations
-    
-    
-
-
 
 class SpatialRelationCalculator:
     """空间关系计算器（修正版：统一投影坐标系 + 优化拓扑逻辑）
@@ -864,7 +224,7 @@ class SpatialRelationCalculator:
                                     for e in entities.values()]) < 0
             # UTM Zone计算: 北半球32601-32660, 南半球32701-32760
             self.dst_crs = f"EPSG:{32700 + zone if is_southern else 32600 + zone}"
-            print(f"[坐标系] 自动选择: {self.dst_crs} (单位: 米)")
+            logger.info(f"[坐标系] 自动选择: {self.dst_crs} (单位: 米)")
         else:
             self.dst_crs = src_crs # 如果不自动投影，需确保输入数据已是投影坐标系
 
@@ -890,7 +250,7 @@ class SpatialRelationCalculator:
         - 线状实体：骨架点采样（表达空间延伸性）
         - 大型面状实体：边界采样（表达边界邻近性）
         """
-        print("  [预处理] 正在投影几何体并采样...")
+        logger.info("  [预处理] 正在投影几何体并采样...")
         
         point_idx = 0
         
@@ -964,10 +324,10 @@ class SpatialRelationCalculator:
         boundary_count = sum(1 for t in self.point_type.values() if t == 'boundary')
         centroid_count = sum(1 for t in self.point_type.values() if t == 'centroid')
         
-        print(f"  [预处理] 投影完成。三角网参与点: {len(self.triangulation_points)} 个")
-        print(f"    - 质心点: {centroid_count}")
-        print(f"    - 骨架点: {skeleton_count}")
-        print(f"    - 边界点: {boundary_count}")
+        logger.info(f"  [预处理] 投影完成。三角网参与点: {len(self.triangulation_points)} 个")
+        logger.info(f"    - 质心点: {centroid_count}")
+        logger.info(f"    - 骨架点: {skeleton_count}")
+        logger.info(f"    - 边界点: {boundary_count}")
     
     def _sample_line_points(self, proj_geom):
         """
@@ -993,36 +353,61 @@ class SpatialRelationCalculator:
     def _sample_single_line(self, line_geom):
         """
         单线段骨架点采样
-        
-        修复：处理退化线段（只有一个坐标点的情况）
+
+        修复：处理各种退化线段情况
+        - 空线段（无坐标点）
+        - 单点线段（只有一个坐标点）
+        - 零长度线段（多个坐标点但长度为0，如所有点相同）
         """
         coords = list(line_geom.coords)
-        
-        # 边界检查：处理退化线段
+
+        # 边界检查1：空线段
+        if len(coords) == 0:
+            logger.warning("发现空线段，跳过采样")
+            return []
+
+        # 边界检查2：单点线段
         if len(coords) < 2:
-            # 只有一个点的退化线段
             return [(coords[0][0], coords[0][1])]
-        
+
         total_length = line_geom.length
-        
+
+        # 边界检查3：零长度线段（起点终点相同）
+        if total_length == 0 or coords[0] == coords[-1]:
+            # 检查是否所有点都相同
+            first_pt = coords[0]
+            all_same = all(pt == first_pt for pt in coords)
+            if all_same:
+                return [(first_pt[0], first_pt[1])]
+            # 否则尝试返回第一个不同的点
+            for pt in coords:
+                if pt != first_pt:
+                    return [(first_pt[0], first_pt[1]), (pt[0], pt[1])]
+            return [(first_pt[0], first_pt[1])]
+
+        # 短线段：仅返回起点和终点（确保不相同）
         if total_length < self.skeleton_interval:
-            # 短线段：仅返回起点和终点
-            return [(coords[0][0], coords[0][1]),
-                    (coords[-1][0], coords[-1][1])]
-        
+            start_pt = coords[0]
+            end_pt = coords[-1]
+            if start_pt == end_pt:
+                return [(start_pt[0], start_pt[1])]
+            return [(start_pt[0], start_pt[1]), (end_pt[0], end_pt[1])]
+
         n_points = int(total_length / self.skeleton_interval)
         points = []
-        
+
         for i in range(n_points + 1):
             dist = i * self.skeleton_interval
             if dist <= total_length:
                 pt = line_geom.interpolate(dist)
                 points.append((pt.x, pt.y))
-        
-        # 确保包含终点
+
+        # 确保包含终点（避免重复）
         end_pt = line_geom.interpolate(total_length)
-        points.append((end_pt.x, end_pt.y))
-        
+        end_coords = (end_pt.x, end_pt.y)
+        if points and points[-1] != end_coords:
+            points.append(end_coords)
+
         return points
     
     def _sample_boundary_points(self, proj_geom):
@@ -1167,7 +552,7 @@ class SpatialRelationCalculator:
         - 使用 buffer 代替 touches，容错数据缝隙
         - 保持 R树 索引优化
         """
-        print("\n[拓扑关系] 计算中（容错模式）...")
+        logger.info("\n[拓扑关系] 计算中（容错模式）...")
 
         idx = index.Index()
         entity_list = list(self.entities.values())
@@ -1252,10 +637,10 @@ class SpatialRelationCalculator:
                                 relation_count += 1
 
                 except Exception as e:
-                    print(f"  ! 拓扑计算错误 {eid_a}-{eid_b}: {e}")
+                    logger.error(f"  ! 拓扑计算错误 {eid_a}-{eid_b}: {e}")
                     continue
 
-        print(f"  → 拓扑关系: {relation_count} 条")
+        logger.info(f"  → 拓扑关系: {relation_count} 条")
 
     def _add_relation(self, head, rel, tail, props=None):
         """辅助方法：添加关系"""
@@ -1267,77 +652,111 @@ class SpatialRelationCalculator:
     def calc_delaunay_neighbors(self):
         """
         ✅ 增强版：基于骨架点和边界采样点构建三角网
-        
+
         改进：
         - 线状实体骨架点参与三角网，捕获沿路邻近的POI
         - 大型面状实体边界点参与三角网，捕获边界邻近关系
         - 骨架点连接数量作为邻近强度指标
+        - 去除重复点避免Delaunay计算错误
         """
-        print("\n[三角网近邻] 构建Delaunay三角网（增强版）...")
-        
+        logger.info("[三角网近邻] 构建Delaunay三角网（增强版）...")
+
         if len(self.triangulation_points) < 3:
-            print("  → 参与点数量不足3个，无法构建三角网")
+            logger.warning("  → 参与点数量不足3个，无法构建三角网")
             return
-        
-        # 使用增强的采样点构建三角网
-        points_arr = np.array(self.triangulation_points)
+
+        # ✅ 去除重复点（考虑浮点精度）
+        unique_points = []
+        seen_coords = set()
+        old_to_new_idx = {}  # 旧索引 -> 新索引映射
+        new_point_to_entity = {}
+        new_point_type = {}
+
+        for old_idx, pt in enumerate(self.triangulation_points):
+            # 使用6位小数精度避免浮点误差
+            pt_key = (round(pt[0], 6), round(pt[1], 6))
+            if pt_key not in seen_coords:
+                seen_coords.add(pt_key)
+                new_idx = len(unique_points)
+                unique_points.append(pt)
+                old_to_new_idx[old_idx] = new_idx
+
+                # 迁移属性映射
+                eid = self.point_to_entity.get(old_idx)
+                pt_type = self.point_type.get(old_idx, 'centroid')
+                if eid:
+                    new_point_to_entity[new_idx] = eid
+                    new_point_type[new_idx] = pt_type
+
+        # 更新映射
+        self._unique_point_to_entity = new_point_to_entity
+        self._unique_point_type = new_point_type
+
+        if len(unique_points) < 3:
+            logger.warning(f"  → 去重后点数量不足3个（{len(unique_points)}个），无法构建三角网")
+            return
+
+        logger.info(f"  → 原始点: {len(self.triangulation_points)}，去重后: {len(unique_points)}")
+
+        # 使用去重后的点构建三角网
+        points_arr = np.array(unique_points)
         tri = Delaunay(points_arr)
-        
-        print(f"  → 三角形数量: {len(tri.simplices)}")
-        print(f"  → 参与点数量: {len(self.triangulation_points)}")
-        
+
+        logger.info(f"  → 三角形数量: {len(tri.simplices)}")
+        logger.info(f"  → 参与点数量: {len(unique_points)}")
+
         # 统计实体间的骨架点连接强度
         entity_connection_strength = {}
         entity_min_distance = {}  # 实体间的最小距离
-        
+
         for simplex in tri.simplices:
             for k in range(3):
                 i = simplex[k]
                 j = simplex[(k + 1) % 3]
-                
-                eid_a = self.point_to_entity.get(i)
-                eid_b = self.point_to_entity.get(j)
-                
+
+                eid_a = new_point_to_entity.get(i)
+                eid_b = new_point_to_entity.get(j)
+
                 if eid_a is None or eid_b is None:
                     continue
-                
+
                 # 不同实体的点连接 → 实体邻近
                 if eid_a != eid_b:
                     pair_key = (min(eid_a, eid_b), max(eid_a, eid_b))
-                    
+
                     # 计算点间距离
                     dist = np.linalg.norm(points_arr[i] - points_arr[j])
-                    
+
                     # 更新连接强度
                     entity_connection_strength[pair_key] = \
                         entity_connection_strength.get(pair_key, 0) + 1
-                    
+
                     # 更新最小距离
                     if pair_key not in entity_min_distance or \
                        dist < entity_min_distance[pair_key]:
                         entity_min_distance[pair_key] = dist
-        
+
         # 生成邻近关系
         relation_count = 0
         for (eid_a, eid_b), strength in entity_connection_strength.items():
             min_dist = entity_min_distance.get((eid_a, eid_b), 0)
-            
+
             if min_dist <= self.distance_threshold:
                 # 确定邻近方法（根据点类型）
                 pt_types_a = set()
                 pt_types_b = set()
-                for idx, eid in self.point_to_entity.items():
+                for idx, eid in new_point_to_entity.items():
                     if eid == eid_a:
-                        pt_types_a.add(self.point_type.get(idx, 'centroid'))
+                        pt_types_a.add(new_point_type.get(idx, 'centroid'))
                     elif eid == eid_b:
-                        pt_types_b.add(self.point_type.get(idx, 'centroid'))
-                
+                        pt_types_b.add(new_point_type.get(idx, 'centroid'))
+
                 method = 'delaunay_enhanced'
                 if 'skeleton' in pt_types_a or 'skeleton' in pt_types_b:
                     method = 'delaunay_skeleton'
                 elif 'boundary' in pt_types_a or 'boundary' in pt_types_b:
                     method = 'delaunay_boundary'
-                
+
                 self.relations.append((
                     eid_a, 'near', eid_b,
                     {
@@ -1348,9 +767,9 @@ class SpatialRelationCalculator:
                     }
                 ))
                 relation_count += 1
-        
-        print(f"  → 近邻关系（≤{self.distance_threshold}m）: {relation_count} 条")
-        
+
+        logger.info(f"  → 近邻关系（≤{self.distance_threshold}m）: {relation_count} 条")
+
         # 保存三角网用于可视化
         self._delaunay_tri = tri
         self._delaunay_points = points_arr
@@ -1358,44 +777,48 @@ class SpatialRelationCalculator:
     def calc_direction_relations(self):
         """
         增强版：基于拓扑邻接 + 三角网邻近 计算方向
-        
+
         改进：
         - 线状实体使用最近点角度而非质心角度
         - 点状+点状、点状+面状仍使用质心角度
+        - 添加投影坐标存在性检查，避免KeyError
         """
-        print("\n[方向关系] 计算中...")
-        
+        logger.info("[方向关系] 计算中...")
+
         # 收集所有空间上接近的关系
         # 1. 来自三角网的近邻
         near_pairs = set([(r[0], r[2]) for r in self.relations if r[1] == 'near'])
-        
+
         # 2. 来自拓扑计算的邻接
         adjacent_pairs = set([(r[0], r[2]) for r in self.relations if r[1] == 'adjacent_to'])
-        
+
         # 3. 来自拓扑计算的相交/穿过
         intersect_pairs = set([(r[0], r[2]) for r in self.relations if r[1] in ['intersects', 'passes_through']])
-        
+
         # 合并所有需要计算方向的对
         all_spatial_pairs = near_pairs.union(adjacent_pairs).union(intersect_pairs)
-        
+
         direction_count = 0
+        skipped_count = 0
         for eid_a, eid_b in all_spatial_pairs:
             ent_a = self.entities.get(eid_a)
             ent_b = self.entities.get(eid_b)
-            
+
             if not ent_a or not ent_b:
+                skipped_count += 1
                 continue
-            
+
             geom_a = self.proj_geometries.get(eid_a)
             geom_b = self.proj_geometries.get(eid_b)
-            
+
             if not geom_a or not geom_b:
+                skipped_count += 1
                 continue
-            
+
             # 根据几何类型选择角度计算策略
             geom_type_a = geom_a.geom_type
             geom_type_b = geom_b.geom_type
-            
+
             # 线状实体 + 点状实体 → 最近点角度
             if geom_type_a in ['LineString', 'MultiLineString'] and geom_type_b == 'Point':
                 result = self._calc_direction_line_to_point(geom_a, geom_b)
@@ -1410,23 +833,29 @@ class SpatialRelationCalculator:
                 method = 'nearest_point'
             else:
                 # 其他情况 → 质心角度
+                # ✅ 添加投影坐标存在性检查
+                if eid_a not in self.proj_coords or eid_b not in self.proj_coords:
+                    skipped_count += 1
+                    logger.debug(f"跳过方向计算: {eid_a} 或 {eid_b} 无投影坐标")
+                    continue
+
                 p_a = self.proj_coords[eid_a]
                 p_b = self.proj_coords[eid_b]
-                
+
                 dx = p_b[0] - p_a[0]
                 dy = p_b[1] - p_a[1]
-                
+
                 angle_a = np.degrees(np.arctan2(dx, dy)) % 360
                 direction_a = self._angle_to_direction(angle_a)
                 method = 'centroid'
-            
+
             # 添加正向关系
             self.relations.append((
                 eid_a, f'{direction_a}_of', eid_b,
                 {'relation_type': 'directional', 'angle': round(angle_a, 1), 'method': method}
             ))
             direction_count += 1
-            
+
             # 添加反向关系
             opposite_direction = self._get_opposite_direction(direction_a)
             opposite_angle = (angle_a + 180) % 360
@@ -1435,8 +864,8 @@ class SpatialRelationCalculator:
                 {'relation_type': 'directional', 'angle': round(opposite_angle, 1), 'method': method}
             ))
             direction_count += 1
-        
-        print(f"  → 方向关系: {direction_count} 条")
+
+        logger.info(f"  → 方向关系: {direction_count} 条，跳过: {skipped_count} 对")
     
     def _calc_direction_line_to_point(self, line_geom, point_geom):
         """
@@ -1488,7 +917,7 @@ class SpatialRelationCalculator:
 
     def calc_semantic_relations(self):
         """语义关系推断"""
-        print("\n[语义关系] 推断中...")
+        logger.info("[语义关系] 推断中...")
         count = 0
 
         # 1. 基础属性分类
@@ -1531,7 +960,7 @@ class SpatialRelationCalculator:
                                             {'relation_type': 'semantic', 'inferred': True}))
                     count += 1
 
-        print(f"  → 语义关系: {count} 条")
+        logger.info(f"  → 语义关系: {count} 条")
 
     def compute_all(self):
         """执行全量计算"""
@@ -1540,11 +969,11 @@ class SpatialRelationCalculator:
         self.calc_direction_relations()
         self.calc_semantic_relations()
 
-        print(f"\n{'='*60}")
-        print(f"[总计] 关系总数: {len(self.relations)} 条")
+        logger.info("=" * 60)
+        logger.info(f"[总计] 关系总数: {len(self.relations)} 条")
         type_count = Counter(r[1] for r in self.relations)
         for rtype, cnt in type_count.most_common():
-            print(f"  {rtype:30s}: {cnt:5d}")
+            logger.info(f"  {rtype:30s}: {cnt:5d}")
 
         return self.relations
 # ============================================================
@@ -1577,128 +1006,199 @@ class GeoKnowledgeGraph:
         for head, rel, tail, props in self.relations:
             self.graph.add_edge(head, tail, relation=rel, **props)
 
-        print(f"\n[知识图谱] 节点: {self.graph.number_of_nodes()}, "
-              f"边: {self.graph.number_of_edges()}")
+        logger.info(f"[知识图谱] 节点: {self.graph.number_of_nodes()}, 边: {self.graph.number_of_edges()}")
 
-    # ----- 3.1 导出为 Neo4j -----
-    def export_to_neo4j(self, uri="bolt://localhost:7687",
-                        user="neo4j", password="password"):
+    def _check_apoc_available(self, session) -> bool:
+        """检查Neo4j APOC插件是否可用"""
+        try:
+            result = session.run("CALL apoc.help('all') YIELD name RETURN count(name)")
+            return result.single() is not None
+        except Exception:
+            return False
+
+    def export_to_neo4j(self, uri=None, user=None, password=None, use_apoc=True, batch_size=1000):
         """
-        导出到Neo4j图数据库（简化版）
-        
-        改进：每个实体创建一个AttributeNode，包含所有属性
-        结构：
-            (Entity)-[:HAS_ATTRIBUTES]->(AttributeNode {attr1: val1, attr2: val2, ...})
+        导出到Neo4j图数据库（改进版）
+
+        改进：
+        - 自动检查APOC插件是否可用，提供降级方案
+        - 使用settings配置作为默认值
+        - 批量创建关系提升性能
+        - 统一使用logger日志
+
+        Args:
+            uri: Neo4j连接URI，默认使用settings配置
+            user: 用户名
+            password: 密码
+            use_apoc: 是否优先使用APOC（如果可用）
+            batch_size: 批量创建时的批次大小
         """
+        # ✅ 使用settings配置作为默认值
+        uri = uri or getattr(settings, 'NEO4J_URI', 'bolt://localhost:7687')
+        user = user or getattr(settings, 'NEO4J_USER', 'neo4j')
+        password = password or getattr(settings, 'NEO4J_PASSWORD', 'password')
+
         from neo4j import GraphDatabase
 
         driver = GraphDatabase.driver(uri, auth=(user, password))
 
-        with driver.session() as session:
-            # 清空数据库
-            session.run("MATCH (n) DETACH DELETE n")
+        try:
+            with driver.session() as session:
+                # 检查APOC是否可用
+                apoc_available = self._check_apoc_available(session) if use_apoc else False
+                logger.info(f"[Neo4j] APOC插件: {'可用' if apoc_available else '不可用，使用原生Cypher'}")
 
-            # 创建索引
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:Road) ON (n.entity_id)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:Poi) ON (n.entity_id)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:Building) ON (n.entity_id)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:Block) ON (n.entity_id)")
+                # 清空数据库
+                session.run("MATCH (n) DETACH DELETE n")
+                logger.info("[Neo4j] 清空数据库")
 
-            # 1. 批量创建实体节点
-            batch_data = []
-            for eid, ent in self.entities.items():
-                label = ent['type'].capitalize()
-                geom_type = ent['geometry'].geom_type
-                geom = ent['geometry']
+                # 创建索引
+                index_labels = ['Road', 'Poi', 'Building', 'Block']
+                for label in index_labels:
+                    session.run(f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.entity_id)")
+                logger.info(f"[Neo4j] 创建索引: {index_labels}")
 
-                # 基础属性
-                node_props = {
-                    'entity_id': eid,
-                    'name': ent['name'],
-                    'entity_type': ent['type'],
-                    'geom_type': geom_type
-                }
+                # 1. 批量创建实体节点
+                batch_data = []
+                for eid, ent in self.entities.items():
+                    label = ent['type'].capitalize()
+                    geom_type = ent['geometry'].geom_type
+                    geom = ent['geometry']
 
-                # 根据几何类型添加特定属性
-                if geom_type == 'Point':
-                    node_props.update({
-                        'longitude': geom.x,
-                        'latitude': geom.y
+                    # 基础属性
+                    node_props = {
+                        'entity_id': eid,
+                        'name': ent['name'],
+                        'entity_type': ent['type'],
+                        'geom_type': geom_type
+                    }
+
+                    # 根据几何类型添加特定属性
+                    if geom_type == 'Point':
+                        node_props.update({
+                            'longitude': float(geom.x),
+                            'latitude': float(geom.y)
+                        })
+                    elif geom_type in ['LineString', 'MultiLineString']:
+                        centroid = geom.centroid
+                        node_props.update({
+                            'longitude': float(centroid.x),
+                            'latitude': float(centroid.y),
+                            'length': float(geom.length),
+                            'geometry': geom.wkt
+                        })
+                    elif geom_type in ['Polygon', 'MultiPolygon']:
+                        centroid = geom.centroid
+                        node_props.update({
+                            'longitude': float(centroid.x),
+                            'latitude': float(centroid.y),
+                            'area': float(geom.area),
+                            'geometry': geom.wkt
+                        })
+
+                    batch_data.append({'label': label, 'props': node_props})
+
+                # 批量创建实体节点
+                if batch_data:
+                    if apoc_available:
+                        cypher = """
+                        UNWIND $batch AS row
+                        CALL apoc.create.node([row.label], row.props) YIELD node
+                        RETURN count(node)
+                        """
+                        session.run(cypher, {'batch': batch_data})
+                    else:
+                        # ✅ 不依赖APOC的替代方案：逐类型批量创建
+                        for label in set(row['label'] for row in batch_data):
+                            label_batch = [row['props'] for row in batch_data if row['label'] == label]
+                            # 分批处理，避免单次操作过大
+                            for i in range(0, len(label_batch), batch_size):
+                                sub_batch = label_batch[i:i + batch_size]
+                                cypher = f"""
+                                UNWIND $batch AS props
+                                CREATE (n:{label})
+                                SET n = props
+                                """
+                                session.run(cypher, {'batch': sub_batch})
+
+                    logger.info(f"[Neo4j] 创建实体节点: {len(batch_data)} 个")
+
+                # 2. 创建属性节点（每个实体一个AttributeNode）
+                attr_batch = []
+                for eid, ent in self.entities.items():
+                    attrs = {}
+                    for k, v in ent['attributes'].items():
+                        if v is not None and isinstance(v, (str, int, float)):
+                            safe_key = k.replace(' ', '_').replace('-', '_').replace('.', '_')
+                            attrs[safe_key] = v
+
+                    if attrs:
+                        attr_batch.append({'eid': eid, 'attrs': attrs})
+
+                if attr_batch:
+                    for i in range(0, len(attr_batch), batch_size):
+                        sub_batch = attr_batch[i:i + batch_size]
+                        cypher = """
+                        UNWIND $batch AS row
+                        MATCH (e {entity_id: row.eid})
+                        CREATE (a:AttributeNode)
+                        SET a = row.attrs
+                        CREATE (e)-[:HAS_ATTRIBUTES]->(a)
+                        """
+                        session.run(cypher, {'batch': sub_batch})
+
+                    logger.info(f"[Neo4j] 创建属性节点: {len(attr_batch)} 个")
+
+                # 3. ✅ 批量创建关系（大幅提升性能）
+                rel_batch = []
+                for head, rel, tail, props in self.relations:
+                    props_clean = {k: v for k, v in props.items()
+                                   if isinstance(v, (str, int, float))}
+                    rel_batch.append({
+                        'head': head,
+                        'rel': rel.upper(),
+                        'tail': tail,
+                        'props': props_clean
                     })
-                elif geom_type in ['LineString', 'MultiLineString']:
-                    centroid = geom.centroid
-                    node_props.update({
-                        'longitude': centroid.x,
-                        'latitude': centroid.y,
-                        'length': geom.length,
-                        'geometry': geom.wkt
-                    })
-                elif geom_type in ['Polygon', 'MultiPolygon']:
-                    centroid = geom.centroid
-                    node_props.update({
-                        'longitude': centroid.x,
-                        'latitude': centroid.y,
-                        'area': geom.area,
-                        'geometry': geom.wkt
-                    })
 
-                batch_data.append({'label': label, 'props': node_props})
+                if rel_batch:
+                    if apoc_available:
+                        # 使用APOC批量创建动态关系类型
+                        for i in range(0, len(rel_batch), batch_size):
+                            sub_batch = rel_batch[i:i + batch_size]
+                            cypher = """
+                            UNWIND $batch AS row
+                            MATCH (a {entity_id: row.head})
+                            MATCH (b {entity_id: row.tail})
+                            CALL apoc.create.relationship(a, row.rel, row.props, b) YIELD rel
+                            RETURN count(rel)
+                            """
+                            session.run(cypher, {'batch': sub_batch})
+                    else:
+                        # ✅ 不依赖APOC：按关系类型分组批量创建
+                        rel_types = set(r['rel'] for r in rel_batch)
+                        for rel_type in rel_types:
+                            type_batch = [r for r in rel_batch if r['rel'] == rel_type]
+                            for i in range(0, len(type_batch), batch_size):
+                                sub_batch = type_batch[i:i + batch_size]
+                                cypher = f"""
+                                UNWIND $batch AS row
+                                MATCH (a {{entity_id: row.head}})
+                                MATCH (b {{entity_id: row.tail}})
+                                CREATE (a)-[r:{rel_type}]->(b)
+                                SET r = row.props
+                                """
+                                session.run(cypher, {'batch': sub_batch})
 
-            # 批量创建实体节点
-            if batch_data:
-                cypher = """
-                UNWIND $batch AS row
-                CALL apoc.create.node([row.label], row.props) YIELD node
-                RETURN count(node)
-                """
-                session.run(cypher, {'batch': batch_data})
-                logger.info(f"Created {len(batch_data)} entity nodes.")
+                    logger.info(f"[Neo4j] 创建关系: {len(rel_batch)} 条")
 
-            # 2. 创建属性节点（每个实体一个AttributeNode）
-            attr_batch = []
-            for eid, ent in self.entities.items():
-                # 将所有属性组合成一个字典
-                attrs = {}
-                for k, v in ent['attributes'].items():
-                    if v is not None and isinstance(v, (str, int, float)):
-                        # 属性名转换为合法的属性键（替换特殊字符）
-                        safe_key = k.replace(' ', '_').replace('-', '_')
-                        attrs[safe_key] = v
-                
-                if attrs:
-                    attr_batch.append({
-                        'eid': eid,
-                        'attrs': attrs
-                    })
+            logger.info("[Neo4j] 导出完成!")
 
-            # 批量创建属性节点和关系
-            if attr_batch:
-                cypher = """
-                UNWIND $batch AS row
-                MATCH (e {entity_id: row.eid})
-                CREATE (a:AttributeNode row.attrs)
-                CREATE (e)-[:HAS_ATTRIBUTES]->(a)
-                """
-                session.run(cypher, {'batch': attr_batch})
-                logger.info(f"Created {len(attr_batch)} attribute nodes.")
-
-            # 3. 创建关系
-            for head, rel, tail, props in self.relations:
-                rel_type = rel.upper()
-                props_clean = {k: v for k, v in props.items()
-                                if isinstance(v, (str, int, float))}
-
-                cypher = f"""
-                MATCH (a {{entity_id: $head}})
-                MATCH (b {{entity_id: $tail}})
-                CREATE (a)-[r:{rel_type} $props]->(b)
-                """
-                session.run(cypher, {
-                    'head': head, 'tail': tail, 'props': props_clean
-                })
-
+        except Exception as e:
+            logger.error(f"[Neo4j] 导出失败: {e}")
+            raise
+        finally:
             driver.close()
-            print("[Neo4j] 导出完成!")
 
     # ----- 3.2 导出为 RDF/Turtle -----
     def export_to_rdf(self, output_path="geo_kg.ttl"):
@@ -1733,7 +1233,7 @@ class GeoKnowledgeGraph:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
 
-        print(f"[RDF] 导出到 {output_path}")
+        logger.info(f"[RDF] 导出到 {output_path}")
 
     # ----- 3.3 导出为 JSON-LD -----
     def export_to_jsonld(self, output_path="geo_kg.json"):
@@ -1771,7 +1271,7 @@ class GeoKnowledgeGraph:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(kg_data, f, ensure_ascii=False, indent=2)
 
-        print(f"[JSON-LD] 导出到 {output_path}")
+        logger.info(f"[JSON-LD] 导出到 {output_path}")
 
 
 # ============================================================
@@ -1789,13 +1289,16 @@ class GeoKGVisualizer:
     def plot_delaunay_triangulation(self, save_path="delaunay.png"):
         """可视化Delaunay三角网（增强版）"""
         if not self.spatial_calc or not hasattr(self.spatial_calc, '_delaunay_tri'):
-            print("请先计算三角网近邻")
+            logger.warning("请先计算三角网近邻")
             return
 
         tri = self.spatial_calc._delaunay_tri
         points = self.spatial_calc._delaunay_points
-        point_to_entity = self.spatial_calc.point_to_entity
-        point_type = self.spatial_calc.point_type
+        # 优先使用去重后的映射（如果存在）
+        point_to_entity = getattr(self.spatial_calc, '_unique_point_to_entity',
+                                   self.spatial_calc.point_to_entity)
+        point_type = getattr(self.spatial_calc, '_unique_point_type',
+                             self.spatial_calc.point_type)
 
         fig, ax = plt.subplots(1, 1, figsize=(14, 10))
 
@@ -1871,7 +1374,7 @@ class GeoKGVisualizer:
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.show()
-        print(f"[可视化] 三角网图保存到 {save_path}")
+        logger.info(f"[可视化] 三角网图保存到 {save_path}")
 
     def plot_knowledge_graph(self, max_nodes=200, save_path="kg_graph.png"):
         """可视化知识图谱（抽样）"""
@@ -1937,7 +1440,7 @@ class GeoKGVisualizer:
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.show()
-        print(f"[可视化] 知识图谱保存到 {save_path}")
+        logger.info(f"[可视化] 知识图谱保存到 {save_path}")
 
 
 # ============================================================
@@ -2016,9 +1519,9 @@ def main():
     """
 
     # ===== 第1步：加载数据 =====
-    print("=" * 60)
-    print("第1步：加载SHP文件")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第1步：加载SHP文件")
+    logger.info("=" * 60)
 
     loader = GeoEntityLoader(crs_target="EPSG:4326")
 
@@ -2031,9 +1534,9 @@ def main():
     entities = loader.entities
 
     # ===== 第2步：计算空间关系 =====
-    print("\n" + "=" * 60)
-    print("第2步：计算空间关系（含Delaunay三角网）")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第2步：计算空间关系（含Delaunay三角网）")
+    logger.info("=" * 60)
 
     calc = SpatialRelationCalculator(
         entities,
@@ -2042,34 +1545,34 @@ def main():
     relations = calc.compute_all()
 
     # ===== 第3步：构建知识图谱 =====
-    print("\n" + "=" * 60)
-    print("第3步：构建知识图谱")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第3步：构建知识图谱")
+    logger.info("=" * 60)
 
     kg = GeoKnowledgeGraph(entities, relations)
 
     # ===== 第4步：导出 =====
-    print("\n" + "=" * 60)
-    print("第4步：导出知识图谱")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第4步：导出知识图谱")
+    logger.info("=" * 60)
 
     kg.export_to_jsonld("output/geo_kg.json")
     kg.export_to_rdf("output/geo_kg.ttl")
     # kg.export_to_neo4j()  # 需要先启动Neo4j
 
     # ===== 第5步：可视化 =====
-    print("\n" + "=" * 60)
-    print("第5步：可视化")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第5步：可视化")
+    logger.info("=" * 60)
 
     viz = GeoKGVisualizer(entities, relations, calc)
     viz.plot_delaunay_triangulation("output/delaunay.png")
     viz.plot_knowledge_graph(max_nodes=300, save_path="output/kg_graph.png")
 
     # ===== 第6步：示例查询 =====
-    print("\n" + "=" * 60)
-    print("第6步：示例查询")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("第6步：示例查询")
+    logger.info("=" * 60)
 
     query = GeoKGQuery(kg)
 
@@ -2077,21 +1580,20 @@ def main():
     poi_ids = [eid for eid, ent in entities.items() if ent['type'] == 'poi']
     if poi_ids:
         sample_poi = poi_ids[0]
-        print(f"\n查询 {entities[sample_poi]['name']} 的近邻:")
+        logger.info(f"查询 {entities[sample_poi]['name']} 的近邻:")
         neighbors = query.find_neighbors(sample_poi, 'near')
         for n in neighbors[:5]:
-            print(
-                f"  → {n['name']} (距离: {n['distance']}m, 关系: {n['relation']})")
+            logger.info(f"  → {n['name']} (距离: {n['distance']}m, 关系: {n['relation']})")
 
     # 查询第一个街区包含的实体
     block_ids = [eid for eid, ent in entities.items() if ent['type']
                  == 'block']
     if block_ids:
         sample_block = block_ids[0]
-        print(f"\n查询 {entities[sample_block]['name']} 包含的实体:")
+        logger.info(f"查询 {entities[sample_block]['name']} 包含的实体:")
         contained = query.find_within_block(sample_block)
         for c in contained[:5]:
-            print(f"  → {c['name']} ({c['relation']})")
+            logger.info(f"  → {c['name']} ({c['relation']})")
 
 
 if __name__ == "__main__":
