@@ -1118,18 +1118,22 @@ class GeoKnowledgeGraph:
                         attr_batch.append({'eid': eid, 'attrs': attrs})
 
                 if attr_batch:
+                    attr_total = len(attr_batch)
+                    logger.info(f"[Neo4j] 开始创建 {attr_total} 个属性节点...")
                     for i in range(0, len(attr_batch), batch_size):
                         sub_batch = attr_batch[i:i + batch_size]
                         cypher = """
                         UNWIND $batch AS row
-                        MATCH (e {entity_id: row.eid})
+                        MATCH (e:Node {entity_id: row.eid})
                         CREATE (a:AttributeNode)
                         SET a = row.attrs
                         CREATE (e)-[:HAS_ATTRIBUTES]->(a)
                         """
                         session.run(cypher, {'batch': sub_batch})
+                        if (i // batch_size) % 10 == 0 or i + batch_size >= attr_total:
+                            logger.info(f"[Neo4j] 属性节点进度: {min(i+batch_size, attr_total)}/{attr_total}")
 
-                    logger.info(f"[Neo4j] 创建属性节点: {len(attr_batch)} 个")
+                    logger.info(f"[Neo4j] 创建属性节点完成: {attr_total} 个")
 
                 # 3. 批量创建关系（大幅提升性能）
                 rel_batch = []

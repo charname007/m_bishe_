@@ -16,30 +16,51 @@ from neo4j_client import Neo4jClient
 from postgres_client import PostgresClient
 
 
-def extract_entity_names(neo4j_client: Neo4jClient) -> List[Dict]:
+def extract_entity_names(neo4j_client: Neo4jClient, source: str = "geo") -> List[Dict]:
     """
-    从Neo4j提取所有Entity节点的name和相关属性
+    从Neo4j提取所有实体的name和相关属性
+
+    Args:
+        source: 数据来源
+            - "geo": 提取地理实体 (Node:Road/Poi/Building/Block)
+            - "corpus": 提取语料实体 (Entity标签)
 
     Returns:
-        [{"name": "...", "type": "...", "category": "...", "aliases": [...]}]
+        [{"name": "...", "type": "...", "entity_id": "..."}]
     """
     with neo4j_client.driver.session() as session:
-        result = session.run("""
-            MATCH (e:Entity)
-            RETURN e.name as name, e.type as type, e.category as category, e.aliases as aliases
-            ORDER BY e.name
-        """)
+        if source == "geo":
+            # 提取地理实体 (shp2kg.py 创建的节点)
+            result = session.run("""
+                MATCH (n:Node)
+                RETURN n.name as name, n.entity_type as type, n.entity_id as entity_id
+                ORDER BY n.name
+            """)
+            entities = []
+            for record in result:
+                if record["name"]:  # 过滤空名称
+                    entities.append({
+                        "name": record["name"],
+                        "type": record["type"],
+                        "entity_id": record["entity_id"]
+                    })
+        else:
+            # 提取语料实体 (neo4j_client.py 创建的节点)
+            result = session.run("""
+                MATCH (e:Entity)
+                RETURN e.name as name, e.type as type, e.category as category, e.aliases as aliases
+                ORDER BY e.name
+            """)
+            entities = []
+            for record in result:
+                entities.append({
+                    "name": record["name"],
+                    "type": record["type"],
+                    "category": record["category"],
+                    "aliases": record["aliases"] or []
+                })
 
-        entities = []
-        for record in result:
-            entities.append({
-                "name": record["name"],
-                "type": record["type"],
-                "category": record["category"],
-                "aliases": record["aliases"] or []
-            })
-
-        logger.info(f"提取到 {len(entities)} 个实体")
+        logger.info(f"提取到 {len(entities)} 个实体 (来源: {source})")
         return entities
 
 
@@ -52,15 +73,20 @@ def save_to_json(entities: List[Dict], filepath: str = "entity_names.json"):
     return str(output_path)
 
 
-def save_to_csv(entities: List[Dict], filepath: str = "entity_names.csv"):
+def save_to_csv(entities: List[Dict], filepath: str = "entity_names.csv", source: str = "geo"):
     """保存为CSV文件"""
     import csv
     output_path = Path(__file__).parent.parent / filepath
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["name", "type", "category", "aliases"])
-        for e in entities:
-            writer.writerow([e["name"], e["type"], e["category"], "|".join(e["aliases"])])
+        if source == "geo":
+            writer.writerow(["name", "type", "entity_id"])
+            for e in entities:
+                writer.writerow([e.get("name", ""), e.get("type", ""), e.get("entity_id", "")])
+        else:
+            writer.writerow(["name", "type", "category", "aliases"])
+            for e in entities:
+                writer.writerow([e.get("name", ""), e.get("type", ""), e.get("category", ""), "|".join(e.get("aliases", []))])
     logger.info(f"已保存到 {output_path}")
     return str(output_path)
 
@@ -109,19 +135,31 @@ def save_to_postgres(entities: List[Dict], pg_client: PostgresClient):
         logger.info(f"已保存 {len(entities)} 条记录到 PostgreSQL")
 
 
-def main():
-    """主函数"""
+def main(source: str = "geo"):
+    """
+    主函数
+
+    Args:
+        source: 数据来源
+            - "geo": 提取地理实体 (shp2kg.py 创建的节点)
+            - "corpus": 提取语料实体 (neo4j_client.py 创建的节点)
+    """
     # 连接Neo4j
     neo4j_config = settings.get_neo4j_config()
     neo4j_client = Neo4jClient(**neo4j_config)
 
     # 提取实体
-    entities = extract_entity_names(neo4j_client)
+    entities = extract_entity_names(neo4j_client, source=source)
 
-    # 保存方式选择（可通过命令行参数或直接修改）
-    # 默认保存为JSON文件，更方便后续embedding处理
-    save_to_json(entities)
-    save_to_csv(entities)  # 同时保存CSV备份
+    if not entities:
+        logger.warning(f"未找到任何实体 (来源: {source})")
+        neo4j_client.close()
+        return
+
+    # 保存方式选择
+    filename_suffix = f"_{source}" if source != "geo" else ""
+    save_to_json(entities, filepath=f"entity_names{filename_suffix}.json")
+    save_to_csv(entities, filepath=f"entity_names{filename_suffix}.csv", source=source)
 
     # 如果需要保存到PostgreSQL（需要安装pgvector扩展）
     # pg_config = settings.get_postgres_config()
@@ -130,7 +168,7 @@ def main():
     # pg_client.close()
 
     neo4j_client.close()
-    logger.success("提取完成")
+    logger.success(f"提取完成，共 {len(entities)} 个实体")
 
 
 if __name__ == "__main__":
