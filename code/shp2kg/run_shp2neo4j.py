@@ -165,7 +165,8 @@ def export_to_neo4j(kg):
     start_time = time.time()
 
     try:
-        kg.export_to_neo4j(batch_size=2000)
+        # 使用更大的批次大小提高效率
+        kg.export_to_neo4j(batch_size=5000)
         elapsed = time.time() - start_time
         logger.info(f"Neo4j 导出成功！耗时 {elapsed:.1f}s")
         return True

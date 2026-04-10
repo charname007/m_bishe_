@@ -1008,32 +1008,17 @@ class GeoKnowledgeGraph:
 
         logger.info(f"[知识图谱] 节点: {self.graph.number_of_nodes()}, 边: {self.graph.number_of_edges()}")
 
-    def _check_apoc_available(self, session) -> bool:
-        """检查Neo4j APOC插件是否可用"""
-        try:
-            result = session.run("CALL apoc.help('all') YIELD name RETURN count(name)")
-            return result.single() is not None
-        except Exception:
-            return False
-
-    def export_to_neo4j(self, uri=None, user=None, password=None, use_apoc=True, batch_size=1000):
+    def export_to_neo4j(self, uri=None, user=None, password=None, batch_size=1000):
         """
-        导出到Neo4j图数据库（改进版）
-
-        改进：
-        - 自动检查APOC插件是否可用，提供降级方案
-        - 使用settings配置作为默认值
-        - 批量创建关系提升性能
-        - 统一使用logger日志
+        导出到Neo4j图数据库
 
         Args:
             uri: Neo4j连接URI，默认使用settings配置
             user: 用户名
             password: 密码
-            use_apoc: 是否优先使用APOC（如果可用）
             batch_size: 批量创建时的批次大小
         """
-        # ✅ 使用settings配置作为默认值
+        # 使用settings配置作为默认值
         uri = uri or getattr(settings, 'NEO4J_URI', 'bolt://localhost:7687')
         user = user or getattr(settings, 'NEO4J_USER', 'neo4j')
         password = password or getattr(settings, 'NEO4J_PASSWORD', 'password')
@@ -1044,19 +1029,21 @@ class GeoKnowledgeGraph:
 
         try:
             with driver.session() as session:
-                # 检查APOC是否可用
-                apoc_available = self._check_apoc_available(session) if use_apoc else False
-                logger.info(f"[Neo4j] APOC插件: {'可用' if apoc_available else '不可用，使用原生Cypher'}")
+                logger.info("[Neo4j] 使用原生Cypher批量导入")
 
                 # 清空数据库
                 session.run("MATCH (n) DETACH DELETE n")
                 logger.info("[Neo4j] 清空数据库")
 
-                # 创建索引
+                # 创建通用索引（entity_id在所有节点上）
+                session.run("CREATE INDEX IF NOT EXISTS FOR (n:Node) ON (n.entity_id)")
+                # 为每种实体类型创建索引
                 index_labels = ['Road', 'Poi', 'Building', 'Block']
                 for label in index_labels:
                     session.run(f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.entity_id)")
-                logger.info(f"[Neo4j] 创建索引: {index_labels}")
+                logger.info(f"[Neo4j] 创建索引完成，等待索引就绪...")
+                # 等待索引生效
+                session.run("CALL db.awaitIndexes(300)")
 
                 # 1. 批量创建实体节点
                 batch_data = []
@@ -1098,30 +1085,25 @@ class GeoKnowledgeGraph:
 
                     batch_data.append({'label': label, 'props': node_props})
 
-                # 批量创建实体节点
+                # 批量创建实体节点（使用原生Cypher，不依赖APOC）
                 if batch_data:
-                    if apoc_available:
-                        cypher = """
-                        UNWIND $batch AS row
-                        CALL apoc.create.node([row.label], row.props) YIELD node
-                        RETURN count(node)
-                        """
-                        session.run(cypher, {'batch': batch_data})
-                    else:
-                        # ✅ 不依赖APOC的替代方案：逐类型批量创建
-                        for label in set(row['label'] for row in batch_data):
-                            label_batch = [row['props'] for row in batch_data if row['label'] == label]
-                            # 分批处理，避免单次操作过大
-                            for i in range(0, len(label_batch), batch_size):
-                                sub_batch = label_batch[i:i + batch_size]
-                                cypher = f"""
-                                UNWIND $batch AS props
-                                CREATE (n:{label})
-                                SET n = props
-                                """
-                                session.run(cypher, {'batch': sub_batch})
+                    # 按标签分组批量创建，同时添加Node标签便于通用索引查询
+                    for label in set(row['label'] for row in batch_data):
+                        label_batch = [row['props'] for row in batch_data if row['label'] == label]
+                        total_batches = (len(label_batch) + batch_size - 1) // batch_size
+                        for batch_idx, i in enumerate(range(0, len(label_batch), batch_size)):
+                            sub_batch = label_batch[i:i + batch_size]
+                            # 添加Node标签作为通用标签
+                            cypher = f"""
+                            UNWIND $batch AS props
+                            CREATE (n:Node:{label})
+                            SET n = props
+                            """
+                            session.run(cypher, {'batch': sub_batch})
+                            if batch_idx % 10 == 0 or batch_idx == total_batches - 1:
+                                logger.info(f"[Neo4j] {label}节点进度: {min(i+batch_size, len(label_batch))}/{len(label_batch)}")
 
-                    logger.info(f"[Neo4j] 创建实体节点: {len(batch_data)} 个")
+                    logger.info(f"[Neo4j] 创建实体节点完成: {len(batch_data)} 个")
 
                 # 2. 创建属性节点（每个实体一个AttributeNode）
                 attr_batch = []
@@ -1149,9 +1131,15 @@ class GeoKnowledgeGraph:
 
                     logger.info(f"[Neo4j] 创建属性节点: {len(attr_batch)} 个")
 
-                # 3. ✅ 批量创建关系（大幅提升性能）
+                # 3. 批量创建关系（大幅提升性能）
                 rel_batch = []
+                skipped_semantic = 0
                 for head, rel, tail, props in self.relations:
+                    # 跳过非实体关系（如 category_xxx, level_xxx）
+                    if tail.startswith('category_') or tail.startswith('level_'):
+                        skipped_semantic += 1
+                        continue
+
                     props_clean = {k: v for k, v in props.items()
                                    if isinstance(v, (str, int, float))}
                     rel_batch.append({
@@ -1161,36 +1149,34 @@ class GeoKnowledgeGraph:
                         'props': props_clean
                     })
 
+                if skipped_semantic > 0:
+                    logger.info(f"[Neo4j] 跳过非实体语义关系: {skipped_semantic} 条")
+
                 if rel_batch:
-                    if apoc_available:
-                        # 使用APOC批量创建动态关系类型
-                        for i in range(0, len(rel_batch), batch_size):
-                            sub_batch = rel_batch[i:i + batch_size]
-                            cypher = """
+                    logger.info(f"[Neo4j] 开始创建 {len(rel_batch)} 条关系...")
+                    # 使用原生Cypher批量创建关系，不依赖APOC
+                    rel_types = set(r['rel'] for r in rel_batch)
+                    total_created = 0
+                    for rel_type in rel_types:
+                        type_batch = [r for r in rel_batch if r['rel'] == rel_type]
+                        type_total = len(type_batch)
+                        logger.info(f"[Neo4j] 关系类型 {rel_type}: {type_total} 条")
+                        for i in range(0, len(type_batch), batch_size):
+                            sub_batch = type_batch[i:i + batch_size]
+                            cypher = f"""
                             UNWIND $batch AS row
-                            MATCH (a {entity_id: row.head})
-                            MATCH (b {entity_id: row.tail})
-                            CALL apoc.create.relationship(a, row.rel, row.props, b) YIELD rel
-                            RETURN count(rel)
+                            MATCH (a:Node {{entity_id: row.head}})
+                            MATCH (b:Node {{entity_id: row.tail}})
+                            CREATE (a)-[r:{rel_type}]->(b)
+                            SET r = row.props
                             """
                             session.run(cypher, {'batch': sub_batch})
-                    else:
-                        # ✅ 不依赖APOC：按关系类型分组批量创建
-                        rel_types = set(r['rel'] for r in rel_batch)
-                        for rel_type in rel_types:
-                            type_batch = [r for r in rel_batch if r['rel'] == rel_type]
-                            for i in range(0, len(type_batch), batch_size):
-                                sub_batch = type_batch[i:i + batch_size]
-                                cypher = f"""
-                                UNWIND $batch AS row
-                                MATCH (a {{entity_id: row.head}})
-                                MATCH (b {{entity_id: row.tail}})
-                                CREATE (a)-[r:{rel_type}]->(b)
-                                SET r = row.props
-                                """
-                                session.run(cypher, {'batch': sub_batch})
+                            total_created += len(sub_batch)
+                            # 每10批次或完成时输出进度
+                            if (i // batch_size) % 10 == 0 or i + batch_size >= type_total:
+                                logger.info(f"[Neo4j] {rel_type}进度: {min(i+batch_size, type_total)}/{type_total} (总计: {total_created}/{len(rel_batch)})")
 
-                    logger.info(f"[Neo4j] 创建关系: {len(rel_batch)} 条")
+                    logger.info(f"[Neo4j] 创建关系完成: {len(rel_batch)} 条")
 
             logger.info("[Neo4j] 导出完成!")
 
