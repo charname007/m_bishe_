@@ -1036,7 +1036,7 @@ class GeoKnowledgeGraph:
                 logger.info("[Neo4j] 清空数据库")
 
                 # 创建通用索引（entity_id在所有节点上）
-                session.run("CREATE INDEX IF NOT EXISTS FOR (n:Node) ON (n.entity_id)")
+                session.run("CREATE INDEX IF NOT EXISTS FOR (n:geo_entity_node) ON (n.entity_id)")
                 # 为每种实体类型创建索引
                 index_labels = ['Road', 'Poi', 'Building', 'Block']
                 for label in index_labels:
@@ -1096,7 +1096,7 @@ class GeoKnowledgeGraph:
                             # 添加Node标签作为通用标签
                             cypher = f"""
                             UNWIND $batch AS props
-                            CREATE (n:Node:{label})
+                            CREATE (n:geo_entity_node:{label})
                             SET n = props
                             """
                             session.run(cypher, {'batch': sub_batch})
@@ -1124,7 +1124,7 @@ class GeoKnowledgeGraph:
                         sub_batch = attr_batch[i:i + batch_size]
                         cypher = """
                         UNWIND $batch AS row
-                        MATCH (e:Node {entity_id: row.eid})
+                        MATCH (e:geo_entity_node {entity_id: row.eid})
                         CREATE (a:AttributeNode)
                         SET a = row.attrs
                         CREATE (e)-[:HAS_ATTRIBUTES]->(a)
@@ -1169,8 +1169,8 @@ class GeoKnowledgeGraph:
                             sub_batch = type_batch[i:i + batch_size]
                             cypher = f"""
                             UNWIND $batch AS row
-                            MATCH (a:Node {{entity_id: row.head}})
-                            MATCH (b:Node {{entity_id: row.tail}})
+                            MATCH (a:geo_entity_node {{entity_id: row.head}})
+                            MATCH (b:geo_entity_node {{entity_id: row.tail}})
                             CREATE (a)-[r:{rel_type}]->(b)
                             SET r = row.props
                             """
