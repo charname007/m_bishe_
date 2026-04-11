@@ -854,7 +854,588 @@ def build_adaptive_workflow(llm: Any, config: ExtractionConfig) -> CompiledState
 
 ---
 
-## 八、下一步行动建议
+## 九、【新增】双重评审 + 智能跳过方案
+
+### 9.1 方案概述
+
+**核心理念**：自评效率高 + 交叉评价客观性强，两者互补验证，并通过智能跳过机制控制成本。
+
+```text
+Phase 1: EXTRACT + SELF_EVAL
+┌─────────────────────────────────────────────────┐
+│ Worker并行执行:                                  │
+│   语料 → NER → RE → SelfEval(自评) → 输出待验证 │
+│                                                 │
+│ 输出: {corpus_id, triples, self_scores,        │
+│        self_corrected, raw_text}               │
+└─────────────────────────────────────────────────┘
+
+Phase 2: CROSS_EVAL (等待所有Phase 1完成后)
+┌─────────────────────────────────────────────────┐
+│ 随机分配交叉评价任务 (智能跳过机制):             │
+│   - 自评≥4.5 → 高置信度，跳过交叉评价           │
+│   - 自评<2.5 → 低置信度，直接不通过，跳过交叉    │
+│   - 自评2.5-4.5 → 中置信度，进行交叉评价        │
+│                                                 │
+│ EvalWorker_1 ← 语料B的结果 + 原文               │
+│ EvalWorker_2 ← 语料A的结果 + 原文               │
+└─────────────────────────────────────────────────┘
+
+Phase 3: ARBITRATE + LABEL + REDUCE
+┌─────────────────────────────────────────────────┐
+│ 仲裁机制:                                       │
+│   - 两轮评分差异 ≤1 → 取平均，高置信度          │
+│   - 两轮评分差异 1-2 → 取较低分，标记需复核     │
+│   - 两轮评分差异 >2 → 直接不通过，待复核        │
+│                                                 │
+│ Label → Aggregator → Finalizer                  │
+└─────────────────────────────────────────────────┘
+```
+
+### 9.2 优势分析
+
+| 优势 | 说明 |
+|------|------|
+| **互补验证** | 自评快速发现明显错误，交叉评价发现隐藏问题 |
+| **防止自我辩护** | 交叉评价可纠正LLM"放过"的错误 |
+| **渐进修正** | 自评先修正 → 交叉评价再处理 → 仲裁最终决定 |
+| **成本可控** | 智能跳过机制减少30-45%交叉评价调用 |
+| **置信度分级** | 高/中/低三级置信度，便于后续处理决策 |
+
+### 9.3 潜在问题与解决方案
+
+| 问题 | 说明 | 解决方案 |
+|------|------|----------|
+| **评分不一致** | 自评5分，交叉评价2分 | 仲裁机制：取较低分（保守）+ 标记复核 |
+| **修正冲突** | 自评修正A，交叉评价修正B | 交叉评价修正覆盖自评，或标记冲突 |
+| **延迟增加** | 交叉评价需等待所有Worker完成 | 两阶段调度，预编译workflow减少编译开销 |
+| **Worker分配** | 需确保不自评自己的结果 | eval_dispatcher节点随机分配+排除约束 |
+
+### 9.4 评分仲裁策略
+
+```python
+def arbitrate_scores(
+    self_eval: Dict,
+    cross_eval: Dict,
+    threshold: float = 3.5
+) -> Dict:
+    """
+    仲裁自评和交叉评价结果
+    
+    策略:
+    1. 两轮评分差异小(≤1) → 取平均，高置信度
+    2. 两轮评分差异中(1-2) → 取较低分，中等置信度 + 标记需复核
+    3. 两轮评分差异大(>2) → 直接不通过，低置信度 + 标记需复核
+    """
+    arbitration_result = {
+        "triple": self_eval["triple"],
+        "final_score": 0,
+        "confidence": "high",  # high/medium/low
+        "needs_review": False,
+        "passed": False,
+    }
+    
+    self_avg = (self_eval["SEM"] + self_eval["FAC"] + self_eval["CON"]) / 3
+    cross_avg = (cross_eval["SEM"] + cross_eval["FAC"] + cross_eval["CON"]) / 3
+    
+    score_diff = abs(self_avg - cross_avg)
+    
+    if score_diff <= 1.0:
+        # 评分一致，高置信度
+        arbitration_result["final_score"] = (self_avg + cross_avg) / 2
+        arbitration_result["confidence"] = "high"
+        arbitration_result["passed"] = arbitration_result["final_score"] >= threshold
+        
+    elif score_diff <= 2.0:
+        # 评分差异中等，取较低分（保守）
+        arbitration_result["final_score"] = min(self_avg, cross_avg)
+        arbitration_result["confidence"] = "medium"
+        arbitration_result["needs_review"] = True
+        arbitration_result["passed"] = arbitration_result["final_score"] >= threshold
+        
+    else:
+        # 评分差异大，低置信度，标记复核
+        arbitration_result["final_score"] = min(self_avg, cross_avg)
+        arbitration_result["confidence"] = "low"
+        arbitration_result["needs_review"] = True
+        arbitration_result["passed"] = False  # 大差异直接不通过，待复核
+    
+    return arbitration_result
+```
+
+### 9.5 智能跳过机制
+
+```python
+def should_skip_cross_eval(triple: Dict, self_avg_score: float) -> bool:
+    """
+    判断是否跳过交叉评价
+    
+    策略:
+    - 规则校验失败 → 直接跳过（成本节省5-10%）
+    - 自评高置信度(≥4.5) → 免交叉评价，直接通过（成本节省10-15%）
+    - 自评低置信度(<2.5) → 直接不通过，跳过交叉评价（成本节省20-30%）
+    - 自评中置信度(2.5-4.5) → 需交叉评价
+    """
+    # 规则校验失败 → 直接跳过
+    if not triple.get("_rule_valid", True):
+        triple["passed_eval"] = False
+        triple["confidence"] = "rule_failed"
+        triple["skip_reason"] = triple.get("_rule_issues", [])
+        return True
+    
+    # 自评高置信度 → 免交叉评价
+    if self_avg_score >= 4.5:
+        triple["passed_eval"] = True
+        triple["confidence"] = "high_self"
+        triple["final_score"] = self_avg_score
+        return True
+    
+    # 自评低置信度 → 直接不通过
+    if self_avg_score < 2.5:
+        triple["passed_eval"] = False
+        triple["confidence"] = "low_self"
+        triple["final_score"] = self_avg_score
+        return True
+    
+    # 中置信度 → 需交叉评价
+    return False
+
+
+def estimate_cross_eval_skip_rate(self_eval_results: List[Dict]) -> Dict:
+    """
+    估算交叉评价跳过率（用于成本预估）
+    """
+    high_confidence = sum(1 for r in self_eval_results if r.get("avg_score", 0) >= 4.5)
+    low_confidence = sum(1 for r in self_eval_results if r.get("avg_score", 0) < 2.5)
+    rule_failed = sum(1 for r in self_eval_results if not r.get("_rule_valid", True))
+    
+    total = len(self_eval_results)
+    skip_count = high_confidence + low_confidence + rule_failed
+    
+    return {
+        "total_triples": total,
+        "skip_count": skip_count,
+        "skip_rate": skip_count / total if total > 0 else 0,
+        "high_confidence_count": high_confidence,
+        "low_confidence_count": low_confidence,
+        "rule_failed_count": rule_failed,
+        "estimated_cost_reduction": f"{skip_count / total * 100:.1f}%" if total > 0 else "0%"
+    }
+```
+
+### 9.6 状态扩展
+
+```python
+# agent/agents/state.py 扩展 KGState
+class KGState(TypedDict):
+    # ... 原有字段 ...
+    
+    # 双重评审支持
+    pending_cross_eval: Annotated[Dict[str, Dict], replace_value]
+    """待交叉评价的语料结果 {corpus_id: {triples, self_scores, raw_text}}"""
+    
+    eval_assignments: Annotated[Dict[str, List[str]], replace_value]
+    """交叉评价任务分配 {eval_worker_id: [corpus_ids]}"""
+    
+    cross_eval_results: Annotated[List[Dict], merge_list]
+    """交叉评价结果"""
+    
+    arbitration_results: Annotated[Dict[str, List[Dict]], replace_value]
+    """仲裁结果 {corpus_id: [arbitrated_triples]}"""
+    
+    needs_review_queue: Annotated[List[Dict], merge_list]
+    """需要人工复核的三元组队列"""
+    
+    eval_skip_stats: Annotated[Dict, replace_value]
+    """智能跳过统计 {skip_count, skip_rate, cost_reduction}"""
+```
+
+### 9.7 工作流实现
+
+```python
+# agent/agents/workflow.py 新增双重评审工作流
+def build_dual_eval_workflow(llm: Any, config: ExtractionConfig) -> CompiledStateGraph:
+    """
+    双重评审工作流
+    
+    Phase 1: Extract + SelfEval
+    Phase 2: CrossEval (等待Phase 1完成后，智能跳过)
+    Phase 3: Arbitrate + Label + Reduce
+    """
+    builder = StateGraph(KGState)
+    
+    # Phase 1
+    builder.add_node("coordinator", coordinator_node)
+    builder.add_node("extractors", create_extractors_with_self_eval_node(llm, config))
+    builder.add_node("eval_dispatcher", create_eval_dispatcher_node(config))
+    
+    # Phase 2
+    builder.add_node("cross_eval_workers", create_cross_eval_workers_node(llm, config))
+    builder.add_node("arbitrator", create_arbitrator_node(config))
+    
+    # Phase 3
+    builder.add_node("labeler", create_batch_labeler_node(llm, config))
+    builder.add_node("aggregator", create_aggregator_node(config.similarity_threshold))
+    builder.add_node("finalizer", finalizer_node)
+    
+    # 边
+    builder.add_edge(START, "coordinator")
+    builder.add_edge("coordinator", "extractors")
+    builder.add_edge("extractors", "eval_dispatcher")
+    builder.add_edge("eval_dispatcher", "cross_eval_workers")
+    builder.add_edge("cross_eval_workers", "arbitrator")
+    builder.add_edge("arbitrator", "labeler")
+    builder.add_edge("labeler", "aggregator")
+    builder.add_edge("aggregator", "finalizer")
+    builder.add_edge("finalizer", END)
+    
+    return builder.compile(checkpointer=InMemorySaver())
+```
+
+### 9.8 节点实现
+
+```python
+# agent/agents/nodes.py 新增节点
+
+def create_extractors_with_self_eval_node(llm: Any, config: ExtractionConfig):
+    """Phase 1: 抽取 + 自评（含智能跳过标记）"""
+    
+    async def extractors_node(state: KGState, writer: StreamWriter) -> Dict:
+        # 预编译工作流（包含自评）
+        corpus_workflow = build_corpus_workflow(llm, use_simplified_eval=True)
+        
+        async def process_corpus(corpus: Dict) -> Dict:
+            # NER + RE + SelfEval + 规则校验
+            initial_state = build_initial_corpus_state(corpus, config)
+            thread_config = {"configurable": {"thread_id": f"corpus_{corpus['id']}"}}
+            result = await corpus_workflow.ainvoke(initial_state, thread_config)
+            
+            # 计算自评平均分并标记智能跳过
+            triples_with_skip_flag = []
+            for triple in result["corrected_triples"]:
+                avg_score = (
+                    triple.get("sem_score", 0) + 
+                    triple.get("fac_score", 0) + 
+                    triple.get("con_score", 0)
+                ) / 3
+                triple["self_avg_score"] = avg_score
+                triple["skip_cross_eval"] = should_skip_cross_eval(triple, avg_score)
+                triples_with_skip_flag.append(triple)
+            
+            return {
+                "corpus_id": result["corpus_id"],
+                "worker_id": f"extractor_{corpus.get('id', 'unknown')}",
+                "triples": triples_with_skip_flag,
+                "self_scores": result["eval_scores"],
+                "raw_text": result["raw_text"],
+                "entities": result["entities"],
+            }
+        
+        # 并行处理
+        tasks = [process_corpus(c) for c in state["corpus_list"]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 统计跳过率
+        all_triples = []
+        for r in results:
+            if not isinstance(r, Exception):
+                all_triples.extend(r.get("triples", []))
+        
+        skip_stats = estimate_cross_eval_skip_rate(all_triples)
+        logger.info(f"[Extractors] 智能跳过率: {skip_stats['skip_rate']:.1%}")
+        
+        # 构建待交叉评价数据（仅中置信度）
+        pending_cross_eval = {}
+        for r in results:
+            if not isinstance(r, Exception):
+                need_cross_triples = [
+                    t for t in r["triples"] 
+                    if not t.get("skip_cross_eval", False)
+                ]
+                if need_cross_triples:
+                    pending_cross_eval[r["corpus_id"]] = {
+                        "triples": need_cross_triples,
+                        "self_scores": r["self_scores"],
+                        "raw_text": r["raw_text"],
+                        "entities": r["entities"],
+                    }
+        
+        return {
+            "pending_cross_eval": pending_cross_eval,
+            "extractor_results": [r for r in results if not isinstance(r, Exception)],
+            "eval_skip_stats": skip_stats,
+            "current_phase": PhaseEnum.CROSS_EVAL,
+        }
+    
+    return extractors_node
+
+
+def create_eval_dispatcher_node(config: ExtractionConfig):
+    """Phase 1→2 过渡：分配交叉评价任务（排除自评）"""
+    
+    def dispatcher_node(state: KGState) -> Dict:
+        corpus_ids = list(state["pending_cross_eval"].keys())
+        
+        # 获取抽取这些语料的Worker ID
+        corpus_to_extractor = {}
+        for r in state.get("extractor_results", []):
+            corpus_to_extractor[r["corpus_id"]] = r["worker_id"]
+        
+        # 创建评价Worker
+        eval_worker_ids = [f"eval_worker_{i}" for i in range(config.max_workers)]
+        
+        # 随机分配，确保不自评
+        import random
+        random.seed(int(time.time()))
+        
+        eval_assignments = defaultdict(list)
+        for corpus_id in corpus_ids:
+            # 排除抽取该语料的Worker
+            eligible_evaluators = [
+                w for w in eval_worker_ids 
+                if w != corpus_to_extractor.get(corpus_id, "")
+            ]
+            
+            if eligible_evaluators:
+                assigned = random.choice(eligible_evaluators)
+                eval_assignments[assigned].append(corpus_id)
+        
+        logger.info(f"[Dispatcher] 分配 {len(corpus_ids)} 条语料到 {len(eval_assignments)} 个评价Worker")
+        
+        return {
+            "eval_assignments": dict(eval_assignments),
+            "active_eval_workers": list(eval_assignments.keys()),
+        }
+    
+    return dispatcher_node
+
+
+def create_cross_eval_workers_node(llm: Any, config: ExtractionConfig):
+    """Phase 2: 交叉评价（仅评价中置信度三元组）"""
+    structured_llm = llm.with_structured_output(EvalResultSimplified)
+    
+    async def cross_eval_node(state: KGState, writer: StreamWriter) -> Dict:
+        async def eval_corpus(corpus_id: str, data: Dict) -> Dict:
+            writer({
+                "step": "cross_eval",
+                "corpus_id": corpus_id,
+                "status": "started"
+            })
+            
+            messages = EVAL_PROMPT_SIMPLIFIED.invoke({
+                "triples": format_triples(data["triples"]),
+                "raw_text": data["raw_text"],
+            })
+            result = await structured_llm.ainvoke(messages)
+            
+            # 处理评分
+            cross_scores = [
+                {
+                    "triple": {
+                        "head": s.triple.head,
+                        "relation": s.triple.relation,
+                        "tail": s.triple.tail,
+                    },
+                    "SEM": s.SEM,
+                    "FAC": s.FAC,
+                    "CON": s.CON,
+                }
+                for s in result.scores
+            ]
+            
+            # 应用修正
+            if result.need_correction and result.corrections:
+                corrected_triples = apply_llm_corrections(data["triples"], result.corrections)
+            else:
+                corrected_triples = data["triples"]
+            
+            writer({
+                "step": "cross_eval",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "triple_count": len(corrected_triples)
+            })
+            
+            return {
+                "corpus_id": corpus_id,
+                "cross_scores": cross_scores,
+                "cross_corrected_triples": corrected_triples,
+                "cross_corrections": result.corrections if result.need_correction else [],
+            }
+        
+        # 每个评价Worker处理分配的语料
+        tasks = []
+        for worker_id, corpus_ids in state["eval_assignments"].items():
+            for corpus_id in corpus_ids:
+                data = state["pending_cross_eval"].get(corpus_id)
+                if data:
+                    tasks.append(eval_corpus(corpus_id, data))
+        
+        cross_eval_results = await asyncio.gather(*tasks)
+        
+        logger.info(f"[CrossEval] 完成 {len(cross_eval_results)} 条语料的交叉评价")
+        
+        return {
+            "cross_eval_results": cross_eval_results,
+            "current_phase": PhaseEnum.ARBITRATE,
+        }
+    
+    return cross_eval_node
+
+
+def create_arbitrator_node(config: ExtractionConfig):
+    """Phase 3: 仲裁自评和交叉评价，合并跳过的结果"""
+    
+    def arbitrator_node(state: KGState) -> Dict:
+        arbitration_results = {}
+        needs_review_queue = []
+        
+        # 处理每个语料
+        for extractor_result in state.get("extractor_results", []):
+            corpus_id = extractor_result["corpus_id"]
+            all_triples = extractor_result["triples"]
+            
+            # 查找对应的交叉评价结果
+            cross_result = None
+            for cr in state.get("cross_eval_results", []):
+                if cr["corpus_id"] == corpus_id:
+                    cross_result = cr
+                    break
+            
+            arbitrated_triples = []
+            
+            for triple in all_triples:
+                # 跳过交叉评价的：直接使用自评结果
+                if triple.get("skip_cross_eval", False):
+                    if triple.get("passed_eval", False):
+                        arbitrated_triples.append(triple)
+                    continue
+                
+                # 需交叉评价的：进行仲裁
+                if cross_result:
+                    triple_key = (triple["head"], triple["relation"], triple["tail"])
+                    
+                    # 构建自评评分
+                    self_eval = {
+                        "triple": triple_key,
+                        "SEM": triple.get("sem_score", 3),
+                        "FAC": triple.get("fac_score", 3),
+                        "CON": triple.get("con_score", 3),
+                    }
+                    
+                    # 查找交叉评价评分
+                    cross_eval = find_score_for_triple(triple_key, cross_result["cross_scores"])
+                    
+                    if cross_eval:
+                        arbitration = arbitrate_scores(self_eval, cross_eval, config.eval_threshold)
+                        
+                        # 应用仲裁结果
+                        triple["final_score"] = arbitration["final_score"]
+                        triple["confidence"] = arbitration["confidence"]
+                        triple["passed_eval"] = arbitration["passed"]
+                        
+                        if arbitration["needs_review"]:
+                            needs_review_queue.append({
+                                "triple": triple,
+                                "corpus_id": corpus_id,
+                                "arbitration": arbitration,
+                                "self_score": self_eval,
+                                "cross_score": cross_eval,
+                            })
+                        
+                        if arbitration["passed"]:
+                            arbitrated_triples.append(triple)
+            
+            arbitration_results[corpus_id] = arbitrated_triples
+        
+        # 统计
+        total_passed = sum(len(v) for v in arbitration_results.values())
+        total_review = len(needs_review_queue)
+        logger.info(f"[Arbitrator] 通过: {total_passed}, 待复核: {total_review}")
+        
+        return {
+            "arbitration_results": arbitration_results,
+            "needs_review_queue": needs_review_queue,
+            "current_phase": PhaseEnum.LABEL,
+        }
+    
+    return arbitrator_node
+
+
+def find_score_for_triple(triple_key: tuple, scores: List[Dict]) -> Optional[Dict]:
+    """查找三元组对应的评分"""
+    for score in scores:
+        score_key = (
+            score["triple"]["head"],
+            score["triple"]["relation"],
+            score["triple"]["tail"]
+        )
+        if score_key == triple_key:
+            return score
+    return None
+```
+
+### 9.9 成本预估
+
+| 场景 | 自评调用 | 交叉评价调用 | 总调用 | 成本对比 |
+|------|----------|--------------|--------|----------|
+| **Baseline（简化评估）** | 1次 | 0次 | 1次 | 基准 |
+| **双重评审（无跳过）** | 1次 | 1次 | 2次 | +100% |
+| **双重评审+智能跳过** | 1次 | 0.55-0.7次 | 1.55-1.7次 | +55-70% |
+
+**智能跳过预期效果**：
+- 高置信度三元组（≥4.5）：约占15-20%
+- 低置信度三元组（<2.5）：约占20-30%
+- 规则校验失败：约占5-10%
+- **总跳过率**：40-60%
+- **实际交叉评价调用**：仅评价剩余40-60%的中置信度三元组
+
+### 9.10 配置扩展
+
+```python
+# agent/agents/config.py 扩展
+@dataclass
+class ExtractionConfig:
+    # ... 原有字段 ...
+    
+    # 双重评审配置
+    enable_dual_eval: bool = True
+    """是否启用双重评审模式"""
+    
+    dual_eval_skip_threshold_high: float = 4.5
+    """自评高分跳过阈值（≥此值免交叉评价）"""
+    
+    dual_eval_skip_threshold_low: float = 2.5
+    """自评低分跳过阈值（<此值直接不通过）"""
+    
+    dual_eval_arbitration_diff_high: float = 2.0
+    """仲裁评分差异阈值（>此值直接不通过）"""
+    
+    dual_eval_arbitration_diff_medium: float = 1.0
+    """仲裁评分差异阈值（>此值标记复核）"""
+```
+
+### 9.11 实施优先级
+
+| 优先级 | 内容 | 预期收益 | 复杂度 |
+|--------|------|----------|--------|
+| **P0** | 智能跳过机制 | 成本节省40-60% | 低 |
+| **P1** | 评分仲裁策略 | 提升评价质量15%+ | 低 |
+| **P2** | 交叉评价节点 | 提升客观性20%+ | 中 |
+| **P3** | 复核队列管理 | 可追溯+可修复 | 中 |
+
+### 9.12 与现有改进方案的协同
+
+| 协同方案 | 协同效果 |
+|----------|----------|
+| **前置归一化节点** | 归一化后自评置信度更高，跳过率提升 |
+| **Schema约束矩阵** | 规则校验前置，更多三元组可跳过交叉评价 |
+| **Self-Consistency投票** | 投票后结果更稳定，自评置信度更高 |
+| **反思驱动循环** | 低置信度结果触发反思，而非直接不通过 |
+
+---
+
+## 十、下一步行动建议（更新）
 
 ### 8.1 立即实施（本周）
 
@@ -873,3 +1454,590 @@ def build_adaptive_workflow(llm: Any, config: ExtractionConfig) -> CompiledState
 1. 根据验证集评估Quick Wins效果
 2. 选择效果最显著的改进继续迭代
 3. 逐步实现自适应路由和反思循环
+
+---
+
+## 十一、【新增】二次对话验证方案 (Second Conversation Verification)
+
+### 11.1 方案概述
+
+**核心理念**：采用两阶段对话策略，解决大模型"幻觉"问题，实现简单、成本低、效果好。
+
+```text
+Phase 1: 初抽 (Primary Extraction)
+┌─────────────────────────────────────────────────┐
+│ START → NER → RE → [暂存结果] → END             │
+│                                                 │
+│ 输出: {entities, triples, raw_text}             │
+└─────────────────────────────────────────────────┘
+
+Phase 2: 分离校验 (Separated Self-Check)
+┌─────────────────────────────────────────────────┐
+│ Self-Check-NER: 专门校验实体（查遗漏、识别别名） │
+│ Self-Check-RE: 专门校验三元组（查幻觉、验证关系）│
+│                                                 │
+│ 输入: Phase1结果 + 原文                         │
+│ 输出: 最终结果 + 置信度标记                     │
+└─────────────────────────────────────────────────┘
+```
+
+### 11.2 优势分析
+
+| 优势 | 说明 |
+|------|------|
+| **实现极简** | 只需增加2个校验节点，无需多Agent对话机制 |
+| **成本可控** | LLM调用从4次增加到6次（+50%，而非+200%） |
+| **幻觉检测有效** | Self-Check独立审视初抽结果，不带"自我辩护"偏见 |
+| **实体归一化** | Self-Check-NER主动识别别名（"武大"→"武汉大学"） |
+| **地理验证** | Self-Check-RE检查三元组地理合理性 |
+| **可追溯** | 校验过程输出修正记录，便于人工复核 |
+
+### 11.3 与其他方案对比
+
+| 特性 | 原方案（单轮） | 研讨会模式 | 二次对话验证 |
+|------|---------------|-----------|-------------|
+| LLM 调用次数 | 4次 | 9次+ | **6次** |
+| Agent 间对话 | 无 | 有（复杂） | **无**（简单） |
+| 实体归一化 | 后处理合并 | Agent协作确认 | **Self-Check识别** |
+| 幻觉检测 | Eval自评（偏见） | Agent质疑 | **Self-Check审视** |
+| 实现复杂度 | 低 | 高 | **低** |
+
+### 11.4 流程设计详解
+
+#### Self-Check-NER（实体校验节点）
+
+**职责**：
+1. 检查是否有遗漏实体（原文提及但未抽取）
+2. 识别别名/简称，建议归一化
+3. 过滤无关实体（非地理实体）
+4. 给出置信度评估
+
+**输入输出设计**：
+
+```python
+# 输入
+{
+    "raw_text": "武大的樱花开了，很多人在行政楼前拍照...",
+    "entities": {"POI": ["武汉大学", "行政楼"], "道路": [], ...}
+}
+
+# 输出 (SelfCheckNERResult)
+{
+    "verified_entities": [
+        {"name": "武汉大学", "type": "POI", "confidence": "high", "aliases": ["武大"]},
+        {"name": "行政楼", "type": "建筑物", "confidence": "high", "aliases": []}
+    ],
+    "missing_entities": [
+        {"name": "樱花", "suggested_type": "POI?", "reason": "原文提及但未抽取"}
+    ],
+    "entity_normalizations": [
+        {"raw": "武大", "canonical": "武汉大学", "confidence": "high"}
+    ],
+    "removed_entities": [],
+    "overall_confidence": "high"
+}
+```
+
+**Prompt 设计**：
+
+```python
+SELF_CHECK_NER_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一位"实体校验专家"，负责审视NER抽取结果。
+    你的任务是：检查遗漏、识别别名、过滤无关实体。"""),
+    ("human", """## 校验任务
+    1. 遗漏检查：原文是否提及了地理实体但未抽取？
+    2. 别名识别：抽取的实体是否有简称/别名需要归一化？
+    3. 无关过滤：抽取的实体是否为非地理实体？
+    
+    ## 已抽取实体
+    {entities}
+    
+    ## 原始文本
+    {raw_text}
+    
+    请输出校验结果（JSON格式），包含：verified_entities, missing_entities, entity_normalizations""")
+])
+```
+
+#### Self-Check-RE（三元组校验节点）
+
+**职责**：
+1. 幻觉检测：三元组是否在原文中有依据？
+2. 关系验证：关系类型和方向是否正确？
+3. 证据匹配：证据是否真实存在于原文？
+4. 修正建议：发现问题时的修正方案
+
+**输入输出设计**：
+
+```python
+# 输入
+{
+    "raw_text": "武大的樱花开了，很多人在行政楼前拍照...",
+    "triples": [
+        {"head": "武汉大学", "relation": "位于", "tail": "珞喻路", "evidence": "..."},
+        {"head": "行政楼", "relation": "属于", "tail": "武汉大学", "evidence": "行政楼在武汉大学内"}
+    ]
+}
+
+# 输出 (SelfCheckREResult)
+{
+    "verified_triples": [
+        {
+            "head": "行政楼", "relation": "属于", "tail": "武汉大学",
+            "confidence": "high",
+            "evidence_valid": True,
+            "evidence_match": "原文第2句提及"
+        }
+    ],
+    "rejected_triples": [
+        {
+            "head": "武汉大学", "relation": "位于", "tail": "珞喻路",
+            "confidence": "low",
+            "reason": "幻觉：原文未提及珞喻路",
+            "suggested_fix": "删除或改为<武汉大学, 位于, 珞珈山>"
+        }
+    ],
+    "corrected_triples": [
+        {
+            "original": {"head": "武汉大学", "relation": "位于", "tail": "珞喻路"},
+            "corrected": {"head": "武汉大学", "relation": "位于", "tail": "珞珈山"},
+            "reason": "知识库显示武汉大学位于珞珈山"
+        }
+    ],
+    "overall_confidence": "medium"
+}
+```
+
+**Prompt 设计**：
+
+```python
+SELF_CHECK_RE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一位"三元组校验专家"，负责审视RE抽取结果。
+    你的任务是：检测幻觉、验证关系、匹配证据。"""),
+    ("human", """## 校验任务
+    1. 幻觉检测：三元组是否在原文中有依据？（无依据则标记为幻觉）
+    2. 关系验证：关系类型和方向是否正确？
+    3. 证据匹配：标注的证据是否真实存在于原文？
+    
+    ## 已抽取三元组
+    {triples}
+    
+    ## 原始文本
+    {raw_text}
+    
+    请输出校验结果（JSON格式），包含：verified_triples, rejected_triples, corrected_triples""")
+])
+```
+
+### 11.5 状态扩展
+
+```python
+# agent/agents/state.py 扩展 CorpusState
+class CorpusState(TypedDict):
+    # ... 原有字段 ...
+    
+    # 二次对话验证支持
+    primary_entities: Annotated[Dict, replace_value]
+    """Phase 1 初抽实体"""
+    
+    primary_triples: Annotated[List[Dict], replace_value]
+    """Phase 1 初抽三元组"""
+    
+    self_check_ner_result: Annotated[Dict, replace_value]
+    """Self-Check-NER 校验结果"""
+    
+    self_check_re_result: Annotated[Dict, replace_value]
+    """Self-Check-RE 校验结果"""
+    
+    final_entities: Annotated[List[Dict], replace_value]
+    """最终实体（归一化后）"""
+    
+    final_triples: Annotated[List[Dict], replace_value]
+    """最终三元组（校验后）"""
+    
+    verification_confidence: Annotated[str, replace_value]
+    """整体置信度: high/medium/low"""
+```
+
+### 11.6 Schema 扩展
+
+```python
+# agent/agents/schemas.py 新增
+
+class VerifiedEntity(BaseModel):
+    """校验后的实体"""
+    name: str = Field(description="实体名称（归一化后）")
+    type: str = Field(description="实体类型")
+    confidence: str = Field(description="置信度: high/medium/low")
+    aliases: List[str] = Field(default_factory=list, description="别名列表")
+    evidence: Optional[str] = Field(description="原文依据")
+
+class EntityNormalization(BaseModel):
+    """实体归一化记录"""
+    raw: str = Field(description="原始名称")
+    canonical: str = Field(description="归一化名称")
+    confidence: str = Field(description="归一化置信度")
+
+class SelfCheckNERResult(BaseModel):
+    """Self-Check-NER 输出"""
+    verified_entities: List[VerifiedEntity] = Field(default_factory=list)
+    missing_entities: List[Dict] = Field(default_factory=list, description="遗漏实体建议")
+    entity_normalizations: List[EntityNormalization] = Field(default_factory=list)
+    removed_entities: List[str] = Field(default_factory=list, description="过滤掉的无关实体")
+    overall_confidence: str = Field(default="medium")
+
+class VerifiedTriple(BaseModel):
+    """校验后的三元组"""
+    head: str
+    relation: str
+    tail: str
+    confidence: str = Field(description="置信度: high/medium/low")
+    evidence_valid: bool = Field(description="证据是否有效")
+    evidence_match: Optional[str] = Field(description="证据原文匹配")
+
+class RejectedTriple(BaseModel):
+    """拒绝的三元组"""
+    head: str
+    relation: str
+    tail: str
+    reason: str = Field(description="拒绝原因")
+    suggested_fix: Optional[str] = Field(description="修正建议")
+
+class TripleCorrection(BaseModel):
+    """三元组修正记录"""
+    original: Dict = Field(description="原始三元组")
+    corrected: Dict = Field(description="修正后三元组")
+    reason: str = Field(description="修正原因")
+
+class SelfCheckREResult(BaseModel):
+    """Self-Check-RE 输出"""
+    verified_triples: List[VerifiedTriple] = Field(default_factory=list)
+    rejected_triples: List[RejectedTriple] = Field(default_factory=list)
+    corrected_triples: List[TripleCorrection] = Field(default_factory=list)
+    overall_confidence: str = Field(default="medium")
+```
+
+### 11.7 工作流实现
+
+```python
+# agent/agents/workflow.py 新增二次对话验证工作流
+def build_second_conversation_workflow(llm: Any, config: ExtractionConfig) -> CompiledStateGraph:
+    """
+    二次对话验证工作流
+    
+    Phase 1: NER → RE → [暂存结果]
+    Phase 2: Self-Check-NER → Self-Check-RE → [输出最终结果]
+    Phase 3: Label → END
+    """
+    builder = StateGraph(CorpusState)
+    
+    # Phase 1 节点
+    builder.add_node("ner", create_ner_node(llm), retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("re", create_re_node(llm), retry_policy=LLM_RETRY_POLICY)
+    
+    # Phase 2 节点（新增）
+    builder.add_node("self_check_ner", create_self_check_ner_node(llm), retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("self_check_re", create_self_check_re_node(llm), retry_policy=LLM_RETRY_POLICY)
+    
+    # Phase 3 节点
+    builder.add_node("label", create_label_node(llm), retry_policy=LLM_RETRY_POLICY)
+    
+    # 边定义
+    builder.add_edge(START, "ner")
+    builder.add_conditional_edges("ner", route_after_ner)
+    builder.add_edge("re", "self_check_ner")  # RE → Self-Check-NER
+    builder.add_edge("self_check_ner", "self_check_re")  # 分离校验顺序
+    builder.add_edge("self_check_re", "label")
+    builder.add_edge("label", END)
+    
+    return builder.compile(checkpointer=InMemorySaver())
+```
+
+### 11.8 节点实现
+
+```python
+# agent/agents/nodes.py 新增节点
+
+def create_self_check_ner_node(llm: Any):
+    """创建 Self-Check-NER 节点"""
+    structured_llm = llm.with_structured_output(SelfCheckNERResult)
+    
+    async def self_check_ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Phase 2a: 实体校验"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Self-Check-NER] 校验语料: {corpus_id}")
+        
+        writer({
+            "step": "self_check_ner",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始实体校验"
+        })
+        
+        try:
+            # 暂存初抽结果
+            primary_entities = state["entities"]
+            
+            # Self-Check 校验
+            messages = SELF_CHECK_NER_PROMPT.invoke({
+                "raw_text": state["raw_text"],
+                "entities": format_entities(primary_entities)
+            })
+            
+            result: SelfCheckNERResult = await structured_llm.ainvoke(messages)
+            
+            # 应用归一化
+            final_entities = apply_entity_normalizations(result)
+            
+            writer({
+                "step": "self_check_ner",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "verified_count": len(result.verified_entities),
+                "normalization_count": len(result.entity_normalizations)
+            })
+            
+            return {
+                "primary_entities": primary_entities,
+                "self_check_ner_result": result.model_dump(),
+                "final_entities": final_entities,
+                "current_step": StepEnum.SELF_CHECK_RE,
+            }
+            
+        except Exception as e:
+            logger.error(f"[Self-Check-NER] 失败: {e}")
+            writer({
+                "step": "self_check_ner",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_ner_result": {},
+                "error": str(e),
+                "current_step": StepEnum.SELF_CHECK_RE,
+            }
+    
+    return self_check_ner_node
+
+
+def create_self_check_re_node(llm: Any):
+    """创建 Self-Check-RE 节点"""
+    structured_llm = llm.with_structured_output(SelfCheckREResult)
+    
+    async def self_check_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Phase 2b: 三元组校验"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Self-Check-RE] 校验语料: {corpus_id}")
+        
+        writer({
+            "step": "self_check_re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始三元组校验"
+        })
+        
+        try:
+            # 暂存初抽结果
+            primary_triples = state["triples"]
+            
+            # Self-Check 校验
+            messages = SELF_CHECK_RE_PROMPT.invoke({
+                "raw_text": state["raw_text"],
+                "triples": format_triples(primary_triples)
+            })
+            
+            result: SelfCheckREResult = await structured_llm.ainvoke(messages)
+            
+            # 应用修正，生成最终三元组
+            final_triples = apply_triple_corrections(result)
+            
+            # 计算整体置信度
+            overall_confidence = calculate_overall_confidence(result)
+            
+            writer({
+                "step": "self_check_re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "verified_count": len(result.verified_triples),
+                "rejected_count": len(result.rejected_triples),
+                "confidence": overall_confidence
+            })
+            
+            return {
+                "primary_triples": primary_triples,
+                "self_check_re_result": result.model_dump(),
+                "final_triples": final_triples,
+                "verification_confidence": overall_confidence,
+                "current_step": StepEnum.LABEL,
+            }
+            
+        except Exception as e:
+            logger.error(f"[Self-Check-RE] 失败: {e}")
+            writer({
+                "step": "self_check_re",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_re_result": {},
+                "error": str(e),
+                "current_step": StepEnum.LABEL,
+            }
+    
+    return self_check_re_node
+
+
+def apply_entity_normalizations(result: SelfCheckNERResult) -> List[Dict]:
+    """应用实体归一化"""
+    entities = []
+    for ve in result.verified_entities:
+        entity = {
+            "name": ve.name,
+            "type": ve.type,
+            "confidence": ve.confidence,
+            "aliases": ve.aliases,
+        }
+        entities.append(entity)
+    return entities
+
+
+def apply_triple_corrections(result: SelfCheckREResult) -> List[Dict]:
+    """应用三元组修正"""
+    triples = []
+    
+    # 保留验证通过的三元组
+    for vt in result.verified_triples:
+        triple = {
+            "head": vt.head,
+            "relation": vt.relation,
+            "tail": vt.tail,
+            "confidence": vt.confidence,
+            "evidence_valid": vt.evidence_valid,
+        }
+        triples.append(triple)
+    
+    # 应用修正的三元组
+    for tc in result.corrected_triples:
+        corrected = tc.corrected
+        corrected["correction_reason"] = tc.reason
+        triples.append(corrected)
+    
+    return triples
+
+
+def calculate_overall_confidence(result: SelfCheckREResult) -> str:
+    """计算整体置信度"""
+    total = len(result.verified_triples) + len(result.rejected_triples)
+    if total == 0:
+        return "high"
+    
+    rejected_ratio = len(result.rejected_triples) / total
+    
+    if rejected_ratio < 0.1:
+        return "high"
+    elif rejected_ratio < 0.3:
+        return "medium"
+    else:
+        return "low"
+```
+
+### 11.9 StepEnum 扩展
+
+```python
+# agent/agents/state.py 扩展 StepEnum
+class StepEnum(str, Enum):
+    """工作流步骤枚举"""
+    NER = "ner"
+    RE = "re"
+    SELF_CHECK_NER = "self_check_ner"  # 新增
+    SELF_CHECK_RE = "self_check_re"    # 新增
+    LABEL = "label"
+    DONE = "done"
+```
+
+### 11.10 成本预估
+
+| 场景 | NER | RE | Self-Check-NER | Self-Check-RE | Label | 总调用 | 成本对比 |
+|------|-----|-----|-----------------|---------------|-------|--------|----------|
+| **原方案（简化评估）** | 1次 | 1次 | 0次 | 1次(Eval) | 1次 | **4次** | 基准 |
+| **二次对话验证** | 1次 | 1次 | 1次 | 1次 | 1次 | **5次** | +25% |
+| **二次对话验证+知识库** | 1次 | 1次 | 1次(含KB查询) | 1次(含KB验证) | 1次 | **5次** | +25% |
+
+**说明**：Self-Check-RE 替代了原来的 Eval 节点，所以总调用从 4次增加到 5次（而非 6次）。
+
+### 11.11 可选增强：知识库协同
+
+在 Self-Check 节点中可注入知识库查询，增强验证效果：
+
+```python
+def create_self_check_re_node_with_kb(llm: Any, kg_client: Neo4jClient):
+    """带知识库验证的 Self-Check-RE 节点"""
+    
+    async def self_check_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        # 1. LLM Self-Check
+        llm_result = await llm_self_check(state)
+        
+        # 2. 知识库验证（补充）
+        for triple in llm_result.verified_triples:
+            # 查询知识库中的已知关系
+            kg_relation = await kg_client.find_relation(
+                triple.head, triple.tail
+            )
+            if kg_relation:
+                triple["kg_verified"] = True
+                triple["kg_relation"] = kg_relation
+            else:
+                triple["kg_verified"] = False
+        
+        # 3. 合并结果
+        final_triples = merge_llm_and_kb_results(llm_result)
+        
+        return {
+            "final_triples": final_triples,
+            "current_step": StepEnum.LABEL,
+        }
+    
+    return self_check_re_node
+```
+
+### 11.12 实施优先级
+
+| 优先级 | 内容 | 预期收益 | 复杂度 |
+|--------|------|----------|--------|
+| **P0** | Self-Check-RE 节点 | 幻觉检测+关系验证 | 低 |
+| **P1** | Self-Check-NER 节点 | 别名识别+遗漏检查 | 低 |
+| **P2** | 知识库协同验证 | 地理常识验证 | 中 |
+| **P3** | 置信度分级输出 | 可追溯+可复核 | 低 |
+
+### 11.13 与现有方案的协同
+
+| 协同方案 | 协同效果 |
+|----------|----------|
+| **前置归一化节点** | Self-Check负担减轻，验证更准确 |
+| **Schema约束矩阵** | Self-Check可利用Schema做类型验证 |
+| **双重评审方案** | Self-Check作为Phase2，可与交叉评价叠加 |
+| **反思驱动循环** | Self-Check发现的问题可触发反思重抽 |
+
+---
+
+## 十二、方案选择建议（更新）
+
+### 12.1 各方案适用场景
+
+| 方案 | 适用场景 | 成本 | 效果预期 |
+|------|----------|------|----------|
+| **二次对话验证** | 快速落地，解决幻觉问题 | +25% | 中等提升 |
+| **双重评审+智能跳过** | 批量处理，需要客观评价 | +55-70% | 高提升 |
+| **研讨会模式** | 研究场景，追求极致效果 | +200% | 最高效果 |
+| **轻量协作（知识库增强）** | 已有KG数据，追求一致性 | +0%LLM | 中等提升 |
+
+### 12.2 推荐实施顺序
+
+1. **第一步**：二次对话验证（低成本、高收益）
+2. **第二步**：Schema约束矩阵（规则验证、无LLM成本）
+3. **第三步**：知识库协同（实体归一化）
+4. **第四步**：根据效果决定是否升级到双重评审或研讨会模式
+
+---
