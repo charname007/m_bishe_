@@ -1,41 +1,244 @@
 """
 LangGraph节点函数 - 四步骤工作流节点
-使用LangChain的with_structured_output进行结构化输出
+使用 LangChain PydanticOutputParser 进行结构化输出（兼容 DeepSeek API）
 P2改进：简化评估节点，单次评估+规则校验
 P3改进：支持 StreamWriter 流式输出
+P5改进：添加 Filter 筛选节点
+P6改进：添加 Normalize 归一化节点，NER/RE/Eval 节点优先使用归一化文本
 """
+import json
 import math
 import re
 from collections import defaultdict
 from difflib import SequenceMatcher
 from typing import Dict, List, Any, Optional
 
+from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.types import StreamWriter
 
 from loguru import logger
 
-from .state import CorpusState, KGState, PhaseEnum, StepEnum
+from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES
+
+
+# ===== P6改进：辅助函数 - 获取处理文本 =====
+
+def _get_text_for_processing(state: CorpusState) -> str:
+    """
+    获取用于处理的文本，优先使用归一化文本
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        用于 NER/RE/Eval 等后续处理的文本
+        - 如果有归一化文本（normalized_text），优先使用
+        - 否则使用原始文本（raw_text）
+    """
+    normalized = state.get("normalized_text", "")
+    if normalized and normalized.strip():
+        return normalized
+    return state.get("raw_text", "")
 from .schemas import (
+    FilterResult,  # P5新增
+    NormalizeResult,  # P6新增
     EntityRecognitionResult,
     RelationExtractionResult,
     EvalResultFirst,
     EvalResultSecond,
     EvalResultSimplified,
     LabelResult,
+    SelfCheckNERResult,
+    SelfCheckREResult,
 )
 from .prompts import (
+    FILTER_PROMPT,  # P5新增
+    NORMALIZE_PROMPT,  # P6新增
     NER_PROMPT, RE_PROMPT, EVAL_PROMPT_1, EVAL_PROMPT_2,
     EVAL_PROMPT_SIMPLIFIED, LABEL_PROMPT,
-    format_entities, format_triples,
+    SELF_CHECK_NER_PROMPT, SELF_CHECK_RE_PROMPT,
+    format_entities, format_triples, format_verified_entities, format_retry_hint,
 )
+
+
+# ===== Filter 筛选节点（P5新增） =====
+
+def create_filter_node(llm: Any):
+    """
+    创建 Filter 筛选节点
+
+    职责：
+    1. 快速判断文本是否包含有价值的地理信息
+    2. 筛选无效文本以节省后续处理成本
+    3. 输出筛选结果和置信度
+    """
+    parser = PydanticOutputParser(pydantic_object=FilterResult)
+
+    async def filter_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 0: 文本筛选"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Filter] 筛选语料: {corpus_id}")
+
+        # 发送进度事件
+        writer({
+            "step": "filter",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始文本筛选"
+        })
+
+        try:
+            # 调用 LLM 进行筛选判断（使用 OutputParser）
+            prompt_text = FILTER_PROMPT.invoke({"raw_text": state["raw_text"]})
+            # 添加格式化指令
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: FilterResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Filter] 结果: is_valid={result.is_valid}, "
+                f"confidence={result.confidence}, "
+                f"skip_reason={result.skip_reason}"
+            )
+
+            # 发送完成事件
+            writer({
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "is_valid": result.is_valid,
+                "confidence": result.confidence,
+                "skip_reason": result.skip_reason,
+                "has_geo_entity": result.has_geo_entity,
+                "has_spatial_relation": result.has_spatial_relation,
+                "geo_entity_hint": result.geo_entity_hint
+            })
+
+            # 根据筛选结果决定下一步
+            if result.is_valid:
+                next_step = StepEnum.NER
+            else:
+                next_step = StepEnum.DONE  # 无效文本直接结束
+
+            return {
+                "filter_result": result.model_dump(),
+                "current_step": next_step,
+            }
+
+        except Exception as e:
+            logger.error(f"[Filter] 失败: {e}")
+            writer({
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            # 筛选失败时默认继续处理（保守策略）
+            return {
+                "filter_result": {
+                    "is_valid": True,
+                    "confidence": "low",
+                    "skip_reason": None,
+                    "has_geo_entity": False,
+                    "has_spatial_relation": False,
+                },
+                "error": str(e),
+                "current_step": StepEnum.NER,
+            }
+
+    return filter_node
+
+
+# ===== Normalize 归一化节点（P6新增） =====
+
+def create_normalize_node(llm: Any):
+    """
+    创建 Normalize 归一化节点
+
+    职责：
+    1. 消解省略主语和模糊指代
+    2. 归一化别名简称（如"武大"→"武汉大学"）
+    3. 将口语化文本改写为标准句式
+    4. 严格保留原文语义，不添加新信息
+    """
+    parser = PydanticOutputParser(pydantic_object=NormalizeResult)
+
+    async def normalize_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 0.5: 文本归一化"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Normalize] 归一化语料: {corpus_id}")
+
+        # 发送进度事件
+        writer({
+            "step": "normalize",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始文本归一化"
+        })
+
+        try:
+            # 使用原始文本进行归一化（使用 OutputParser）
+            raw_text = state["raw_text"]
+            prompt_text = NORMALIZE_PROMPT.invoke({"raw_text": raw_text})
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: NormalizeResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Normalize] 结果: has_changes={result.has_changes}, "
+                f"confidence={result.confidence}, "
+                f"normalizations={len(result.normalizations)}条"
+            )
+
+            # 发送完成事件
+            writer({
+                "step": "normalize",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "normalized_text": result.normalized_text,
+                "normalizations_count": len(result.normalizations),
+                "confidence": result.confidence,
+                "has_changes": result.has_changes
+            })
+
+            # 输出归一化结果
+            # normalized_text 供后续 NER/RE 节点使用
+            return {
+                "normalize_result": result.model_dump(),
+                "normalized_text": result.normalized_text,
+                "current_step": StepEnum.NER,
+            }
+
+        except Exception as e:
+            logger.error(f"[Normalize] 失败: {e}")
+            writer({
+                "step": "normalize",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            # 归一化失败时使用原始文本继续处理（保守策略）
+            return {
+                "normalize_result": {
+                    "normalized_text": state["raw_text"],
+                    "normalizations": [],
+                    "confidence": "low",
+                    "preserved_semantics": True,
+                    "has_changes": False,
+                },
+                "normalized_text": state["raw_text"],  # 使用原文
+                "error": str(e),
+                "current_step": StepEnum.NER,
+            }
+
+    return normalize_node
 
 
 # ===== 单条语料处理节点（四步骤工作流） =====
 
 def create_ner_node(llm: Any):
     """创建NER节点"""
-    # 使用with_structured_output获取结构化输出
-    structured_llm = llm.with_structured_output(EntityRecognitionResult)
+    parser = PydanticOutputParser(pydantic_object=EntityRecognitionResult)
 
     async def ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 1: 命名实体识别"""
@@ -51,11 +254,15 @@ def create_ner_node(llm: Any):
         })
 
         try:
-            # 使用ChatPromptTemplate生成消息
-            messages = NER_PROMPT.invoke({"raw_text": state["raw_text"]})
+            # P6改进：优先使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+            logger.debug(f"[NER] 使用文本: {text_for_processing[:50]}...")
 
-            # 调用LLM获取结构化输出（异步）
-            result: EntityRecognitionResult = await structured_llm.ainvoke(messages)
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = NER_PROMPT.invoke({"raw_text": text_for_processing})
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: EntityRecognitionResult = parser.parse(response.content)
 
             entity_count = len(result.道路) + len(result.POI) + len(result.建筑物) + len(result.街区)
             logger.debug(f"[NER] 结果: {result}")
@@ -103,7 +310,7 @@ def create_ner_node(llm: Any):
 
 def create_re_node(llm: Any):
     """创建RE节点"""
-    structured_llm = llm.with_structured_output(RelationExtractionResult)
+    parser = PydanticOutputParser(pydantic_object=RelationExtractionResult)
 
     async def re_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 2: 关系抽取"""
@@ -131,14 +338,17 @@ def create_re_node(llm: Any):
             return {"current_step": StepEnum.EVAL, "triples": []}
 
         try:
-            # 使用ChatPromptTemplate生成消息
-            messages = RE_PROMPT.invoke({
-                "raw_text": state["raw_text"],
+            # P6改进：优先使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = RE_PROMPT.invoke({
+                "raw_text": text_for_processing,
                 "entities": format_entities(state["entities"]),
             })
-
-            # 调用LLM获取结构化输出（异步）
-            result: RelationExtractionResult = await structured_llm.ainvoke(messages)
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: RelationExtractionResult = parser.parse(response.content)
 
             triples = [
                 {
@@ -178,7 +388,7 @@ def create_re_node(llm: Any):
 
 def create_eval_1_node(llm: Any):
     """创建第一次评估节点"""
-    structured_llm = llm.with_structured_output(EvalResultFirst)
+    parser = PydanticOutputParser(pydantic_object=EvalResultFirst)
 
     async def eval_1_node(state: CorpusState) -> Dict:
         """Step 3a: 第一次评估"""
@@ -189,14 +399,14 @@ def create_eval_1_node(llm: Any):
             return {"eval_scores": [], "current_step": StepEnum.LABEL}
 
         try:
-            # 使用ChatPromptTemplate生成消息
-            messages = EVAL_PROMPT_1.invoke({
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = EVAL_PROMPT_1.invoke({
                 "triples": state["triples"],
                 "raw_text": state["raw_text"],
             })
-
-            # 调用LLM获取结构化输出（异步）
-            result: EvalResultFirst = await structured_llm.ainvoke(messages)
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: EvalResultFirst = parser.parse(response.content)
 
             scores = [
                 {
@@ -224,7 +434,7 @@ def create_eval_1_node(llm: Any):
 
 def create_eval_2_node(llm: Any):
     """创建第二次评估节点（自检）"""
-    structured_llm = llm.with_structured_output(EvalResultSecond)
+    parser = PydanticOutputParser(pydantic_object=EvalResultSecond)
 
     async def eval_2_node(state: CorpusState) -> Dict:
         """Step 3b: 第二次评估（自检）"""
@@ -248,14 +458,14 @@ def create_eval_2_node(llm: Any):
             }
 
         try:
-            # 使用ChatPromptTemplate生成消息
-            messages = EVAL_PROMPT_2.invoke({
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = EVAL_PROMPT_2.invoke({
                 "previous_scores": state["eval_scores"],
                 "raw_text": state["raw_text"],
             })
-
-            # 调用LLM获取结构化输出（异步）
-            result: EvalResultSecond = await structured_llm.ainvoke(messages)
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: EvalResultSecond = parser.parse(response.content)
 
             # 更新评分
             final_scores = [
@@ -395,7 +605,7 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
 
     合原来两轮评估为单次评估 + 规则校验，减少 LLM 调用成本
     """
-    structured_llm = llm.with_structured_output(EvalResultSimplified)
+    parser = PydanticOutputParser(pydantic_object=EvalResultSimplified)
 
     async def eval_simplified_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 3: 简化评估（单次LLM调用 + 规则校验）"""
@@ -426,15 +636,20 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
             }
 
         try:
+            # P6改进：优先使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
             # 格式化三元组用于提示词
             triples_text = format_triples(state["triples"])
 
-            messages = EVAL_PROMPT_SIMPLIFIED.invoke({
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = EVAL_PROMPT_SIMPLIFIED.invoke({
                 "triples": triples_text,
-                "raw_text": state["raw_text"],
+                "raw_text": text_for_processing,
             })
-
-            result: EvalResultSimplified = await structured_llm.ainvoke(messages)
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: EvalResultSimplified = parser.parse(response.content)
 
             # 处理评分
             scores = [
@@ -546,7 +761,7 @@ def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) 
 
 def create_label_node(llm: Any):
     """创建属性标注节点"""
-    structured_llm = llm.with_structured_output(LabelResult)
+    parser = PydanticOutputParser(pydantic_object=LabelResult)
 
     async def label_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 4: 属性标注"""
@@ -577,14 +792,14 @@ def create_label_node(llm: Any):
             return {"current_step": StepEnum.DONE}
 
         try:
-            # 使用ChatPromptTemplate生成消息
-            messages = LABEL_PROMPT.invoke({
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = LABEL_PROMPT.invoke({
                 "entities": all_entities,
                 "relations": format_triples(state["corrected_triples"]),
             })
-
-            # 调用LLM获取结构化输出（异步）
-            result: LabelResult = await structured_llm.ainvoke(messages)
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: LabelResult = parser.parse(response.content)
 
             entity_attrs = {
                 name: {"类别": attrs.类别, "细分": attrs.细分}
@@ -1015,3 +1230,333 @@ def deduplicate_triples(triples: List[Dict]) -> List[Dict]:
                     break
 
     return unique_triples
+
+
+# ===== Self-Check 节点（二次对话验证）=====
+
+def create_self_check_ner_node(llm: Any):
+    """
+    创建 Self-Check-NER 节点
+
+    职责：
+    1. 检查遗漏实体
+    2. 识别别名/简称，建议归一化
+    3. 过滤无关实体
+    4. 给出置信度评估
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckNERResult)
+
+    async def self_check_ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 3.5a: 实体校验"""
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-NER] 校验语料: {corpus_id}, 重试次数: {retry_count}")
+
+        writer({
+            "step": "self_check_ner",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始实体校验",
+            "retry_count": retry_count
+        })
+
+        try:
+            # P6改进：优先使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 构建重试提示（如有）
+            problem_entities = state.get('problem_entities', [])
+            retry_hint = format_retry_hint(problem_entities, [])
+
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = SELF_CHECK_NER_PROMPT.invoke({
+                "raw_text": text_for_processing,
+                "entities": format_entities(state["entities"]),
+                "retry_hint": retry_hint,
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckNERResult = parser.parse(response.content)
+
+            # 应用归一化，生成 final_entities
+            final_entities = _apply_entity_normalizations(state["entities"], result)
+
+            # 提取问题实体（供重试参考）
+            missing_names = [e.name for e in result.missing_entities]
+
+            writer({
+                "step": "self_check_ner",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "verified_count": len(result.verified_entities),
+                "missing_count": len(result.missing_entities),
+                "normalization_count": len(result.entity_normalizations),
+                "confidence": result.overall_confidence
+            })
+
+            return {
+                "self_check_ner_result": result.model_dump(),
+                "final_entities": final_entities,
+                "problem_entities": missing_names,
+                "current_step": StepEnum.RE,  # Self-Check-NER 在 NER 和 RE 之间
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-NER] 失败: {e}")
+            writer({
+                "step": "self_check_ner",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_ner_result": {},
+                "error": str(e),
+                "current_step": StepEnum.RE,  # 即使失败也继续到 RE
+            }
+
+    return self_check_ner_node
+
+
+def create_self_check_re_node(llm: Any):
+    """
+    创建 Self-Check-RE 节点
+
+    职责：
+    1. 幻觉检测
+    2. 关系验证
+    3. 证据匹配
+    4. 判断是否需要重抽
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckREResult)
+
+    async def self_check_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 3.5b: 三元组校验"""
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
+        logger.info(f"[Self-Check-RE] 校验语料: {corpus_id}, 重试次数: {retry_count}/{max_retries}")
+
+        writer({
+            "step": "self_check_re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始三元组校验",
+            "retry_count": retry_count
+        })
+
+        try:
+            # 构建重试提示（如有）
+            problem_triples = state.get('problem_triples', [])
+            retry_hint = format_retry_hint([], problem_triples)
+
+            # 获取已校验实体
+            verified_entities = state.get('final_entities', [])
+            ner_result = state.get('self_check_ner_result', {})
+            if ner_result and 'verified_entities' in ner_result:
+                verified_entities = ner_result['verified_entities']
+
+            # P6改进：优先使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 使用 OutputParser 进行结构化输出
+            prompt_text = SELF_CHECK_RE_PROMPT.invoke({
+                "raw_text": text_for_processing,
+                "triples": format_triples(state.get("triples", [])),  # RE 输出
+                "verified_entities": format_verified_entities(verified_entities),
+                "retry_hint": retry_hint,
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckREResult = parser.parse(response.content)
+
+            # 应用修正，生成 corrected_triples（供 Eval 使用）
+            corrected_triples = _apply_triple_corrections_for_self_check(
+                state.get("triples", []), result  # RE 输出
+            )
+
+            # 提取问题三元组（供重试参考）
+            problem_triples_list = [
+                {
+                    "head": t.head,
+                    "relation": t.relation,
+                    "tail": t.tail,
+                    "reason": t.reason
+                }
+                for t in result.rejected_triples
+            ]
+
+            # 计算整体置信度
+            overall_confidence = _calculate_overall_confidence(
+                state.get('self_check_ner_result', {}),
+                result.model_dump()
+            )
+
+            # 判断是否需要重试
+            retry_count = state.get('retry_count', 0) + 1  # 每次进入 Self-Check 计数
+            needs_retry = _should_trigger_retry(
+                result, retry_count, max_retries, state.get('self_check_ner_result', {})
+            )
+
+            writer({
+                "step": "self_check_re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "verified_count": len(result.verified_triples),
+                "rejected_count": len(result.rejected_triples),
+                "corrected_count": len(result.corrected_triples),
+                "confidence": overall_confidence,
+                "needs_retry": needs_retry
+            })
+
+            return {
+                "self_check_re_result": result.model_dump(),
+                "corrected_triples": corrected_triples,  # 输出给 Eval 使用
+                "final_triples": corrected_triples,      # 同时保留 final_triples 兼容
+                "problem_triples": problem_triples_list,
+                "verification_confidence": overall_confidence,
+                "retry_count": retry_count,
+                "needs_review": overall_confidence == "low" or retry_count >= max_retries,
+                "current_step": StepEnum.EVAL,  # 默认值，实际由路由决定
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-RE] 失败: {e}")
+            writer({
+                "step": "self_check_re",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_re_result": {},
+                "corrected_triples": state.get("triples", []),  # 失败时保留原 triples
+                "error": str(e),
+                "retry_count": state.get('retry_count', 0) + 1,
+                "current_step": StepEnum.EVAL,
+            }
+
+    return self_check_re_node
+
+
+# ===== Self-Check 辅助函数 =====
+
+def _apply_entity_normalizations(
+    original_entities: Dict[str, List[str]],
+    result: SelfCheckNERResult
+) -> List[Dict]:
+    """应用实体归一化，生成 final_entities"""
+    final_entities = []
+
+    # 构建归一化映射
+    normalization_map = {}
+    for norm in result.entity_normalizations:
+        normalization_map[norm.raw] = norm.canonical
+
+    # 应用归一化到校验通过的实体
+    for ve in result.verified_entities:
+        entity = {
+            "name": ve.name,
+            "type": ve.type,
+            "confidence": ve.confidence,
+            "aliases": ve.aliases,
+            "evidence": ve.evidence,
+        }
+        final_entities.append(entity)
+
+    return final_entities
+
+
+def _apply_triple_corrections_for_self_check(
+    original_triples: List[Dict],
+    result: SelfCheckREResult
+) -> List[Dict]:
+    """应用三元组修正"""
+    final_triples = []
+
+    # 保留验证通过的三元组
+    for vt in result.verified_triples:
+        triple = {
+            "head": vt.head,
+            "relation": vt.relation,
+            "tail": vt.tail,
+            "confidence": vt.confidence,
+            "evidence_valid": vt.evidence_valid,
+            "evidence_match": vt.evidence_match,
+            "passed_eval": True,
+        }
+        final_triples.append(triple)
+
+    # 应用修正的三元组
+    for tc in result.corrected_triples:
+        if tc.action == "delete":
+            continue  # 删除操作：不添加到最终结果
+
+        corrected_triple = {
+            "head": tc.corrected_head or tc.original_head,
+            "relation": tc.corrected_relation or tc.original_relation,
+            "tail": tc.corrected_tail or tc.original_tail,
+            "confidence": "medium",  # 修正后的置信度默认为 medium
+            "correction_reason": tc.reason,
+            "passed_eval": True,
+        }
+        final_triples.append(corrected_triple)
+
+    return final_triples
+
+
+def _calculate_overall_confidence(
+    ner_result: Dict,
+    re_result: Dict
+) -> str:
+    """计算整体置信度"""
+    ner_conf = ner_result.get("overall_confidence", "medium")
+    re_conf = re_result.get("overall_confidence", "medium")
+
+    # 置信度等级映射
+    conf_level = {"high": 3, "medium": 2, "low": 1}
+
+    avg_level = (conf_level.get(ner_conf, 2) + conf_level.get(re_conf, 2)) / 2
+
+    if avg_level >= 2.5:
+        return "high"
+    elif avg_level >= 1.5:
+        return "medium"
+    else:
+        return "low"
+
+
+def _should_trigger_retry(
+    re_result: SelfCheckREResult,
+    retry_count: int,
+    max_retries: int,
+    ner_result: Dict
+) -> bool:
+    """
+    判断是否需要触发重抽
+
+    条件：
+    1. 重试次数未达上限
+    2. Self-Check-RE 明确建议重抽
+    3. 或者 NER 有较多遗漏 + RE 有较多幻觉
+    """
+    if retry_count >= max_retries:
+        return False
+
+    # Self-Check-RE 明确建议重抽
+    if re_result.retry_suggested:
+        return True
+
+    # NER 遗漏较多（>3个）且置信度低
+    ner_conf = ner_result.get("overall_confidence", "medium")
+    missing_count = len(ner_result.get("missing_entities", []))
+    if ner_conf == "low" and missing_count > 3:
+        return True
+
+    # RE 幻觉较多（>3个）且置信度低
+    re_conf = re_result.overall_confidence
+    rejected_count = len(re_result.rejected_triples)
+    if re_conf == "low" and rejected_count > 3:
+        return True
+
+    return False

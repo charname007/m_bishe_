@@ -6,7 +6,7 @@ import math
 import pandas as pd
 from shapely.geometry import Point
 
-from config import settings
+from settings import settings
 
 def shp_to_kg(shp_file, neo4j_uri, neo4j_user, neo4j_password):   
     # 读取Shapefile文件

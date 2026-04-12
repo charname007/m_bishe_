@@ -30,9 +30,13 @@ def replace_value(current: Any, new: Any) -> Any:
 
 class StepEnum(str, Enum):
     """工作流步骤枚举"""
+    FILTER = "filter"                       # P5新增：文本筛选
+    NORMALIZE = "normalize"                 # P6新增：文本归一化
     NER = "ner"
     RE = "re"
     EVAL = "eval"
+    SELF_CHECK_NER = "self_check_ner"  # 新增：实体校验
+    SELF_CHECK_RE = "self_check_re"    # 新增：三元组校验
     LABEL = "label"
     DONE = "done"
 
@@ -46,13 +50,26 @@ class PhaseEnum(str, Enum):
     FINALIZE = "finalize"
 
 
-# ===== 单条语料处理状态（LangGraph节点使用） =====
+# ===== 反思循环配置 =====
+
+DEFAULT_MAX_RETRIES = 3  # 默认最大重试次数
+
 
 class CorpusState(TypedDict):
     """单条语料处理状态 - 用于单条语料的四步骤工作流"""
     # 输入
     corpus_id: str
     raw_text: str
+
+    # Step 0: Filter筛选结果（P5新增）
+    filter_result: Annotated[Dict, replace_value]
+    """文本筛选结果：is_valid, skip_reason, confidence"""
+
+    # Step 0.5: Normalize归一化结果（P6新增）
+    normalize_result: Annotated[Dict, replace_value]
+    """文本归一化结果：normalized_text, normalizations, confidence"""
+    normalized_text: Annotated[str, replace_value]
+    """归一化后的文本（供后续节点使用）"""
 
     # Step 1: NER结果
     entities: Annotated[Dict[str, List[str]], replace_value]
@@ -64,6 +81,34 @@ class CorpusState(TypedDict):
     eval_scores: Annotated[List[Dict], replace_value]
     eval_passed: Annotated[bool, replace_value]
     corrected_triples: Annotated[List[Dict], replace_value]
+
+    # Step 3.5: Self-Check 结果（新增）
+    self_check_ner_result: Annotated[Dict, replace_value]
+    """Self-Check-NER 校验结果"""
+    self_check_re_result: Annotated[Dict, replace_value]
+    """Self-Check-RE 校验结果"""
+
+    # 最终输出（校验/归一化后）
+    final_entities: Annotated[List[Dict], replace_value]
+    """最终实体列表（包含别名信息）"""
+    final_triples: Annotated[List[Dict], replace_value]
+    """最终三元组列表（校验后）"""
+    verification_confidence: Annotated[str, replace_value]
+    """整体置信度: high/medium/low"""
+
+    # 反思循环控制（新增）
+    retry_count: Annotated[int, replace_value]
+    """当前重试次数"""
+    max_retries: Annotated[int, replace_value]
+    """最大重试次数"""
+    retry_reason: Annotated[str, replace_value]
+    """重试原因描述"""
+    problem_entities: Annotated[List[str], replace_value]
+    """NER问题实体（遗漏的实体名）"""
+    problem_triples: Annotated[List[Dict], replace_value]
+    """RE问题三元组（幻觉/错误）"""
+    needs_review: Annotated[bool, replace_value]
+    """是否需要人工复核"""
 
     # Step 4: 属性标注
     entity_attrs: Annotated[Dict[str, Dict], replace_value]

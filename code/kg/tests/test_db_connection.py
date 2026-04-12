@@ -1,7 +1,7 @@
 """
 数据库连接测试脚本
 """
-from config import settings
+from settings import settings
 from kg.neo4j_client import Neo4jClient
 from kg.postgres_client import PostgresClient
 from loguru import logger

@@ -56,6 +56,27 @@ class ExtractionConfig:
     retry_max_attempts: int = 3
     """Retry 最大重试次数"""
 
+    # ===== Self-Check + 反思循环配置（P4新增） =====
+    enable_self_check: bool = False
+    """是否启用 Self-Check + 反思循环模式"""
+
+    self_check_max_retries: int = 3
+    """反思循环最大重试次数"""
+
+    self_check_ner_low_threshold: int = 2
+    """NER 遗漏实体数量阈值（超过此值触发重抽）"""
+
+    self_check_re_low_threshold: int = 2
+    """RE 幻觉三元组数量阈值（超过此值触发重抽）"""
+
+    # ===== Filter 筛选配置（P5新增） =====
+    enable_filter: bool = False
+    """是否启用 Filter 筛选节点，提前过滤无效文本"""
+
+    # ===== Normalize 归一化配置（P6新增） =====
+    enable_normalize: bool = False
+    """是否启用 Normalize 归一化节点，消解指代和归一化别名"""
+
     @classmethod
     def from_env(cls) -> "ExtractionConfig":
         """
@@ -110,6 +131,12 @@ class ExtractionConfig:
             retry_backoff_factor=get_float("RETRY_BACKOFF_FACTOR", 2.0),
             retry_max_interval=get_float("RETRY_MAX_INTERVAL", 30.0),
             retry_max_attempts=get_int("RETRY_MAX_ATTEMPTS", 3),
+            enable_self_check=get_bool("ENABLE_SELF_CHECK", False),
+            self_check_max_retries=get_int("SELF_CHECK_MAX_RETRIES", 3),
+            self_check_ner_low_threshold=get_int("SELF_CHECK_NER_LOW_THRESHOLD", 2),
+            self_check_re_low_threshold=get_int("SELF_CHECK_RE_LOW_THRESHOLD", 2),
+            enable_filter=get_bool("ENABLE_FILTER", False),
+            enable_normalize=get_bool("ENABLE_NORMALIZE", False),
         )
 
     @classmethod
@@ -127,6 +154,12 @@ class ExtractionConfig:
             retry_backoff_factor=config_dict.get("retry_backoff_factor", 2.0),
             retry_max_interval=config_dict.get("retry_max_interval", 30.0),
             retry_max_attempts=config_dict.get("retry_max_attempts", 3),
+            enable_self_check=config_dict.get("enable_self_check", False),
+            self_check_max_retries=config_dict.get("self_check_max_retries", 3),
+            self_check_ner_low_threshold=config_dict.get("self_check_ner_low_threshold", 2),
+            self_check_re_low_threshold=config_dict.get("self_check_re_low_threshold", 2),
+            enable_filter=config_dict.get("enable_filter", False),
+            enable_normalize=config_dict.get("enable_normalize", False),
         )
 
     def to_dict(self) -> dict:
@@ -143,6 +176,12 @@ class ExtractionConfig:
             "retry_backoff_factor": self.retry_backoff_factor,
             "retry_max_interval": self.retry_max_interval,
             "retry_max_attempts": self.retry_max_attempts,
+            "enable_self_check": self.enable_self_check,
+            "self_check_max_retries": self.self_check_max_retries,
+            "self_check_ner_low_threshold": self.self_check_ner_low_threshold,
+            "self_check_re_low_threshold": self.self_check_re_low_threshold,
+            "enable_filter": self.enable_filter,
+            "enable_normalize": self.enable_normalize,
         }
 
 

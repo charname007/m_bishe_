@@ -21,9 +21,9 @@ from pyproj import Transformer
 from rtree import index
 
 try:
-    from config import settings
+    from settings import settings
 except ImportError:
-    # 如果没有 config 模块，使用默认配置
+    # 如果没有 settings 模块，使用默认配置
     class MockSettings:
         DEBUG = False
         NEO4J_URI = 'bolt://localhost:7687'

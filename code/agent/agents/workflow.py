@@ -16,8 +16,10 @@ from langgraph.types import RetryPolicy
 
 from loguru import logger
 
-from .state import CorpusState, KGState, StepEnum, PhaseEnum
+from .state import CorpusState, KGState, StepEnum, PhaseEnum, DEFAULT_MAX_RETRIES
 from .nodes import (
+    create_filter_node,          # P5新增：Filter 筛选节点
+    create_normalize_node,       # P6新增：Normalize 归一化节点
     create_ner_node,
     create_re_node,
     create_eval_1_node,
@@ -26,6 +28,8 @@ from .nodes import (
     create_label_node,
     create_coordinator_node,
     create_aggregator_node,
+    create_self_check_ner_node,   # 新增：Self-Check-NER 节点
+    create_self_check_re_node,    # 新增：Self-Check-RE 节点
 )
 
 
@@ -137,9 +141,98 @@ def _get_database_config() -> Dict[str, Any]:
 
 # ===== 条件路由函数（模块级，便于测试） =====
 
+def route_after_filter(state: CorpusState) -> str:
+    """
+    Filter 后路由（P5新增）
+
+    决策逻辑：
+    - is_valid=true → 继续到 NER
+    - is_valid=false → 直接跳到 END
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称或END
+    """
+    filter_result = state.get("filter_result", {})
+
+    # 如果筛选失败（error），默认继续处理（保守策略）
+    if state.get("error") and not filter_result:
+        logger.warning(f"[Filter-Route] 筛选失败但有错误，继续到 NER")
+        return "ner"
+
+    # 判断是否有效
+    is_valid = filter_result.get("is_valid", True)  # 默认继续处理
+    confidence = filter_result.get("confidence", "medium")
+
+    if is_valid:
+        logger.info(f"[Filter-Route] 文本有效，继续到 NER，置信度: {confidence}")
+        return "ner"
+    else:
+        skip_reason = filter_result.get("skip_reason", "未指定原因")
+        logger.info(f"[Filter-Route] 文本无效，跳过处理，原因: {skip_reason}")
+        return END
+
+
+def route_after_filter_to_normalize(state: CorpusState) -> str:
+    """
+    Filter 后路由（同时启用 Normalize 时使用）
+
+    有效文本 → Normalize
+    无效文本 → END
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称: "normalize" 或 END
+    """
+    filter_result = state.get("filter_result", {})
+
+    if state.get("error") and not filter_result:
+        logger.warning(f"[Filter-Route] 筛选失败但有错误，继续到 Normalize")
+        return "normalize"
+
+    is_valid = filter_result.get("is_valid", True)
+
+    if is_valid:
+        logger.info(f"[Filter-Route] 文本有效，继续到 Normalize")
+        return "normalize"
+    else:
+        skip_reason = filter_result.get("skip_reason", "未指定原因")
+        logger.info(f"[Filter-Route] 文本无效，跳过处理，原因: {skip_reason}")
+        return END
+
+
+def route_after_normalize(state: CorpusState) -> str:
+    """
+    Normalize 后路由（P6新增）
+
+    Normalize 节点总是输出有效结果（失败时使用原文），所以直接路由到 NER。
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称
+    """
+    # Normalize 失败时使用原文继续，不阻塞流程
+    normalize_result = state.get("normalize_result", {})
+    confidence = normalize_result.get("confidence", "medium")
+    has_changes = normalize_result.get("has_changes", False)
+
+    if state.get("error") and not normalize_result:
+        logger.warning(f"[Normalize-Route] 归一化失败但有错误，使用原文继续")
+    else:
+        logger.info(f"[Normalize-Route] 归一化完成，置信度: {confidence}, 有改动: {has_changes}")
+
+    return "ner"
+
+
 def route_after_ner(state: CorpusState) -> str:
     """
-    NER后路由：失败则END，成功则继续RE
+    NER后路由（普通模式）：失败则END，成功则继续RE
 
     Args:
         state: 当前语料状态
@@ -149,7 +242,157 @@ def route_after_ner(state: CorpusState) -> str:
     """
     if state.get("error") or state.get("current_step") == StepEnum.DONE:
         return END
+    return "re"  # 普通模式：NER → RE
+
+
+def route_after_ner_for_self_check(state: CorpusState) -> str:
+    """
+    NER后路由（Self-Check模式）：失败则END，成功则继续Self-Check-NER
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称或END
+    """
+    if state.get("error") or state.get("current_step") == StepEnum.DONE:
+        return END
+    return "self_check_ner"  # Self-Check模式：NER → Self-Check-NER
+
+
+def route_after_self_check_ner(state: CorpusState) -> str:
+    """
+    Self-Check-NER 后的路由决策
+
+    决策逻辑：
+    1. 检查重试次数是否达到上限
+    2. 判断实体遗漏是否严重
+    3. 决定回退到 NER 重抽还是继续到 RE
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称: "ner" / "re" / END
+    """
+    # 1. 检查是否有错误
+    if state.get("error"):
+        logger.warning(f"[Self-Check-NER-Route] 有错误，跳转到 END")
+        return END
+
+    # 2. 获取重试次数和上限
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+
+    # 3. 获取 Self-Check-NER 结果
+    ner_result = state.get("self_check_ner_result", {})
+    ner_confidence = ner_result.get("overall_confidence", "medium")
+    missing_entities = ner_result.get("missing_entities", [])
+
+    # 4. 检查是否达到最大重试次数
+    if retry_count >= max_retries:
+        logger.warning(
+            f"[Self-Check-NER-Route] 达到最大重试次数 {retry_count}/{max_retries}，"
+            f"强制通过，置信度: {ner_confidence}"
+        )
+        return "re"  # 强制继续到 RE
+
+    # 5. 判断是否需要重试 NER
+    # NER 问题：遗漏实体过多（>阈值）
+    # P4改进：使用配置阈值而非硬编码
+    ner_low_threshold = DEFAULT_CONFIG.self_check_ner_low_threshold
+    if ner_confidence == "low" and len(missing_entities) > ner_low_threshold:
+        missing_names = [e.get("name", str(e)) for e in missing_entities[:3]]
+        logger.info(f"[Self-Check-NER-Route] 触发 NER 重抽，遗漏实体: {missing_names}")
+        return "ner"  # 回退到 NER
+
+    # Self-Check-NER 明确建议重抽
+    if ner_result.get("retry_suggested", False):
+        logger.info(f"[Self-Check-NER-Route] Self-Check-NER 建议重抽")
+        return "ner"
+
+    # 6. 通过，继续到 RE
+    logger.info(f"[Self-Check-NER-Route] 通过，置信度: {ner_confidence}，继续到 RE")
     return "re"
+
+
+def route_after_self_check_re(state: CorpusState) -> str:
+    """
+    Self-Check-RE 后的路由决策（反思循环）
+
+    决策逻辑：
+    1. 检查重试次数是否达到上限
+    2. 判断是 NER 问题还是 RE 问题
+    3. 决定回退到哪个节点或继续到 Eval
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称: "ner" / "re" / "eval" / END
+    """
+    # 1. 检查是否有错误
+    if state.get("error"):
+        logger.warning(f"[Self-Check-RE-Route] 有错误，跳转到 END")
+        return END
+
+    # 2. 获取重试次数和上限
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+
+    # 3. 获取 Self-Check-RE 结果
+    re_result = state.get("self_check_re_result", {})
+    re_confidence = re_result.get("overall_confidence", "medium")
+    rejected_triples = re_result.get("rejected_triples", [])
+
+    # 4. 检查是否达到最大重试次数
+    if retry_count >= max_retries:
+        logger.warning(
+            f"[Self-Check-RE-Route] 达到最大重试次数 {retry_count}/{max_retries}，"
+            f"强制通过，置信度: {re_confidence}"
+        )
+        return "eval"  # 强制继续到 Eval
+
+    # 5. 判断是否需要重试
+    need_retry = False
+    retry_target = None
+    retry_reason = ""
+
+    # P4改进：使用配置阈值而非硬编码
+    re_low_threshold = DEFAULT_CONFIG.self_check_re_low_threshold
+
+    # RE 问题：幻觉三元组过多
+    if re_confidence == "low" and len(rejected_triples) > re_low_threshold:
+        rejected_heads = [t.get("head", "") for t in rejected_triples[:3]]
+        need_retry = True
+        retry_target = "re"
+        retry_reason = f"幻觉三元组过多: {rejected_heads}"
+        logger.info(f"[Self-Check-RE-Route] 触发 RE 重抽: {retry_reason}")
+
+    # Self-Check-RE 明确建议重抽 NER（实体问题导致三元组问题）
+    elif re_result.get("retry_suggested", False) and re_result.get("retry_target") == "ner":
+        need_retry = True
+        retry_target = "ner"
+        retry_reason = re_result.get("retry_reason", "Self-Check 建议")
+        logger.info(f"[Self-Check-RE-Route] Self-Check 建议回退到 NER: {retry_reason}")
+
+    # Self-Check-RE 明确建议重抽 RE
+    elif re_result.get("retry_suggested", False) and re_result.get("retry_target") == "re":
+        need_retry = True
+        retry_target = "re"
+        retry_reason = re_result.get("retry_reason", "Self-Check 建议")
+        logger.info(f"[Self-Check-RE-Route] Self-Check 建议回退到 RE: {retry_reason}")
+
+    # 6. 返回路由结果
+    if need_retry:
+        return retry_target  # "ner" 或 "re"
+    else:
+        logger.info(f"[Self-Check-RE-Route] 通过，置信度: {re_confidence}，继续到 Eval")
+        return "eval"
+
+
+# 保留旧函数名兼容性
+route_after_self_check = route_after_self_check_re
 
 
 # ===== 单条语料工作流 =====
@@ -178,20 +421,40 @@ LLM_RETRY_POLICY = RetryPolicy(
 )
 
 
-def build_corpus_workflow(llm: Any, use_simplified_eval: bool = True) -> CompiledStateGraph:
+def build_corpus_workflow(
+    llm: Any,
+    use_simplified_eval: bool = True,
+    enable_self_check: bool = False,
+    enable_filter: bool = False,
+    enable_normalize: bool = False,
+    max_retries: int = DEFAULT_MAX_RETRIES
+) -> CompiledStateGraph:
     """
     构建单条语料处理工作流
 
-    流程: START → NER → (条件判断) → RE → Eval → Label → END
-    NER失败时直接END，跳过后续节点
+    流程模式：
+    - 基础模式: START → NER → RE → Eval → Label → END
+    - Filter模式: START → Filter → [路由] → NER → RE → Eval → Label → END
+    - Normalize模式: START → Normalize → NER → RE → Eval → Label → END
+    - Filter+Normalize: START → Filter → [路由] → Normalize → NER → RE → Eval → Label → END
+    - Self-Check模式: START → NER → Self-Check-NER → [反思] → RE → Self-Check-RE → [反思] → Eval → Label → END
+    - 完整模式: START → Filter → [路由] → Normalize → NER → Self-Check-NER → [反思] → RE → Self-Check-RE → [反思] → Eval → Label → END
 
     P1改进：为 LLM 调用节点添加 RetryPolicy，自动处理临时故障
     P2改进：支持简化评估模式，减少 LLM 调用成本
+    P4改进：支持 Self-Check + 反思循环，提升抽取质量
+    P5改进：支持 Filter 筛选节点，提前过滤无效文本
+    P6改进：支持 Normalize 归一化节点，消解指代和归一化别名
 
     Args:
         llm: LangChain LLM 实例
         use_simplified_eval: 是否使用简化评估（单次评估+规则校验），默认True
+        enable_self_check: 是否启用 Self-Check + 反思循环，默认False
+        enable_filter: 是否启用 Filter 筛选节点，默认False
+        enable_normalize: 是否启用 Normalize 归一化节点，默认False
+        max_retries: 反思循环最大重试次数，默认3
     """
+
     # 创建节点函数
     ner_node = create_ner_node(llm)
     re_node = create_re_node(llm)
@@ -205,17 +468,102 @@ def build_corpus_workflow(llm: Any, use_simplified_eval: bool = True) -> Compile
     builder.add_node("re", re_node, retry_policy=LLM_RETRY_POLICY)
     builder.add_node("label", label_node, retry_policy=LLM_RETRY_POLICY)
 
-    # P2改进：根据配置选择评估模式
-    if use_simplified_eval:
+    # P5+P6改进：Filter + Normalize 节点组合
+    # 流程优先级：Filter 先筛选，Normalize 后归一化
+    if enable_filter and enable_normalize:
+        # 同时启用：Filter → [路由] → Normalize → NER 或 END
+        filter_node = create_filter_node(llm)
+        normalize_node = create_normalize_node(llm)
+        builder.add_node("filter", filter_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
+
+        # START → Filter → [路由] → Normalize 或 END
+        builder.add_edge(START, "filter")
+        builder.add_conditional_edges("filter", route_after_filter_to_normalize)
+        # Normalize 总是继续到 NER
+        builder.add_edge("normalize", "ner")
+
+        logger.info(f"[Workflow] 启用 Filter + Normalize 筛选归一化模式")
+
+    elif enable_filter:
+        # 只启用 Filter: START → Filter → [路由] → NER 或 END
+        filter_node = create_filter_node(llm)
+        builder.add_node("filter", filter_node, retry_policy=LLM_RETRY_POLICY)
+
+        builder.add_edge(START, "filter")
+        builder.add_conditional_edges("filter", route_after_filter)
+
+        logger.info(f"[Workflow] 启用 Filter 筛选节点")
+
+    elif enable_normalize:
+        # 只启用 Normalize: START → Normalize → NER
+        normalize_node = create_normalize_node(llm)
+        builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
+
+        builder.add_edge(START, "normalize")
+        builder.add_edge("normalize", "ner")
+
+        logger.info(f"[Workflow] 启用 Normalize 归一化节点")
+
+    else:
+        # 无 Filter 无 Normalize 时，直接从 START 到 NER
+        builder.add_edge(START, "ner")
+
+    # P4改进：Self-Check + 反思循环模式
+    if enable_self_check:
+        # Self-Check 节点
+        self_check_ner_node = create_self_check_ner_node(llm)
+        self_check_re_node = create_self_check_re_node(llm)
+        eval_node = create_eval_simplified_node(llm)
+
+        builder.add_node("self_check_ner", self_check_ner_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node("self_check_re", self_check_re_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
+
+        # NER 失败时直接 END，成功时进入 Self-Check-NER
+        builder.add_conditional_edges("ner", route_after_ner_for_self_check)
+
+        # Self-Check-NER 后路由：回退 NER 或继续 RE
+        builder.add_conditional_edges(
+            "self_check_ner",
+            route_after_self_check_ner,
+            {
+                "ner": "ner",     # 回退到 NER 重抽
+                "re": "re",       # 通过，继续到 RE
+            }
+        )
+
+        # RE → Self-Check-RE
+        builder.add_edge("re", "self_check_re")
+
+        # Self-Check-RE 后路由：回退 NER/RE 或继续 Eval
+        builder.add_conditional_edges(
+            "self_check_re",
+            route_after_self_check_re,
+            {
+                "ner": "ner",     # 回退到 NER（实体问题导致）
+                "re": "re",       # 回退到 RE（三元组问题）
+                "eval": "eval",   # 通过，继续到 Eval
+            }
+        )
+
+        # Eval → Label → END
+        builder.add_edge("eval", "label")
+        builder.add_edge("label", END)
+
+        logger.info(f"[Workflow] 启用 Self-Check + 反思循环模式，最大重试次数: {max_retries}")
+
+    # P2改进：根据配置选择评估模式（无 Self-Check）
+    elif use_simplified_eval:
         # 简化模式：单次评估 + 规则校验
         eval_node = create_eval_simplified_node(llm)
         builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
 
-        builder.add_edge(START, "ner")
         builder.add_conditional_edges("ner", route_after_ner)
         builder.add_edge("re", "eval")
         builder.add_edge("eval", "label")
         builder.add_edge("label", END)
+
     else:
         # 原模式：两轮评估
         eval_1_node = create_eval_1_node(llm)
@@ -223,7 +571,6 @@ def build_corpus_workflow(llm: Any, use_simplified_eval: bool = True) -> Compile
         builder.add_node("eval_1", eval_1_node, retry_policy=LLM_RETRY_POLICY)
         builder.add_node("eval_2", eval_2_node, retry_policy=LLM_RETRY_POLICY)
 
-        builder.add_edge(START, "ner")
         builder.add_conditional_edges("ner", route_after_ner)
         builder.add_edge("re", "eval_1")
         builder.add_edge("eval_1", "eval_2")
@@ -261,7 +608,16 @@ def build_distributed_workflow(
 
     # P0改进：预编译单条语料 workflow，避免在 workers_node 中重复编译
     # P2改进：使用配置决定是否使用简化评估
-    corpus_workflow = build_corpus_workflow(llm, use_simplified_eval=config.use_simplified_eval)
+    # P4改进：使用配置决定是否启用 Self-Check
+    # P5改进：使用配置决定是否启用 Filter
+    corpus_workflow = build_corpus_workflow(
+        llm,
+        use_simplified_eval=config.use_simplified_eval,
+        enable_self_check=config.enable_self_check,
+        enable_filter=config.enable_filter,
+        enable_normalize=config.enable_normalize,
+        max_retries=config.self_check_max_retries
+    )
 
     # Worker处理函数
     async def workers_node(state: KGState) -> Dict:
@@ -276,6 +632,11 @@ def build_distributed_workflow(
                 initial_state: CorpusState = {
                     "corpus_id": corpus_id,
                     "raw_text": raw_text,
+                    # P5改进：Filter 筛选初始状态
+                    "filter_result": {},
+                    # P6改进：Normalize 归一化初始状态
+                    "normalize_result": {},
+                    "normalized_text": "",
                     "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
                     "triples": [],
                     "eval_scores": [],
@@ -283,6 +644,18 @@ def build_distributed_workflow(
                     "corrected_triples": [],
                     "entity_attrs": {},
                     "relation_attrs": {},
+                    # P4改进：Self-Check + 反思循环初始状态
+                    "self_check_ner_result": {},
+                    "self_check_re_result": {},
+                    "final_entities": [],
+                    "final_triples": [],
+                    "verification_confidence": "medium",
+                    "retry_count": 0,
+                    "max_retries": config.self_check_max_retries,
+                    "retry_reason": "",
+                    "problem_entities": [],
+                    "problem_triples": [],
+                    "needs_review": False,
                     "current_step": StepEnum.NER,
                     "error": None,
                 }
@@ -464,13 +837,37 @@ def build_distributed_workflow(
 
 # ===== 便捷函数 =====
 
-async def process_corpus(llm: Any, corpus: Dict) -> CorpusState:
-    """处理单条语料的便捷函数"""
-    workflow = build_corpus_workflow(llm)
+async def process_corpus(llm: Any, corpus: Dict, config: Optional[ExtractionConfig] = None) -> CorpusState:
+    """
+    处理单条语料的便捷函数
+
+    P4改进：支持 Self-Check + 反思循环配置
+
+    Args:
+        llm: LangChain LLM 实例
+        corpus: 语料字典 {"id": "...", "text": "..."}
+        config: ExtractionConfig 配置实例，默认使用 DEFAULT_CONFIG
+    """
+    config = config or DEFAULT_CONFIG
+    workflow = build_corpus_workflow(
+        llm,
+        use_simplified_eval=config.use_simplified_eval,
+        enable_self_check=config.enable_self_check,
+        enable_filter=config.enable_filter,
+        max_retries=config.self_check_max_retries
+    )
+
+    corpus_id = _validate_corpus_id(corpus.get("id"))
+    raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
     initial_state: CorpusState = {
-        "corpus_id": corpus.get("id", "unknown"),
-        "raw_text": corpus.get("text", ""),
+        "corpus_id": corpus_id,
+        "raw_text": raw_text,
+        # P5改进：Filter 筛选初始状态
+        "filter_result": {},
+        # P6改进：Normalize 归一化初始状态
+        "normalize_result": {},
+        "normalized_text": "",
         "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
         "triples": [],
         "eval_scores": [],
@@ -478,13 +875,25 @@ async def process_corpus(llm: Any, corpus: Dict) -> CorpusState:
         "corrected_triples": [],
         "entity_attrs": {},
         "relation_attrs": {},
+        # P4改进：Self-Check + 反思循环初始状态
+        "self_check_ner_result": {},
+        "self_check_re_result": {},
+        "final_entities": [],
+        "final_triples": [],
+        "verification_confidence": "medium",
+        "retry_count": 0,
+        "max_retries": config.self_check_max_retries,
+        "retry_reason": "",
+        "problem_entities": [],
+        "problem_triples": [],
+        "needs_review": False,
         "current_step": StepEnum.NER,
         "error": None,
     }
 
     # 使用唯一 thread_id 避免状态串扰
-    config = {"configurable": {"thread_id": f"corpus_{corpus.get('id', uuid.uuid4().hex)}"}}
-    result = await workflow.ainvoke(initial_state, config)
+    thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+    result = await workflow.ainvoke(initial_state, thread_config)
     return cast(CorpusState, result)
 
 
@@ -507,7 +916,14 @@ async def process_corpus_streaming(
         事件字典，包含 step, corpus_id, status 等字段
     """
     config = config or DEFAULT_CONFIG
-    workflow = build_corpus_workflow(llm, use_simplified_eval=config.use_simplified_eval)
+    # P4改进：传递完整的配置参数，包括 enable_self_check
+    workflow = build_corpus_workflow(
+        llm,
+        use_simplified_eval=config.use_simplified_eval,
+        enable_self_check=config.enable_self_check,
+        enable_filter=config.enable_filter,
+        max_retries=config.self_check_max_retries
+    )
 
     corpus_id = _validate_corpus_id(corpus.get("id"))
     raw_text = _validate_corpus_text(corpus.get("text", ""), config)
@@ -515,6 +931,11 @@ async def process_corpus_streaming(
     initial_state: CorpusState = {
         "corpus_id": corpus_id,
         "raw_text": raw_text,
+        # P5改进：Filter 筛选初始状态
+        "filter_result": {},
+        # P6改进：Normalize 归一化初始状态
+        "normalize_result": {},
+        "normalized_text": "",
         "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
         "triples": [],
         "eval_scores": [],
@@ -522,6 +943,18 @@ async def process_corpus_streaming(
         "corrected_triples": [],
         "entity_attrs": {},
         "relation_attrs": {},
+        # P4改进：Self-Check + 反思循环初始状态
+        "self_check_ner_result": {},
+        "self_check_re_result": {},
+        "final_entities": [],
+        "final_triples": [],
+        "verification_confidence": "medium",
+        "retry_count": 0,
+        "max_retries": config.self_check_max_retries,
+        "retry_reason": "",
+        "problem_entities": [],
+        "problem_triples": [],
+        "needs_review": False,
         "current_step": StepEnum.NER,
         "error": None,
     }

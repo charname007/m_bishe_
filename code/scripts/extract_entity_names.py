@@ -11,7 +11,7 @@ from loguru import logger
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import settings
+from settings import settings
 from kg.neo4j_client import Neo4jClient
 from kg.postgres_client import PostgresClient
 
