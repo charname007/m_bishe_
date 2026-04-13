@@ -32,6 +32,7 @@ class StepEnum(str, Enum):
     """工作流步骤枚举"""
     FILTER = "filter"                       # P5新增：文本筛选
     NORMALIZE = "normalize"                 # P6新增：文本归一化
+    QA_SCAFFOLD = "qa_scaffold"             # P8新增：QA脚手架
     NER = "ner"
     RE = "re"
     EVAL = "eval"
@@ -70,6 +71,18 @@ class CorpusState(TypedDict):
     """文本归一化结果：normalized_text, normalizations, confidence"""
     normalized_text: Annotated[str, replace_value]
     """归一化后的文本（供后续节点使用）"""
+
+    # Step 0.7: QA Scaffold结果（P8新增）
+    qa_scaffold_result: Annotated[Dict, replace_value]
+    """QA脚手架结果：qa_pairs, semantic_summary, entity_hints, relation_hints"""
+    semantic_summary: Annotated[str, replace_value]
+    """语义摘要：整合问答后的文本理解"""
+    qa_entity_hints: Annotated[List[str], replace_value]
+    """实体提示：QA阶段发现的可能实体"""
+    qa_relation_hints: Annotated[List[str], replace_value]
+    """关系提示：QA阶段发现的可能关系类型"""
+    qa_context_dependencies: Annotated[List[str], replace_value]
+    """上下文依赖：需要注意的依赖关系"""
 
     # Step 1: NER结果
     entities: Annotated[Dict[str, List[str]], replace_value]
@@ -179,11 +192,61 @@ ENTITY_TYPES = {
     "街区": "具有边界感的生活区域（如：街道口、华农校区）"
 }
 
-RELATION_TYPES = ["连接", "位于", "承载活动", "引发情感", "属于"]
+# v2.2改进：18个关系类型
+RELATION_TYPES = [
+    # 空间基础关系（8个）
+    "位于", "相邻", "属于", "连接", "距离", "方向", "穿过", "变化为",
+    # 社交语义关系（6个）
+    "推荐指数", "承载活动", "可达方式", "消费档次", "品类特征", "引发情感",
+    # 对比评价关系（3个）
+    "优于", "相似", "劣于",
+    # 事件关系（1个）
+    "发生事件"
+]
 
+# v2.2改进：实体类别细分（扩展）
 ENTITY_CATEGORIES = {
-    "POI": ["餐饮", "交通", "教育", "历史保护", "购物", "医疗", "娱乐", "文化"],
-    "建筑物": ["商业综合体", "住宅", "办公楼", "文化设施", "教育设施"],
-    "街区": ["商圈", "校区", "社区", "行政区"],
-    "道路": ["主干道", "次干道", "支路", "小巷"]
+    "POI": ["餐饮", "交通", "教育", "历史保护", "购物", "医疗", "娱乐", "文化", "酒店", "服务"],
+    "建筑物": ["商业综合体", "住宅", "办公楼", "文化设施", "教育设施", "医疗设施"],
+    "街区": ["商圈", "校区", "社区", "行政区", "景区"],
+    "道路": ["主干道", "次干道", "支路", "小巷", "地铁线路"]
 }
+
+# v2.2改进：人群节点枚举
+CROWD_NODES = ["亲子/宝妈", "学生党", "情侣", "打工人", "特种兵", "银发族", "宠物主", "独行者", "团建"]
+
+# v2.2改进：限制节点枚举
+LIMIT_NODES = ["需预约", "排队久", "停车难", "限流", "谢绝宠物", "只收现金", "时间限制", "人数限制", "消费门槛", "季节限制"]
+
+# v2.2改进：情感节点枚举
+EMOTION_NODES = ["正面", "中性", "负面"]
+
+# v2.2改进：评价等级枚举
+RATING_NODES = ["超推", "推荐", "一般", "不推荐"]
+
+# v2.2改进：消费等级枚举
+CONSUMPTION_NODES = ["平价", "中档", "高档", "奢侈"]
+
+# v2.2改进：距离值枚举
+DISTANCE_VALUES = ["近", "中等", "远"]
+
+# v2.2改进：方向值枚举
+DIRECTION_VALUES = ["东", "南", "西", "北", "东北", "西南", "东侧", "西侧", "对面", "旁边"]
+
+# v2.2改进：事件类别枚举
+EVENT_CATEGORIES = ["自然事件", "人文事件", "商业事件", "社会事件", "负面事件"]
+
+# v2.2改进：事件状态枚举
+EVENT_STATES = ["正在进行", "已结束", "计划中", "周期性"]
+
+# v2.2改进：对比维度枚举
+COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "氛围", "交通", "停车", "口味", "性价比"]
+
+# v2.2改进：情感标签枚举
+EMOTION_TAGS = ["氛围感", "治愈", "高级感", "温暖", "文艺", "复古", "现代", "网红感", "小清新", "赛博朋克感"]
+
+# v2.2改进：体验评价枚举
+EXPERIENCE_EVALUATIONS = ["服务好", "环境舒适", "商品丰富", "性价比高", "停车方便", "交通便利", "人流量适中"]
+
+# v2.2改进：知名度枚举
+POPULARITY_LEVELS = ["热门", "小众", "隐藏宝藏", "必去", "打卡圣地"]

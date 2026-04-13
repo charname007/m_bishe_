@@ -2041,3 +2041,461 @@ def create_self_check_re_node_with_kb(llm: Any, kg_client: Neo4jClient):
 4. **第四步**：根据效果决定是否升级到双重评审或研讨会模式
 
 ---
+
+## 十三、【新增】苏格拉底式 QA 引导节点（P8）
+
+### 13.1 方案概述
+
+**核心理念**：通过问答驱动（QA-driven）的方式构建"语义脚手架"，在提取三元组之前系统地展开文档级深层语义，捕获直接提取流水线中容易丢失的上下文依赖关系和隐性逻辑链接。
+
+**参考框架**：SocraticKG 框架的 5W1H 引导式问答扩展。
+
+### 13.2 流程对比
+
+```text
+传统流程：
+Filter → Normalize → NER → RE → Eval → Label
+
+新增QA脚手架流程：
+Filter → QA_Scaffold → Normalize → NER → RE → Eval → Label
+         ↑
+    5W1H问答扩展 → 语义脚手架 → 三元组转化辅助
+```
+
+### 13.3 5W1H 问答框架设计
+
+| 维度 | 问题模板 | 目的 |
+|------|----------|------|
+| **Who（谁）** | 文中提到的地点/人物是谁？ | 捕获实体主体 |
+| **What（什么）** | 这个地点有什么特征/功能？ | 捕获实体属性 |
+| **When（何时）** | 描述的时间背景是什么？ | 捕获时间维度（如"樱花开了"→春季） |
+| **Where（何地）** | 这些地点位于哪里？相互位置关系？ | 捕获空间关系 |
+| **Why（为什么）** | 作者为什么提到这些地点？ | 捕获情感/动机 |
+| **How（如何）** | 如何到达/体验这些地点？ | 捕获活动/可达方式 |
+
+### 13.4 Pydantic 模型设计
+
+```python
+# schemas.py 新增
+
+class QAPair(BaseModel):
+    """单个问答对"""
+    question: str = Field(description="5W1H引导问题")
+    answer: str = Field(description="基于原文的回答")
+    dimension: str = Field(description="维度标签: who/what/when/where/why/how")
+    entities_involved: List[str] = Field(
+        default_factory=list,
+        description="涉及到的实体名称"
+    )
+    confidence: str = Field(default="medium", description="回答置信度")
+
+
+class QAScaffoldResult(BaseModel):
+    """QA脚手架输出"""
+    qa_pairs: List[QAPair] = Field(
+        default_factory=list,
+        description="5W1H问答对列表"
+    )
+    semantic_summary: str = Field(
+        description="语义摘要：整合问答后的文本理解"
+    )
+    entity_hints: List[str] = Field(
+        default_factory=list,
+        description="实体提示列表：可能涉及的地理实体"
+    )
+    relation_hints: List[str] = Field(
+        default_factory=list,
+        description="关系提示列表：可能存在的关系类型"
+    )
+    context_dependencies: List[str] = Field(
+        default_factory=list,
+        description="上下文依赖：需要后续节点注意的依赖关系"
+    )
+    overall_confidence: str = Field(
+        default="medium",
+        description="整体脚手架置信度"
+    )
+    should_skip_detailed_extraction: bool = Field(
+        default=False,
+        description="是否建议跳过详细抽取（简单文本）"
+    )
+```
+
+### 13.5 提示词模板设计
+
+```python
+# prompts.py 新增
+
+QA_SCAFFOLD_SYSTEM = """你是一位"地理语义分析师"，擅长通过结构化问答来深入理解文本的地理语义。
+你的任务是用5W1H框架生成问答对，构建语义脚手架帮助后续提取更准确。"""
+
+QA_SCAFFOLD_USER = """## 5W1H 引导框架
+
+请针对以下文本生成结构化问答对：
+
+| 维度 | 问题方向 | 重点关注 |
+|------|----------|----------|
+| **Who** | 涉及的地点/实体是谁？ | 捕获地理实体名称 |
+| **What** | 这些地点有什么特征？ | 捕获属性、功能、特色 |
+| **When** | 时间背景是什么？ | 季节、时段、事件时机 |
+| **Where** | 位于哪里？相互位置？ | 空间关系、邻近、方位 |
+| **Why** | 作者为什么提到？ | 情感、推荐、评价动机 |
+| **How** | 如何到达/体验？ | 交通方式、活动方式 |
+
+## 任务示例
+
+示例1:
+输入: "武大的樱花开了，很多人在行政楼前拍照打卡"
+
+输出: {{
+  "qa_pairs": [
+    {{
+      "question": "文中提到的主要地点是谁？",
+      "answer": "武汉大学（简称武大）和武汉大学行政楼",
+      "dimension": "who",
+      "entities_involved": ["武汉大学", "行政楼"],
+      "confidence": "high"
+    }},
+    {{
+      "question": "这些地点有什么特征？",
+      "answer": "武汉大学有樱花景观，行政楼是拍照打卡点",
+      "dimension": "what",
+      "entities_involved": ["武汉大学", "行政楼"],
+      "confidence": "high"
+    }},
+    {{
+      "question": "时间背景是什么？",
+      "answer": "樱花开放季节，可能是春季",
+      "dimension": "when",
+      "entities_involved": [],
+      "confidence": "medium"
+    }},
+    {{
+      "question": "这些地点的位置关系？",
+      "answer": "行政楼在武汉大学内部，'行政楼前'表明具体位置",
+      "dimension": "where",
+      "entities_involved": ["武汉大学", "行政楼"],
+      "confidence": "high"
+    }},
+    {{
+      "question": "作者为什么提到这些地点？",
+      "answer": "推荐拍照打卡，表达对樱花景观的正面情感",
+      "dimension": "why",
+      "entities_involved": ["武汉大学"],
+      "confidence": "medium"
+    }},
+    {{
+      "question": "人们如何体验这些地点？",
+      "answer": "在行政楼前拍照打卡",
+      "dimension": "how",
+      "entities_involved": ["行政楼"],
+      "confidence": "high"
+    }}
+  ],
+  "semantic_summary": "武汉大学在樱花季吸引游客，行政楼前是热门拍照打卡点",
+  "entity_hints": ["武汉大学", "行政楼", "樱花"],
+  "relation_hints": ["属于", "承载活动", "引发情感", "位于"],
+  "context_dependencies": ["武大是武汉大学简称", "行政楼隶属于武汉大学"],
+  "overall_confidence": "high",
+  "should_skip_detailed_extraction": false
+}}
+
+示例2:
+输入: "今天心情不好"
+
+输出: {{
+  "qa_pairs": [],
+  "semantic_summary": "纯情感表达，无地理信息",
+  "entity_hints": [],
+  "relation_hints": [],
+  "context_dependencies": [],
+  "overall_confidence": "high",
+  "should_skip_detailed_extraction": true
+}}
+
+## 待处理文本
+{raw_text}
+
+请输出QA脚手架结果（JSON格式）。"""
+
+QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", QA_SCAFFOLD_SYSTEM),
+    ("human", QA_SCAFFOLD_USER),
+])
+```
+
+### 13.6 节点实现设计
+
+```python
+# nodes.py 新增
+
+def create_qa_scaffold_node(llm: Any):
+    """创建QA脚手架节点（P8新增）"""
+    parser = PydanticOutputParser(pydantic_object=QAScaffoldResult)
+
+    async def qa_scaffold_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 0.5: 5W1H问答扩展，构建语义脚手架"""
+        corpus_id = state['corpus_id']
+        raw_text = state['raw_text']
+        
+        logger.info(f"[QA_Scaffold] 处理语料: {corpus_id}")
+        
+        writer({
+            "step": "qa_scaffold",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始构建语义脚手架"
+        })
+
+        try:
+            # 调用LLM生成QA脚手架
+            prompt_text = QA_SCAFFOLD_PROMPT.invoke({"raw_text": raw_text})
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: QAScaffoldResult = parser.parse(response.content)
+
+            logger.info(
+                f"[QA_Scaffold] 完成: {len(result.qa_pairs)} 个问答对, "
+                f"置信度={result.overall_confidence}"
+            )
+
+            writer({
+                "step": "qa_scaffold",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "qa_count": len(result.qa_pairs),
+                "entity_hints": result.entity_hints,
+                "relation_hints": result.relation_hints,
+                "confidence": result.overall_confidence
+            })
+
+            # 根据结果决定下一步
+            if result.should_skip_detailed_extraction:
+                # 简单文本，跳过后续处理
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "current_step": StepEnum.DONE,
+                }
+            else:
+                # 复杂文本，继续到 Normalize
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "qa_entity_hints": result.entity_hints,
+                    "qa_relation_hints": result.relation_hints,
+                    "qa_context_dependencies": result.context_dependencies,
+                    "current_step": StepEnum.NORMALIZE,
+                }
+
+        except Exception as e:
+            logger.error(f"[QA_Scaffold] 处理失败: {e}")
+            # 保守策略：失败时继续处理
+            writer({
+                "step": "qa_scaffold",
+                "corpus_id": corpus_id,
+                "status": "failed",
+                "error": str(e)
+            })
+            return {
+                "qa_scaffold_result": {},
+                "semantic_summary": "",
+                "current_step": StepEnum.NORMALIZE,
+            }
+
+    return qa_scaffold_node
+```
+
+### 13.7 状态扩展设计
+
+```python
+# state.py CorpusState 新增字段
+
+class CorpusState(TypedDict):
+    # ... 现有字段 ...
+    
+    # P8新增：QA脚手架结果
+    qa_scaffold_result: Annotated[Dict, replace_value]
+    """QA脚手架结果：包含qa_pairs、semantic_summary等"""
+    
+    semantic_summary: Annotated[str, replace_value]
+    """语义摘要：整合问答后的文本理解"""
+    
+    qa_entity_hints: Annotated[List[str], replace_value]
+    """实体提示：QA阶段发现的可能实体"""
+    
+    qa_relation_hints: Annotated[List[str], replace_value]
+    """关系提示：QA阶段发现的可能关系类型"""
+    
+    qa_context_dependencies: Annotated[List[str], replace_value]
+    """上下文依赖：需要注意的依赖关系"""
+```
+
+### 13.8 下游节点利用方式
+
+**NER节点增强**：
+
+```python
+# nodes.py ner_node 修改
+
+async def ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
+    text_for_processing = _get_text_for_processing(state)
+    
+    # P8新增：利用QA脚手架信息
+    qa_entity_hints = state.get("qa_entity_hints", [])
+    qa_context = state.get("qa_context_dependencies", [])
+    
+    # 构建增强提示词
+    prompt_text = NER_PROMPT.invoke({
+        "raw_text": text_for_processing,
+        "entity_hints": format_entity_hints(qa_entity_hints),  # 新增辅助函数
+        "context_dependencies": format_context_dependencies(qa_context),
+    })
+    # ...
+```
+
+**NER提示词增强**：
+
+```python
+# prompts.py NER_USER 新增部分
+
+NER_USER = """## 候选目标
+...
+
+## QA脚手架提示（如有）
+以下实体和上下文依赖在前置QA分析中被识别，可作为参考：
+{entity_hints}
+
+上下文依赖提醒：
+{context_dependencies}
+
+## 待处理文本
+{raw_text}
+"""
+```
+
+**RE节点增强**：
+
+```python
+# nodes.py re_node 修改
+
+async def re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+    text_for_processing = _get_text_for_processing(state)
+    
+    # P8新增：利用QA脚手架信息
+    qa_relation_hints = state.get("qa_relation_hints", [])
+    qa_context = state.get("qa_context_dependencies", [])
+    
+    prompt_text = RE_PROMPT.invoke({
+        "raw_text": text_for_processing,
+        "entities": format_entities(state["entities"]),
+        "relation_hints": format_relation_hint(qa_relation_hints),  # 新增
+        "context_dependencies": format_context_dependencies(qa_context),
+    })
+    # ...
+```
+
+### 13.9 Workflow集成设计
+
+```python
+# workflow.py build_corpus_workflow 修改
+
+def build_corpus_workflow(
+    llm: Any,
+    use_simplified_eval: bool = True,
+    enable_self_check: bool = False,
+    enable_filter: bool = False,
+    enable_normalize: bool = False,
+    enable_qa_scaffold: bool = False,  # P8新增配置
+    max_retries: int = DEFAULT_MAX_RETRIES
+) -> CompiledStateGraph:
+    """
+    流程模式新增：
+    - QA+Scaffold模式: Filter → QA_Scaffold → Normalize → NER → RE → Eval → Label
+    - 简化QA模式: QA_Scaffold → NER → RE → Eval → Label（跳过Filter/Normalize）
+    """
+    
+    if enable_filter and enable_qa_scaffold and enable_normalize:
+        # 完整模式
+        filter_node = create_filter_node(llm)
+        qa_scaffold_node = create_qa_scaffold_node(llm)
+        normalize_node = create_normalize_node(llm)
+        
+        builder.add_node("filter", filter_node)
+        builder.add_node("qa_scaffold", qa_scaffold_node)
+        builder.add_node("normalize", normalize_node)
+        
+        builder.add_edge(START, "filter")
+        builder.add_conditional_edges("filter", route_after_filter_to_qa)
+        builder.add_edge("qa_scaffold", "normalize")
+        builder.add_edge("normalize", "ner")
+        
+    elif enable_qa_scaffold:
+        # 仅QA模式
+        qa_scaffold_node = create_qa_scaffold_node(llm)
+        builder.add_node("qa_scaffold", qa_scaffold_node)
+        builder.add_edge(START, "qa_scaffold")
+        builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold)
+```
+
+### 13.10 配置扩展
+
+```python
+# config.py ExtractionConfig 新增
+
+enable_qa_scaffold: bool = False
+"""是否启用苏格拉底式QA引导节点"""
+
+qa_scaffold_min_text_length: int = 20
+"""启用QA脚手架的最小文本长度（过短文本跳过）"""
+
+qa_scaffold_skip_simple: bool = True
+"""是否对简单文本跳过QA脚手架（根据Filter confidence判断）"""
+```
+
+### 13.11 成本分析与优化策略
+
+| 场景 | 无QA | 有QA | 增量成本 |
+|------|------|------|----------|
+| 简单文本（<20字） | 4-5次LLM | 4-5次（QA跳过） | 0% |
+| 中等文本（20-100字） | 4-5次LLM | 5-6次 | +20% |
+| 复杂文本（>100字） | 4-5次LLM | 5-6次 | +20% |
+
+**优化策略**：
+
+1. **智能跳过**：对Filter判定为"简单"或"高置信度"的文本跳过QA
+2. **轻量QA**：对中等文本只生成3个核心问答（Who/Where/What）
+3. **缓存复用**：相似文本的QA结果可缓存复用
+4. **批量QA**：多条相似文本合并到一个QA请求
+
+### 13.12 预期收益
+
+| 维度 | 预期提升 | 说明 |
+|------|----------|------|
+| **实体召回率** | +5-10% | QA预先识别实体提示 |
+| **关系准确率** | +10-15% | QA捕获上下文依赖，减少幻觉 |
+| **简称识别** | +15-20% | QA明确"武大=武汉大学"等关系 |
+| **隐性关系** | +20% | QA挖掘"樱花→春季→武汉大学"等隐性链 |
+| **可解释性** | 显著提升 | QA问答对可作为解释依据 |
+
+### 13.13 实施优先级
+
+| 优先级 | 内容 | 复杂度 | 收益 |
+|--------|------|--------|------|
+| **P0** | QA_Scaffold节点基础实现 | 低 | 中 |
+| **P1** | NER/RE提示词集成QA信息 | 低 | 高 |
+| **P2** | 智能跳过策略（简单文本跳过QA） | 低 | 成本优化 |
+| **P3** | 轻量QA模式（3问答简化） | 低 | 成本优化 |
+| **P4** | QA结果缓存与复用 | 中 | 成本优化 |
+
+### 13.14 与现有方案的协同
+
+| 协同方案 | 协同效果 |
+|----------|----------|
+| **Filter节点** | QA可参考Filter的geo_entity_hint |
+| **Normalize节点** | QA的context_dependencies辅助归一化 |
+| **Self-Check节点** | QA问答对可作为验证依据 |
+| **Schema约束矩阵** | QA的relation_hints可做Schema预筛选 |
+| **知识库协同** | QA的entity_hints可匹配KG已有实体 |
+
+---

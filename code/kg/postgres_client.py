@@ -290,3 +290,65 @@ class PostgresClient:
                 "entity_count": entity_count,
                 "triple_count": triple_count
             }
+
+    def fetch_corpus_for_extraction(
+        self,
+        table_name: str = "xiaohongshu_notes",
+        text_column: str = "desc_cleaned",
+        id_column: str = "note_id",
+        limit: int = 100,
+        offset: int = 0,
+        where_clause: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        分页读取语料用于知识图谱抽取
+
+        Args:
+            table_name: 数据表名
+            text_column: 文本列名
+            id_column: ID列名
+            limit: 每次读取数量
+            offset: 偏移量（分页）
+            where_clause: 可选的WHERE条件（不含WHERE关键字）
+
+        Returns:
+            语料列表 [{"id": str, "text": str}, ...]
+        """
+        with self.conn.cursor() as cur:
+            base_query = f"SELECT {id_column}, {text_column} FROM {table_name}"
+            if where_clause:
+                base_query += f" WHERE {where_clause}"
+            query = f"{base_query} ORDER BY {id_column} LIMIT %s OFFSET %s"
+
+            cur.execute(query, (limit, offset))
+            rows = cur.fetchall()
+
+            return [
+                {"id": row[0], "text": row[1] or ""}
+                for row in rows
+                if row[1] and len(str(row[1]).strip()) > 0  # 过滤空文本
+            ]
+
+    def count_corpus_for_extraction(
+        self,
+        table_name: str = "xiaohongshu_notes",
+        text_column: str = "desc_cleaned",
+        where_clause: Optional[str] = None
+    ) -> int:
+        """
+        统计待处理语料总数
+
+        Args:
+            table_name: 数据表名
+            text_column: 文本列名
+            where_clause: 可选的WHERE条件
+
+        Returns:
+            语料总数
+        """
+        with self.conn.cursor() as cur:
+            query = f"SELECT COUNT(*) FROM {table_name} WHERE {text_column} IS NOT NULL AND {text_column} != ''"
+            if where_clause:
+                query += f" AND {where_clause}"
+            cur.execute(query)
+            return cur.fetchone()[0]

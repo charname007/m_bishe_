@@ -39,6 +39,7 @@ from .workflow import (
     process_batch,
     process_corpus_streaming,
     process_batch_streaming,
+    process_corpus_in_batches,  # P7新增：分批次处理入口
 )
 
 __all__ = [
@@ -75,4 +76,5 @@ __all__ = [
     "process_batch",
     "process_corpus_streaming",
     "process_batch_streaming",
+    "process_corpus_in_batches",
 ]

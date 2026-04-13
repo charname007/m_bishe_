@@ -32,6 +32,12 @@ class ExtractionConfig:
     max_workers: int = 10
     """最大 Worker 数量"""
 
+    max_concurrent_corpus: int = 50
+    """最大并发处理语料数（Semaphore限制，防止API限流）"""
+
+    batch_size: int = 100
+    """每批次从数据库读取的语料数量"""
+
     # ===== 文本验证配置 =====
     max_text_length: int = 10000
     """最大文本长度（超出会被截断）"""
@@ -124,6 +130,8 @@ class ExtractionConfig:
             similarity_threshold=get_float("SIMILARITY_THRESHOLD", 0.85),
             corpus_per_worker=get_int("CORPUS_PER_WORKER", 10),
             max_workers=get_int("MAX_WORKERS", 10),
+            max_concurrent_corpus=get_int("MAX_CONCURRENT_CORPUS", 50),
+            batch_size=get_int("BATCH_SIZE", 100),
             max_text_length=get_int("MAX_TEXT_LENGTH", 10000),
             min_text_length=get_int("MIN_TEXT_LENGTH", 1),
             use_simplified_eval=get_bool("USE_SIMPLIFIED_EVAL", True),
@@ -147,6 +155,8 @@ class ExtractionConfig:
             similarity_threshold=config_dict.get("similarity_threshold", 0.85),
             corpus_per_worker=config_dict.get("corpus_per_worker", 10),
             max_workers=config_dict.get("max_workers", 10),
+            max_concurrent_corpus=config_dict.get("max_concurrent_corpus", 50),
+            batch_size=config_dict.get("batch_size", 100),
             max_text_length=config_dict.get("max_text_length", 10000),
             min_text_length=config_dict.get("min_text_length", 1),
             use_simplified_eval=config_dict.get("use_simplified_eval", True),
@@ -169,6 +179,8 @@ class ExtractionConfig:
             "similarity_threshold": self.similarity_threshold,
             "corpus_per_worker": self.corpus_per_worker,
             "max_workers": self.max_workers,
+            "max_concurrent_corpus": self.max_concurrent_corpus,
+            "batch_size": self.batch_size,
             "max_text_length": self.max_text_length,
             "min_text_length": self.min_text_length,
             "use_simplified_eval": self.use_simplified_eval,

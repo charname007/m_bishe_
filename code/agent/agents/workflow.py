@@ -619,9 +619,16 @@ def build_distributed_workflow(
         max_retries=config.self_check_max_retries
     )
 
+    # P7改进：并发控制 - 防止API限流（从配置读取）
+    max_concurrent = config.max_concurrent_corpus
+
     # Worker处理函数
     async def workers_node(state: KGState) -> Dict:
-        """并行执行所有Worker - 按分片并行处理"""
+        """并行执行所有Worker - 按分片并行处理，带并发控制"""
+        # 创建并发控制信号量
+        semaphore = asyncio.Semaphore(max_concurrent)
+        logger.info(f"[Workers] 并发控制: 最大 {max_concurrent} 条语料同时处理")
+
         async def process_corpus(corpus: Dict) -> Dict:
             """处理单条语料"""
             try:
@@ -678,9 +685,16 @@ def build_distributed_workflow(
                 }
 
         async def process_partition(worker_id: str, corpus_list: List[Dict]) -> Dict:
-            """处理单个分片（Worker级别）"""
+            """处理单个分片（Worker级别）- 带并发控制"""
             start_time = time.time()
-            tasks = [process_corpus(corpus) for corpus in corpus_list]
+
+            # 使用 semaphore 控制并发
+            async def process_corpus_with_limit(corpus: Dict) -> Dict:
+                """带并发限制的语料处理"""
+                async with semaphore:  # 获取"许可证"，超过限制则排队等待
+                    return await process_corpus(corpus)
+
+            tasks = [process_corpus_with_limit(corpus) for corpus in corpus_list]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # 分离成功和失败的结果
@@ -1062,3 +1076,136 @@ async def process_batch(
     thread_config = {"configurable": {"thread_id": f"batch_{uuid.uuid4().hex}"}}
     result = await workflow.ainvoke(initial_state, thread_config)
     return cast(KGState, result)
+
+
+# ===== P7新增：分批次处理入口 =====
+
+async def process_corpus_in_batches(
+    llm: Any,
+    config: Optional[ExtractionConfig] = None,
+    batch_size: Optional[int] = None,
+    total_limit: Optional[int] = None,
+    table_name: str = "xiaohongshu_notes",
+    text_column: str = "desc_cleaned",
+    id_column: str = "note_id",
+    where_clause: Optional[str] = None,
+    dry_run: bool = False
+) -> Dict:
+    """
+    分批次从数据库读取语料并处理
+
+    每次读取 batch_size 条语料，处理完成后继续下一批，
+    直到全部处理完成或达到 total_limit。
+
+    Args:
+        llm: LangChain LLM 实例
+        config: ExtractionConfig 配置实例
+        batch_size: 每批次处理数量（默认从config读取，默认100）
+        total_limit: 总处理数量限制（可选，用于测试）
+        table_name: 数据表名
+        text_column: 文本列名
+        id_column: ID列名
+        where_clause: 可选WHERE条件
+        dry_run: 是否只测试不写入数据库
+
+    Returns:
+        处理统计 {"total_processed": int, "total_entities": int, "total_triples": int, "batches": list}
+    """
+    config = config or DEFAULT_CONFIG
+    batch_size = batch_size or config.batch_size  # 使用配置默认值
+    db_config = _get_database_config()
+
+    from ..kg.postgres_client import PostgresClient
+
+    stats = {
+        "total_processed": 0,
+        "total_entities": 0,
+        "total_triples": 0,
+        "batches": [],
+        "errors": []
+    }
+
+    offset = 0
+    batch_num = 0
+
+    # 连接数据库
+    with PostgresClient(
+        db_config["pg_host"],
+        db_config["pg_port"],
+        db_config["pg_database"],
+        db_config["pg_user"],
+        db_config["pg_password"]
+    ) as pg:
+        # 获取总数
+        total_count = pg.count_corpus_for_extraction(table_name, text_column, where_clause)
+        if total_limit:
+            total_count = min(total_count, total_limit)
+
+        logger.info(f"[分批处理] 总语料数: {total_count}, 每批: {batch_size}")
+
+        while offset < total_count:
+            batch_num += 1
+            current_batch_size = min(batch_size, total_count - offset)
+
+            logger.info(f"[批次 {batch_num}] 读取语料 offset={offset}, limit={current_batch_size}")
+
+            # 读取一批语料
+            corpus_list = pg.fetch_corpus_for_extraction(
+                table_name=table_name,
+                text_column=text_column,
+                id_column=id_column,
+                limit=current_batch_size,
+                offset=offset,
+                where_clause=where_clause
+            )
+
+            if not corpus_list:
+                logger.info(f"[批次 {batch_num}] 无有效语料，跳过")
+                offset += current_batch_size
+                continue
+
+            # 处理这一批
+            try:
+                if dry_run:
+                    # 测试模式：不写入数据库，只跑工作流
+                    result = await process_batch(llm, corpus_list, config)
+                else:
+                    # 正常模式：完整处理
+                    result = await process_batch(llm, corpus_list, config)
+
+                batch_entities = len(result.get("aggregated_entities", []))
+                batch_triples = len(result.get("aggregated_triples", []))
+
+                stats["total_processed"] += len(corpus_list)
+                stats["total_entities"] += batch_entities
+                stats["total_triples"] += batch_triples
+                stats["batches"].append({
+                    "batch_num": batch_num,
+                    "corpus_count": len(corpus_list),
+                    "entities": batch_entities,
+                    "triples": batch_triples
+                })
+
+                logger.info(
+                    f"[批次 {batch_num}] 完成: {len(corpus_list)} 条语料, "
+                    f"{batch_entities} 实体, {batch_triples} 三元组"
+                )
+
+            except Exception as e:
+                logger.error(f"[批次 {batch_num}] 处理失败: {e}")
+                stats["errors"].append({"batch_num": batch_num, "error": str(e)})
+
+            # 下一批
+            offset += current_batch_size
+
+            # 显示进度
+            progress = min(offset / total_count * 100, 100)
+            logger.info(f"[进度] {progress:.1f}% ({offset}/{total_count})")
+
+    logger.info(
+        f"[完成] 总处理: {stats['total_processed']} 条, "
+        f"总实体: {stats['total_entities']}, "
+        f"总三元组: {stats['total_triples']}"
+    )
+
+    return stats

@@ -18,7 +18,7 @@ from langgraph.types import StreamWriter
 
 from loguru import logger
 
-from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES
+from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES, RELATION_TYPES
 
 
 # ===== P6改进：辅助函数 - 获取处理文本 =====
@@ -234,6 +234,96 @@ def create_normalize_node(llm: Any):
     return normalize_node
 
 
+# ===== Step 0.7: QA Scaffold 节点（P8新增） =====
+
+def create_qa_scaffold_node(llm: Any):
+    """创建QA脚手架节点 - 5W1H问答扩展构建语义脚手架"""
+    from .schemas import QAScaffoldResult
+    parser = PydanticOutputParser(pydantic_object=QAScaffoldResult)
+
+    async def qa_scaffold_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Step 0.7: 5W1H问答扩展，构建语义脚手架"""
+        corpus_id = state['corpus_id']
+
+        # 使用归一化后的文本（如果有的话）
+        text_for_processing = _get_text_for_processing(state)
+
+        logger.info(f"[QA_Scaffold] 处理语料: {corpus_id}")
+
+        # 发送进度事件
+        writer({
+            "step": "qa_scaffold",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始构建语义脚手架"
+        })
+
+        try:
+            # 调用LLM生成QA脚手架
+            prompt_text = QA_SCAFFOLD_PROMPT.invoke({"normalized_text": text_for_processing})
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: QAScaffoldResult = parser.parse(response.content)
+
+            logger.info(
+                f"[QA_Scaffold] 完成: {len(result.qa_pairs)} 个问答对, "
+                f"{len(result.entity_hints)} 个实体提示, "
+                f"置信度={result.overall_confidence}"
+            )
+
+            # 发送完成事件
+            writer({
+                "step": "qa_scaffold",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "qa_count": len(result.qa_pairs),
+                "entity_hints": result.entity_hints,
+                "relation_hints": result.relation_hints,
+                "confidence": result.overall_confidence,
+                "semantic_summary": result.semantic_summary
+            })
+
+            # 根据结果决定下一步
+            if result.should_skip_detailed_extraction:
+                # 简单文本，跳过后续处理
+                logger.info(f"[QA_Scaffold] 建议跳过详细抽取: {corpus_id}")
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "current_step": StepEnum.DONE,
+                }
+            else:
+                # 复杂文本，继续到 NER
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "qa_entity_hints": result.entity_hints,
+                    "qa_relation_hints": result.relation_hints,
+                    "qa_context_dependencies": result.context_dependencies,
+                    "current_step": StepEnum.NER,
+                }
+
+        except Exception as e:
+            logger.error(f"[QA_Scaffold] 处理失败: {e}")
+            # 保守策略：失败时继续处理
+            writer({
+                "step": "qa_scaffold",
+                "corpus_id": corpus_id,
+                "status": "failed",
+                "error": str(e)
+            })
+            return {
+                "qa_scaffold_result": {},
+                "semantic_summary": "",
+                "qa_entity_hints": [],
+                "qa_relation_hints": [],
+                "qa_context_dependencies": [],
+                "current_step": StepEnum.NER,  # 失败时继续到NER
+            }
+
+    return qa_scaffold_node
+
+
 # ===== 单条语料处理节点（四步骤工作流） =====
 
 def create_ner_node(llm: Any):
@@ -309,7 +399,7 @@ def create_ner_node(llm: Any):
 
 
 def create_re_node(llm: Any):
-    """创建RE节点"""
+    """创建RE节点（v2.2改进：支持attributes）"""
     parser = PydanticOutputParser(pydantic_object=RelationExtractionResult)
 
     async def re_node(state: CorpusState, writer: StreamWriter) -> Dict:
@@ -350,12 +440,14 @@ def create_re_node(llm: Any):
             response = await llm.ainvoke(full_prompt)
             result: RelationExtractionResult = parser.parse(response.content)
 
+            # v2.2改进：提取三元组及属性
             triples = [
                 {
                     "head": t.head,
                     "relation": t.relation,
                     "tail": t.tail,
                     "evidence": t.evidence or "",
+                    "attributes": t.attributes or {},  # 新增：关系属性
                 }
                 for t in result.triples
             ]
@@ -560,7 +652,8 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
     2. 关系类型有效性：关系必须在预定义类型中
     3. 基本逻辑检查：某些关系类型有约束（如"连接"需要两个道路实体）
     """
-    VALID_RELATIONS = ["连接", "位于", "承载活动", "引发情感", "属于"]
+    # v2.2改进：使用完整的18个关系类型列表
+    VALID_RELATIONS = RELATION_TYPES  # 从 state.py 导入
 
     all_entities = []
     for entity_list in entities.values():
@@ -760,7 +853,7 @@ def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) 
 
 
 def create_label_node(llm: Any):
-    """创建属性标注节点"""
+    """创建属性标注节点（v2.2改进：扩展实体属性）"""
     parser = PydanticOutputParser(pydantic_object=LabelResult)
 
     async def label_node(state: CorpusState, writer: StreamWriter) -> Dict:
@@ -792,36 +885,74 @@ def create_label_node(llm: Any):
             return {"current_step": StepEnum.DONE}
 
         try:
+            # v2.2改进：获取原始文本用于提取情感标签、体验评价
+            text_for_processing = _get_text_for_processing(state)
+
             # 使用 OutputParser 进行结构化输出
             prompt_text = LABEL_PROMPT.invoke({
                 "entities": all_entities,
                 "relations": format_triples(state["corrected_triples"]),
+                "raw_text": text_for_processing,  # v2.2新增：原始文本
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: LabelResult = parser.parse(response.content)
 
-            entity_attrs = {
-                name: {"类别": attrs.类别, "细分": attrs.细分}
-                for name, attrs in result.entities.items()
-            }
+            # v2.2改进：提取实体属性（含情感标签、体验评价、知名度）
+            entity_attrs = {}
+            for name, attrs in result.entities.items():
+                entity_attrs[name] = {
+                    "类别": attrs.类别,
+                    "细分": attrs.细分,
+                    "情感标签": attrs.情感标签 or [],  # 新增
+                    "体验评价": attrs.体验评价 or [],  # 新增
+                    "知名度": attrs.知名度 or "",  # 新增
+                    "来源可信度": attrs.来源可信度 or "中",  # 新增
+                }
 
-            # 规范化关系属性 key 格式，确保与三元组匹配
+            # v2.2改进：提取关系属性（含空间精度、语义类型等）
             relation_attrs = {}
             for key, attrs in result.relations.items():
-                # 解析 LLM 返回的 key，提取 head, relation, tail
-                # 支持格式: "<A, 关系, B>" 或 "A, 关系, B" 或其他变体
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
+                    # 提取所有Label阶段补充的属性
                     relation_attrs[normalized_key] = {
-                        "类型": attrs.类型,
-                        "细分": attrs.细分,
+                        "空间精度": attrs.空间精度 or "",
+                        "语义类型": attrs.语义类型 or "",
+                        "相邻类型": attrs.相邻类型 or "",  # v2.2新增
+                        "层级类型": attrs.层级类型 or "",
+                        "连接类型": attrs.连接类型 or "",
+                        "交通方式": attrs.交通方式 or "",
+                        "距离类型": attrs.距离类型 or "",
+                        "方向类型": attrs.方向类型 or "",
+                        "穿过类型": attrs.穿过类型 or "",
+                        "变化类型": attrs.变化类型 or "",
+                        "推荐强度": attrs.推荐强度 or "",
+                        "推荐场景": attrs.推荐场景 or "",
+                        "活动类型": attrs.活动类型 or "",
+                        "活动频率": attrs.活动频率 or "",
+                        "可达程度": attrs.可达程度 or "",
+                        "交通效率": attrs.交通效率 or "",
+                        "价格区间": attrs.价格区间 or "",
+                        "消费类型": attrs.消费类型 or "",
+                        "特征类型": attrs.特征类型 or "",
+                        "特征显著性": attrs.特征显著性 or "",
+                        "情感强度": attrs.情感强度 or "",
+                        "情感类型": attrs.情感类型 or "",
+                        "优势程度": attrs.优势程度 or "",  # v2.2改进：拆分为三个独立字段
+                        "相似程度": attrs.相似程度 or "",
+                        "劣势程度": attrs.劣势程度 or "",
+                        "对比可靠性": attrs.对比可靠性 or "",
+                        "替代性": attrs.替代性 or "",
+                        "风险等级": attrs.风险等级 or "",
+                        "事件影响度": attrs.事件影响度 or "",
+                        "事件持续性": attrs.事件持续性 or "",
+                        "来源可信度": attrs.来源可信度 or "中",
                     }
                 else:
                     # 无法解析时保留原始 key
                     relation_attrs[key] = {
-                        "类型": attrs.类型,
-                        "细分": attrs.细分,
+                        "来源可信度": attrs.来源可信度 or "中",
                     }
 
             logger.debug(f"[Label] 完成: {len(entity_attrs)}个实体, {len(relation_attrs)}个关系")
@@ -943,17 +1074,20 @@ def create_coordinator_node(corpus_per_worker: int = 10, max_workers: int = 10):
         # 计算需要的Worker数量
         worker_count = min(max_workers, math.ceil(corpus_count / corpus_per_worker))
 
+        # 计算每个Worker实际处理的语料数量（均匀分配）
+        actual_corpus_per_worker = math.ceil(corpus_count / worker_count)
+
         # 分片语料
         partitions = {}
         active_workers = []
         for i in range(worker_count):
-            start_idx = i * corpus_per_worker
-            end_idx = min((i + 1) * corpus_per_worker, corpus_count)
+            start_idx = i * actual_corpus_per_worker
+            end_idx = min((i + 1) * actual_corpus_per_worker, corpus_count)
             worker_id = f"worker_{i}"
             partitions[worker_id] = corpus_list[start_idx:end_idx]
             active_workers.append(worker_id)
 
-        logger.info(f"[Coordinator] 创建 {worker_count} 个Worker, 共 {corpus_count} 条语料")
+        logger.info(f"[Coordinator] 创建 {worker_count} 个Worker, 每个处理 {actual_corpus_per_worker} 条语料, 共 {corpus_count} 条")
 
         return {
             "worker_count": worker_count,
