@@ -97,6 +97,15 @@ class FilterResult(BaseModel):
         default=None,
         description="检测到的地理实体提示（如有）"
     )
+    # P9改进：武汉地区筛选
+    is_non_wuhan_region: bool = Field(
+        default=False,
+        description="是否明确只包含武汉以外的地区（北京、上海、广州等），无法确定时为False"
+    )
+    region_hint: Optional[str] = Field(
+        default=None,
+        description="地区提示：武汉/非武汉/未知"
+    )
 
 
 # ===== Normalize阶段输出模型 =====
@@ -690,3 +699,319 @@ EXPERIENCE_EVALUATIONS = ["服务好", "环境舒适", "商品丰富", "性价�
 # ===== 知名度枚举 =====
 
 POPULARITY_LEVELS = ["热门", "小众", "隐藏宝藏", "必去", "打卡圣地"]
+
+
+# ===== 联合抽取模型（P9新增） =====
+
+class JointEntity(BaseModel):
+    """联合抽取的单个实体"""
+    name: str = Field(description="实体名称")
+    type: str = Field(description="实体类型：道路/POI/建筑物/街区")
+    category: str = Field(description="细分类别")
+    aliases: List[str] = Field(default_factory=list, description="别名/简称")
+    evidence: str = Field(description="原文依据")
+
+
+class JointTriple(BaseModel):
+    """联合抽取的单个三元组"""
+    head: str = Field(description="头实体")
+    relation: str = Field(description="关系类型（18种之一）")
+    tail: str = Field(description="尾实体")
+    evidence: str = Field(description="原文依据")
+    confidence: str = Field(description="置信度：high/medium/low")
+    attributes: Dict[str, Any] = Field(default_factory=dict, description="关系属性")
+
+
+class JointExtractionResult(BaseModel):
+    """联合抽取结果 - 实体和关系同时输出"""
+    entities: List[JointEntity] = Field(default_factory=list, description="抽取的实体列表")
+    triples: List[JointTriple] = Field(default_factory=list, description="抽取的三元组列表")
+    entity_relation_mapping: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="实体-关系映射：{'武汉大学': ['<武汉大学, 位于, 珞喻路>', ...]}"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    extraction_strategy: str = Field(
+        default="joint",
+        description="抽取策略标识：joint/pipeline"
+    )
+
+
+# ===== Self-Check-Joint模型（P9新增，含Reflexion） =====
+
+class SelfCheckJointResult(BaseModel):
+    """联合抽取校验结果 + Reflexion"""
+    verified_entities: List[JointEntity] = Field(description="校验通过的实体")
+    verified_triples: List[JointTriple] = Field(description="校验通过的三元组")
+    rejected_entities: List[str] = Field(description="拒绝的实体（非地理实体）")
+    rejected_triples: List[Dict] = Field(description="拒绝的三元组（幻觉/错误）")
+
+    # Reflexion核心：自然语言反思
+    reflection_text: str = Field(
+        description="自然语言形式的反思建议，如：'本次抽取遗漏了空间方向关系，建议关注方位介词'"
+    )
+    improvement_strategy: str = Field(
+        description="具体改进策略，如：'增加对方位介词的敏感度，检查是否遗漏位于/相邻关系'"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重试")
+    retry_reason: str = Field(description="重试原因")
+
+
+# ===== Self-Check-QA模型（P9新增） =====
+
+class SelfCheckQAResult(BaseModel):
+    """QA脚手架校验结果"""
+    verified_qa_pairs: List[QAPair] = Field(description="校验通过的问答对")
+    rejected_qa_pairs: List[Dict] = Field(description="拒绝的问答对（与原文不符）")
+
+    # QA质量评估
+    entity_coverage: str = Field(
+        default="medium",
+        description="实体覆盖度：high（遗漏≤1）/ medium（遗漏2-3）/ low（遗漏>3）"
+    )
+    relation_coverage: str = Field(
+        default="medium",
+        description="关系覆盖度评估"
+    )
+
+    # Reflexion反思
+    reflection_text: str = Field(
+        default="",
+        description="自然语言反思建议"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重新生成QA")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== Self-Check-Eval模型（P9新增） =====
+
+class SelfCheckEvalResult(BaseModel):
+    """评估结果校验"""
+    verified_triples: List[Dict] = Field(description="校验通过的三元组（包含评分）")
+    rejected_triples: List[Dict] = Field(description="拒绝的三元组（评分过低或有错误）")
+
+    # 评分一致性检查
+    score_consistency: str = Field(
+        default="medium",
+        description="评分一致性：high（评分准确）/ medium（有偏差）/ low（评分不合理）"
+    )
+
+    # Reflexion反思
+    reflection_text: str = Field(
+        default="",
+        description="自然语言反思建议"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重新评估")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== Self-Check-Label模型（P9新增） =====
+
+class SelfCheckLabelResult(BaseModel):
+    """标注结果校验"""
+    verified_entity_attrs: Dict[str, Dict] = Field(description="校验通过的实体属性")
+    verified_relation_attrs: Dict[str, Dict] = Field(description="校验通过的关系属性")
+
+    rejected_entity_attrs: List[str] = Field(description="拒绝的实体属性键（不合理）")
+    rejected_relation_attrs: List[str] = Field(description="拒绝的关系属性键（不合理）")
+
+    # 属性完整性检查
+    attr_completeness: str = Field(
+        default="medium",
+        description="属性完整性：high（关键属性完整）/ medium（部分缺失）/ low（大量缺失）"
+    )
+
+    # Reflexion反思
+    reflection_text: str = Field(
+        default="",
+        description="自然语言反思建议"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重新标注")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== Self-Check-Filter模型（P9新增，可选） =====
+
+class SelfCheckFilterResult(BaseModel):
+    """Filter筛选校验结果"""
+    # 筛选判定校验
+    verified_is_valid: bool = Field(description="校验后的筛选判定")
+    verified_confidence: str = Field(description="校验后的置信度")
+
+    # 误筛检测
+    false_negative_detected: bool = Field(
+        default=False,
+        description="是否检测到误筛（有效文本被判定为无效）"
+    )
+    false_positive_detected: bool = Field(
+        default=False,
+        description="是否检测到误判（无效文本被判定为有效）"
+    )
+
+    # 问题分析
+    geo_entity_missed: List[str] = Field(
+        default_factory=list,
+        description="遗漏的地理实体（误筛时）"
+    )
+    invalid_reason: str = Field(
+        default="",
+        description="误判原因说明"
+    )
+
+    # Reflexion反思
+    reflection_text: str = Field(
+        default="",
+        description="自然语言反思建议"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重新筛选")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== Self-Check-Normalize模型（P9新增，可选） =====
+
+class SelfCheckNormalizeResult(BaseModel):
+    """Normalize归一化校验结果"""
+    # 归一化质量校验
+    verified_normalized_text: str = Field(description="校验后的归一化文本")
+    verified_confidence: str = Field(description="校验后的置信度")
+
+    # 语义保留检查
+    semantics_preserved: bool = Field(
+        default=True,
+        description="是否保留了原文语义"
+    )
+    info_added: bool = Field(
+        default=False,
+        description="是否添加了原文不存在的信息（不应添加）"
+    )
+    info_lost: bool = Field(
+        default=False,
+        description="是否丢失了原文关键信息"
+    )
+
+    # 归一化记录校验
+    verified_normalizations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="校验通过的归一化记录"
+    )
+    rejected_normalizations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="拒绝的归一化记录（不合理）"
+    )
+
+    # 问题分析
+    alias_errors: List[str] = Field(
+        default_factory=list,
+        description="别名归一化错误"
+    )
+    reference_errors: List[str] = Field(
+        default_factory=list,
+        description="指代消解错误"
+    )
+
+    # Reflexion反思
+    reflection_text: str = Field(
+        default="",
+        description="自然语言反思建议"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略"
+    )
+
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重新归一化")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== P10新增：批量LLM调用模型 =====
+
+class BatchCorpusResult(BaseModel):
+    """单条语料的批量抽取结果"""
+    corpus_id: str = Field(description="语料ID")
+    entities: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="实体字典: {'道路': [...], 'POI': [...], '建筑物': [...], '街区': [...]}"
+    )
+    triples: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="三元组列表: [{'head': ..., 'relation': ..., 'tail': ..., 'evidence': ..., 'attributes': ...}]"
+    )
+    confidence: str = Field(default="medium", description="置信度: high/medium/low")
+    has_geo_info: bool = Field(default=True, description="是否包含地理信息")
+    skip_reason: Optional[str] = Field(default=None, description="跳过原因（无地理信息时）")
+
+
+class BatchExtractionResult(BaseModel):
+    """批量抽取结果 - 一次LLM调用处理多条语料"""
+    results: List[BatchCorpusResult] = Field(
+        default_factory=list,
+        description="各语料的抽取结果列表"
+    )
+    cross_corpus_aliases: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="跨语料发现的别名映射: [{'raw': '武大', 'canonical': '武汉大学', 'corpus_ids': [...]}]"
+    )
+    cross_corpus_relations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="跨语料发现的相同三元组（去重依据）"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    batch_size: int = Field(description="处理的语料数量")
+    extraction_strategy: str = Field(
+        default="batch_joint",
+        description="抽取策略: batch_joint/batch_pipeline/fallback_single"
+    )
+
+
+class BatchSelfCheckResult(BaseModel):
+    """批量校验结果"""
+    verified_results: List[BatchCorpusResult] = Field(
+        default_factory=list,
+        description="校验通过的语料结果"
+    )
+    rejected_results: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="校验失败或标记为跳过的语料"
+    )
+    verified_aliases: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="校验通过的别名映射"
+    )
+    rejected_aliases: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="校验失败的别名映射"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新批量处理")
+    retry_reason: str = Field(default="", description="重试原因")
+    fallback_to_single: bool = Field(
+        default=False,
+        description="是否建议退化为单条处理"
+    )

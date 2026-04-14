@@ -6,6 +6,7 @@ P3改进：支持 StreamWriter 流式输出
 P5改进：添加 Filter 筛选节点
 P6改进：添加 Normalize 归一化节点，NER/RE/Eval 节点优先使用归一化文本
 """
+import asyncio
 import json
 import math
 import re
@@ -19,6 +20,7 @@ from langgraph.types import StreamWriter
 from loguru import logger
 
 from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES, RELATION_TYPES
+from .config import ExtractionConfig
 
 
 # ===== P6改进：辅助函数 - 获取处理文本 =====
@@ -42,6 +44,7 @@ def _get_text_for_processing(state: CorpusState) -> str:
 from .schemas import (
     FilterResult,  # P5新增
     NormalizeResult,  # P6新增
+    QAScaffoldResult,  # P8新增
     EntityRecognitionResult,
     RelationExtractionResult,
     EvalResultFirst,
@@ -50,14 +53,24 @@ from .schemas import (
     LabelResult,
     SelfCheckNERResult,
     SelfCheckREResult,
+    # P9新增：联合抽取和所有Self-Check模型
+    JointEntity, JointTriple, JointExtractionResult,
+    SelfCheckJointResult, SelfCheckQAResult, SelfCheckEvalResult, SelfCheckLabelResult,
 )
 from .prompts import (
     FILTER_PROMPT,  # P5新增
     NORMALIZE_PROMPT,  # P6新增
+    QA_SCAFFOLD_PROMPT,  # P8新增
     NER_PROMPT, RE_PROMPT, EVAL_PROMPT_1, EVAL_PROMPT_2,
     EVAL_PROMPT_SIMPLIFIED, LABEL_PROMPT,
     SELF_CHECK_NER_PROMPT, SELF_CHECK_RE_PROMPT,
     format_entities, format_triples, format_verified_entities, format_retry_hint,
+    format_entity_hints, format_relation_hints, format_context_dependencies,  # P8新增
+    # P9新增：联合抽取和所有Self-Check提示词
+    JOINT_NER_RE_PROMPT,
+    SELF_CHECK_JOINT_PROMPT, SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
+    format_joint_entities, format_joint_triples, format_qa_pairs_for_check, format_eval_scores_for_check,
+    format_reflection_history,
 )
 
 
@@ -71,6 +84,7 @@ def create_filter_node(llm: Any):
     1. 快速判断文本是否包含有价值的地理信息
     2. 筛选无效文本以节省后续处理成本
     3. 输出筛选结果和置信度
+    4. 判断是否为武汉地区（P9改进）
     """
     parser = PydanticOutputParser(pydantic_object=FilterResult)
 
@@ -98,10 +112,12 @@ def create_filter_node(llm: Any):
             logger.info(
                 f"[Filter] 结果: is_valid={result.is_valid}, "
                 f"confidence={result.confidence}, "
-                f"skip_reason={result.skip_reason}"
+                f"skip_reason={result.skip_reason}, "
+                f"is_non_wuhan_region={result.is_non_wuhan_region}, "
+                f"region_hint={result.region_hint}"
             )
 
-            # 发送完成事件
+            # 发送完成事件（包含新字段）
             writer({
                 "step": "filter",
                 "corpus_id": corpus_id,
@@ -111,7 +127,9 @@ def create_filter_node(llm: Any):
                 "skip_reason": result.skip_reason,
                 "has_geo_entity": result.has_geo_entity,
                 "has_spatial_relation": result.has_spatial_relation,
-                "geo_entity_hint": result.geo_entity_hint
+                "geo_entity_hint": result.geo_entity_hint,
+                "is_non_wuhan_region": result.is_non_wuhan_region,
+                "region_hint": result.region_hint
             })
 
             # 根据筛选结果决定下一步
@@ -141,6 +159,9 @@ def create_filter_node(llm: Any):
                     "skip_reason": None,
                     "has_geo_entity": False,
                     "has_spatial_relation": False,
+                    "geo_entity_hint": None,
+                    "is_non_wuhan_region": False,  # 无法确定时默认放行
+                    "region_hint": "未知",
                 },
                 "error": str(e),
                 "current_step": StepEnum.NER,
@@ -348,8 +369,16 @@ def create_ner_node(llm: Any):
             text_for_processing = _get_text_for_processing(state)
             logger.debug(f"[NER] 使用文本: {text_for_processing[:50]}...")
 
+            # P8改进：获取 QA Scaffold 上下文
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
             # 使用 OutputParser 进行结构化输出
-            prompt_text = NER_PROMPT.invoke({"raw_text": text_for_processing})
+            prompt_text = NER_PROMPT.invoke({
+                "raw_text": text_for_processing,
+                "entity_hints": format_entity_hints(qa_entity_hints),
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
+            })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: EntityRecognitionResult = parser.parse(response.content)
@@ -431,10 +460,16 @@ def create_re_node(llm: Any):
             # P6改进：优先使用归一化文本
             text_for_processing = _get_text_for_processing(state)
 
+            # P8改进：获取 QA Scaffold 上下文
+            qa_relation_hints = state.get("qa_relation_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
             # 使用 OutputParser 进行结构化输出
             prompt_text = RE_PROMPT.invoke({
                 "raw_text": text_for_processing,
                 "entities": format_entities(state["entities"]),
+                "relation_hints": format_relation_hints(qa_relation_hints),
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -732,6 +767,10 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
             # P6改进：优先使用归一化文本
             text_for_processing = _get_text_for_processing(state)
 
+            # P8改进：获取 QA Scaffold 上下文
+            semantic_summary = state.get("semantic_summary", "")
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
             # 格式化三元组用于提示词
             triples_text = format_triples(state["triples"])
 
@@ -739,6 +778,8 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
             prompt_text = EVAL_PROMPT_SIMPLIFIED.invoke({
                 "triples": triples_text,
                 "raw_text": text_for_processing,
+                "semantic_summary": semantic_summary or "(无语义摘要)",
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -888,11 +929,19 @@ def create_label_node(llm: Any):
             # v2.2改进：获取原始文本用于提取情感标签、体验评价
             text_for_processing = _get_text_for_processing(state)
 
+            # P8改进：获取 QA Scaffold 上下文
+            semantic_summary = state.get("semantic_summary", "")
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_relation_hints = state.get("qa_relation_hints", [])
+
             # 使用 OutputParser 进行结构化输出
             prompt_text = LABEL_PROMPT.invoke({
                 "entities": all_entities,
                 "relations": format_triples(state["corrected_triples"]),
-                "raw_text": text_for_processing,  # v2.2新增：原始文本
+                "raw_text": text_for_processing,
+                "semantic_summary": semantic_summary or "(无语义摘要)",
+                "entity_hints": format_entity_hints(qa_entity_hints),
+                "relation_hints": format_relation_hints(qa_relation_hints),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -1398,6 +1447,11 @@ def create_self_check_ner_node(llm: Any):
             # P6改进：优先使用归一化文本
             text_for_processing = _get_text_for_processing(state)
 
+            # P8改进：获取 QA Scaffold 上下文
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+            semantic_summary = state.get("semantic_summary", "")
+
             # 构建重试提示（如有）
             problem_entities = state.get('problem_entities', [])
             retry_hint = format_retry_hint(problem_entities, [])
@@ -1407,6 +1461,8 @@ def create_self_check_ner_node(llm: Any):
                 "raw_text": text_for_processing,
                 "entities": format_entities(state["entities"]),
                 "retry_hint": retry_hint,
+                "semantic_summary": semantic_summary or "(无语义摘要)",
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -1432,6 +1488,7 @@ def create_self_check_ner_node(llm: Any):
                 "self_check_ner_result": result.model_dump(),
                 "final_entities": final_entities,
                 "problem_entities": missing_names,
+                # P8修复：移除Self-Check-NER中的计数器增加，由路由函数统一处理
                 "current_step": StepEnum.RE,  # Self-Check-NER 在 NER 和 RE 之间
             }
 
@@ -1484,6 +1541,10 @@ def create_self_check_re_node(llm: Any):
             problem_triples = state.get('problem_triples', [])
             retry_hint = format_retry_hint([], problem_triples)
 
+            # P8改进：获取 QA Scaffold 上下文
+            semantic_summary = state.get("semantic_summary", "")
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
             # 获取已校验实体
             verified_entities = state.get('final_entities', [])
             ner_result = state.get('self_check_ner_result', {})
@@ -1499,6 +1560,8 @@ def create_self_check_re_node(llm: Any):
                 "triples": format_triples(state.get("triples", [])),  # RE 输出
                 "verified_entities": format_verified_entities(verified_entities),
                 "retry_hint": retry_hint,
+                "semantic_summary": semantic_summary or "(无语义摘要)",
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -1694,3 +1757,1007 @@ def _should_trigger_retry(
         return True
 
     return False
+
+
+# ===== P9新增：联合抽取节点 =====
+
+def create_joint_ner_re_node(llm: Any):
+    """
+    创建联合抽取节点
+
+    职责：
+    1. 一次LLM推理同时抽取实体和关系
+    2. 避免NER→RE流水线的错误传播
+    3. 全局理解文本，输出一致性更好的结果
+    """
+    parser = PydanticOutputParser(pydantic_object=JointExtractionResult)
+
+    async def joint_ner_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Joint NER + RE: 一次推理同时抽取实体和关系"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Joint_NER_RE] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "joint_ner_re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始联合抽取"
+        })
+
+        try:
+            # 使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 获取 QA Scaffold 上下文
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_relation_hints = state.get("qa_relation_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
+            # 调用 LLM
+            prompt_text = JOINT_NER_RE_PROMPT.invoke({
+                "raw_text": text_for_processing,
+                "entity_hints": format_entity_hints(qa_entity_hints),
+                "relation_hints": format_relation_hints(qa_relation_hints),
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: JointExtractionResult = parser.parse(response.content)
+
+            # 转换为现有格式（兼容后续节点）
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            for e in result.entities:
+                if e.type in entities_dict:
+                    entities_dict[e.type].append(e.name)
+
+            triples_list = [
+                {
+                    "head": t.head,
+                    "relation": t.relation,
+                    "tail": t.tail,
+                    "evidence": t.evidence,
+                    "confidence": t.confidence,
+                    "attributes": t.attributes,
+                }
+                for t in result.triples
+            ]
+
+            logger.info(
+                f"[Joint_NER_RE] 完成: {len(result.entities)}个实体, "
+                f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
+            )
+
+            writer({
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "entity_count": len(result.entities),
+                "triple_count": len(result.triples),
+                "confidence": result.overall_confidence
+            })
+
+            return {
+                "entities": entities_dict,
+                "triples": triples_list,
+                "joint_extraction_result": result.model_dump(),
+                "extraction_strategy": "joint",
+                "current_step": StepEnum.SELF_CHECK_JOINT,
+            }
+
+        except Exception as e:
+            logger.error(f"[Joint_NER_RE] 失败: {e}")
+            writer({
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "triples": [],
+                "error": str(e),
+                "current_step": StepEnum.EVAL,  # 失败时跳过校验，直接评估
+            }
+
+    return joint_ner_re_node
+
+
+# ===== P9新增：Self-Check-Joint节点（含Reflexion） =====
+
+def create_self_check_joint_node(llm: Any):
+    """
+    创建联合抽取校验节点（含Reflexion）
+
+    职责：
+    1. 校验联合抽取结果
+    2. 生成自然语言反思建议
+    3. 决定是否需要重抽
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckJointResult)
+
+    async def self_check_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_joint",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            # 获取反思历史（用于迭代改进）
+            reflection_history = state.get("reflection_history", [])
+            previous_reflection = format_reflection_history(reflection_history)
+
+            prompt_text = SELF_CHECK_JOINT_PROMPT.invoke({
+                "raw_text": text,
+                "entities": format_joint_entities(
+                    state.get("joint_extraction_result", {}).get("entities", [])
+                ),
+                "triples": format_joint_triples(state.get("triples", [])),
+                "semantic_summary": state.get("semantic_summary", ""),
+                "context_dependencies": format_context_dependencies(state.get("qa_context_dependencies", [])),
+                "previous_reflection": previous_reflection,
+                "improvement_attempts": state.get("improvement_strategy", ""),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckJointResult = parser.parse(response.content)
+
+            # 记录反思历史
+            reflection_history.append(result.reflection_text)
+
+            logger.info(
+                f"[Self-Check-Joint] 完成: confidence={result.overall_confidence}, "
+                f"retry_suggested={result.retry_suggested}"
+            )
+            logger.info(f"[Self-Check-Joint] 反思: {result.reflection_text[:100]}...")
+
+            writer({
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "confidence": result.overall_confidence,
+                "reflection": result.reflection_text[:200],
+                "retry_suggested": result.retry_suggested
+            })
+
+            return {
+                "self_check_joint_result": result.model_dump(),
+                "reflection_text": result.reflection_text,
+                "improvement_strategy": result.improvement_strategy,
+                "reflection_history": reflection_history,
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.EVAL,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Joint] 失败: {e}")
+            writer({
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_joint_result": {},
+                "error": str(e),
+                "retry_count": retry_count + 1,
+                "current_step": StepEnum.EVAL,
+            }
+
+    return self_check_joint_node
+
+
+# ===== P9新增：Self-Check-QA节点 =====
+
+def create_self_check_qa_node(llm: Any):
+    """
+    创建QA脚手架校验节点
+
+    职责：
+    1. 校验QA问答质量
+    2. 检查实体/关系覆盖度
+    3. 决定是否重新生成QA
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckQAResult)
+
+    async def self_check_qa_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-QA] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_qa",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            qa_result = state.get("qa_scaffold_result", {})
+
+            prompt_text = SELF_CHECK_QA_PROMPT.invoke({
+                "raw_text": text,
+                "qa_pairs": format_qa_pairs_for_check(qa_result.get("qa_pairs", [])),
+                "entity_hints": format_entity_hints(qa_result.get("entity_hints", [])),
+                "relation_hints": format_relation_hints(qa_result.get("relation_hints", [])),
+                "semantic_summary": qa_result.get("semantic_summary", ""),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckQAResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Self-Check-QA] 完成: entity_coverage={result.entity_coverage}, "
+                f"relation_coverage={result.relation_coverage}, retry={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_qa",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "entity_coverage": result.entity_coverage,
+                "relation_coverage": result.relation_coverage,
+                "retry_suggested": result.retry_suggested
+            })
+
+            return {
+                "self_check_qa_result": result.model_dump(),
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.JOINT_NER_RE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-QA] 失败: {e}")
+            writer({
+                "step": "self_check_qa",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            # 失败时继续到联合抽取
+            return {
+                "self_check_qa_result": {},
+                "error": str(e),
+                "current_step": StepEnum.JOINT_NER_RE,
+            }
+
+    return self_check_qa_node
+
+
+# ===== P9新增：Self-Check-Eval节点 =====
+
+def create_self_check_eval_node(llm: Any):
+    """
+    创建评估结果校验节点
+
+    职责：
+    1. 校验评分合理性
+    2. 检查修正效果
+    3. 决定是否重新评估
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckEvalResult)
+
+    async def self_check_eval_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Eval] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_eval",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            prompt_text = SELF_CHECK_EVAL_PROMPT.invoke({
+                "raw_text": text,
+                "eval_scores": format_eval_scores_for_check(state.get("eval_scores", [])),
+                "corrected_triples": format_triples(state.get("corrected_triples", [])),
+                "eval_passed": state.get("eval_passed", False),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckEvalResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Self-Check-Eval] 完成: score_consistency={result.score_consistency}, "
+                f"retry={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_eval",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "score_consistency": result.score_consistency,
+                "retry_suggested": result.retry_suggested
+            })
+
+            return {
+                "self_check_eval_result": result.model_dump(),
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.LABEL,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Eval] 失败: {e}")
+            writer({
+                "step": "self_check_eval",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_eval_result": {},
+                "error": str(e),
+                "current_step": StepEnum.LABEL,
+            }
+
+    return self_check_eval_node
+
+
+# ===== P9新增：Self-Check-Label节点 =====
+
+def create_self_check_label_node(llm: Any):
+    """
+    创建标注结果校验节点
+
+    职责：
+    1. 校验实体/关系属性
+    2. 检查属性完整性
+    3. 决定是否重新标注
+    """
+    parser = PydanticOutputParser(pydantic_object=SelfCheckLabelResult)
+
+    async def self_check_label_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Label] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_label",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            entity_attrs = state.get("entity_attrs", {})
+            relation_attrs = state.get("relation_attrs", {})
+
+            # 格式化属性用于提示词
+            entity_attrs_str = "\n".join(
+                [f"- {name}: {attrs}" for name, attrs in entity_attrs.items()]
+            ) if entity_attrs else "(无实体属性)"
+
+            relation_attrs_str = "\n".join(
+                [f"- {key}: {attrs}" for key, attrs in relation_attrs.items()]
+            ) if relation_attrs else "(无关系属性)"
+
+            prompt_text = SELF_CHECK_LABEL_PROMPT.invoke({
+                "raw_text": text,
+                "entity_attrs": entity_attrs_str,
+                "relation_attrs": relation_attrs_str,
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckLabelResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Self-Check-Label] 完成: attr_completeness={result.attr_completeness}, "
+                f"retry={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_label",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "attr_completeness": result.attr_completeness,
+                "retry_suggested": result.retry_suggested
+            })
+
+            # 如果校验通过，更新属性为校验后的版本
+            if result.verified_entity_attrs:
+                entity_attrs = result.verified_entity_attrs
+            if result.verified_relation_attrs:
+                relation_attrs = result.verified_relation_attrs
+
+            return {
+                "self_check_label_result": result.model_dump(),
+                "entity_attrs": entity_attrs,
+                "relation_attrs": relation_attrs,
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.DONE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Label] 失败: {e}")
+            writer({
+                "step": "self_check_label",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_label_result": {},
+                "error": str(e),
+                "current_step": StepEnum.DONE,
+            }
+
+    return self_check_label_node
+
+
+# ===== P9新增：Self-Check-Filter节点（可选） =====
+
+def create_self_check_filter_node(llm: Any):
+    """
+    创建筛选校验节点（可选，默认不启用）
+
+    职责：
+    1. 校验Filter筛选判定的合理性
+    2. 检测误筛（有效文本被判定为无效）
+    3. 检测误判（无效文本被判定为有效）
+    4. 生成反思建议
+    """
+    from .schemas import SelfCheckFilterResult
+    from .prompts import SELF_CHECK_FILTER_PROMPT
+
+    parser = PydanticOutputParser(pydantic_object=SelfCheckFilterResult)
+
+    async def self_check_filter_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Filter] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_filter",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = state.get("raw_text", "")
+            filter_result = state.get("filter_result", {})
+
+            prompt_text = SELF_CHECK_FILTER_PROMPT.invoke({
+                "raw_text": text,
+                "is_valid": filter_result.get("is_valid", True),
+                "confidence": filter_result.get("confidence", "medium"),
+                "skip_reason": filter_result.get("skip_reason", ""),
+                "has_geo_entity": filter_result.get("has_geo_entity", False),
+                "has_spatial_relation": filter_result.get("has_spatial_relation", False),
+                "geo_entity_hint": filter_result.get("geo_entity_hint", ""),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckFilterResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Self-Check-Filter] 完成: verified_is_valid={result.verified_is_valid}, "
+                f"false_negative={result.false_negative_detected}, retry={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_filter",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "verified_is_valid": result.verified_is_valid,
+                "false_negative_detected": result.false_negative_detected,
+                "retry_suggested": result.retry_suggested
+            })
+
+            # 如果检测到误筛，更新filter_result
+            updated_filter_result = {}
+            if result.false_negative_detected:
+                updated_filter_result = {
+                    "is_valid": True,
+                    "confidence": result.verified_confidence,
+                    "has_geo_entity": True,
+                    "geo_entity_hint": ", ".join(result.geo_entity_missed[:3]),
+                }
+            elif result.false_positive_detected:
+                updated_filter_result = {
+                    "is_valid": False,
+                    "confidence": result.verified_confidence,
+                    "skip_reason": result.invalid_reason,
+                }
+
+            return {
+                "self_check_filter_result": result.model_dump(),
+                "filter_result": updated_filter_result if updated_filter_result else state.get("filter_result", {}),
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.NORMALIZE if result.verified_is_valid else StepEnum.DONE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Filter] 失败: {e}")
+            writer({
+                "step": "self_check_filter",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_filter_result": {},
+                "error": str(e),
+                "current_step": StepEnum.NORMALIZE,  # 失败时继续处理
+            }
+
+    return self_check_filter_node
+
+
+# ===== P9新增：Self-Check-Normalize节点（可选） =====
+
+def create_self_check_normalize_node(llm: Any):
+    """
+    创建归一化校验节点（可选，默认不启用）
+
+    职责：
+    1. 校验归一化质量
+    2. 检查语义保留
+    3. 检测信息添加/丢失问题
+    4. 生成反思建议
+    """
+    from .schemas import SelfCheckNormalizeResult
+    from .prompts import SELF_CHECK_NORMALIZE_PROMPT, format_normalizations_for_check
+
+    parser = PydanticOutputParser(pydantic_object=SelfCheckNormalizeResult)
+
+    async def self_check_normalize_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Normalize] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        writer({
+            "step": "self_check_normalize",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "retry_count": retry_count
+        })
+
+        try:
+            raw_text = state.get("raw_text", "")
+            normalize_result = state.get("normalize_result", {})
+
+            prompt_text = SELF_CHECK_NORMALIZE_PROMPT.invoke({
+                "raw_text": raw_text,
+                "normalized_text": normalize_result.get("normalized_text", ""),
+                "confidence": normalize_result.get("confidence", "medium"),
+                "has_changes": normalize_result.get("has_changes", False),
+                "preserved_semantics": normalize_result.get("preserved_semantics", True),
+                "normalizations": format_normalizations_for_check(normalize_result.get("normalizations", [])),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckNormalizeResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Self-Check-Normalize] 完成: semantics_preserved={result.semantics_preserved}, "
+                f"info_added={result.info_added}, retry={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_normalize",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "semantics_preserved": result.semantics_preserved,
+                "retry_suggested": result.retry_suggested
+            })
+
+            # 如果语义丢失或添加了信息，使用原文
+            updated_normalized_text = result.verified_normalized_text
+            if result.info_added or result.info_lost:
+                logger.warning(f"[Self-Check-Normalize] 检测到语义问题，使用原文")
+                updated_normalized_text = raw_text
+
+            return {
+                "self_check_normalize_result": result.model_dump(),
+                "normalized_text": updated_normalized_text,
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.QA_SCAFFOLD,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Normalize] 失败: {e}")
+            writer({
+                "step": "self_check_normalize",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "self_check_normalize_result": {},
+                "error": str(e),
+                "current_step": StepEnum.QA_SCAFFOLD,  # 失败时继续处理
+            }
+
+    return self_check_normalize_node
+
+
+# ===== P10新增：批量LLM调用节点 =====
+
+def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
+    """
+    创建批量联合抽取节点
+
+    职责：
+    1. 一次LLM调用处理batch_llm_size条语料
+    2. 同时抽取实体和三元组
+    3. 发现跨语料别名关系
+    4. 返回批量结果，失败时标记需要fallback
+    """
+    from .schemas import BatchExtractionResult, BatchCorpusResult
+    from .prompts import BATCH_JOINT_PROMPT, format_batch_corpus
+
+    parser = PydanticOutputParser(pydantic_object=BatchExtractionResult)
+
+    async def batch_joint_extraction_node(
+        corpus_list: List[Dict],
+        writer: StreamWriter
+    ) -> Dict:
+        """
+        批量联合抽取
+
+        Args:
+            corpus_list: 语料列表 [{"id": ..., "text": ...}, ...]
+            writer: StreamWriter for progress events
+
+        Returns:
+            {
+                "batch_results": {corpus_id: {entities, triples, confidence}},
+                "cross_corpus_aliases": [...],
+                "needs_fallback": False,
+            }
+        """
+        batch_size = len(corpus_list)
+        logger.info(f"[Batch_Joint] 处理 {batch_size} 条语料")
+
+        writer({
+            "step": "batch_joint",
+            "status": "started",
+            "batch_size": batch_size,
+        })
+
+        if batch_size == 0:
+            return {
+                "batch_results": {},
+                "cross_corpus_aliases": [],
+                "needs_fallback": False,
+            }
+
+        max_retries = 3
+        retry_delay = 2.0  # 初始延迟秒数
+
+        for retry in range(max_retries):
+            try:
+                # 构建批量输入
+                corpus_list_str = format_batch_corpus(corpus_list)
+
+                # 调用LLM
+                prompt_text = BATCH_JOINT_PROMPT.invoke({
+                    "batch_size": batch_size,
+                    "corpus_list": corpus_list_str,
+                })
+                full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+                response = await llm.ainvoke(full_prompt)
+                result: BatchExtractionResult = parser.parse(response.content)
+
+                # 转换为字典格式
+                batch_results = {}
+                for r in result.results:
+                    batch_results[r.corpus_id] = {
+                        "entities": r.entities,
+                        "triples": r.triples,
+                        "confidence": r.confidence,
+                        "has_geo_info": r.has_geo_info,
+                        "skip_reason": r.skip_reason,
+                    }
+
+                logger.info(
+                    f"[Batch_Joint] 完成: {len(result.results)}条语料, "
+                    f"跨语料别名: {len(result.cross_corpus_aliases)}个, "
+                    f"置信度: {result.overall_confidence}"
+                )
+
+                writer({
+                    "step": "batch_joint",
+                    "status": "completed",
+                    "batch_size": len(result.results),
+                    "cross_corpus_aliases_count": len(result.cross_corpus_aliases),
+                    "confidence": result.overall_confidence,
+                })
+
+                return {
+                    "batch_results": batch_results,
+                    "cross_corpus_aliases": result.cross_corpus_aliases,
+                    "cross_corpus_relations": result.cross_corpus_relations,
+                    "batch_extraction_result": result.model_dump(),
+                    "needs_fallback": False,
+                }
+
+            except Exception as e:
+                if retry < max_retries - 1:
+                    logger.warning(f"[Batch_Joint] 重试 {retry + 2}/{max_retries}: {e}")
+                    await asyncio.sleep(retry_delay * (retry + 1))  # 指数退避
+                    continue
+                else:
+                    logger.error(f"[Batch_Joint] 最终失败: {e}")
+                    writer({
+                        "step": "batch_joint",
+                        "status": "error",
+                        "error": str(e),
+                        "batch_size": batch_size,
+                    })
+
+                    # 标记需要fallback为单条处理
+                    return {
+                        "batch_results": {},
+                        "cross_corpus_aliases": [],
+                        "needs_fallback": True,
+                        "fallback_reason": str(e),
+                    }
+
+    return batch_joint_extraction_node
+
+
+def create_batch_self_check_node(llm: Any):
+    """
+    创建批量校验节点
+
+    职责：
+    1. 校验批量抽取结果的质量
+    2. 验证跨语料别名映射
+    3. 决定是否需要重试或fallback
+    """
+    from .schemas import BatchSelfCheckResult
+    from .prompts import BATCH_SELF_CHECK_PROMPT, format_batch_results_for_check, format_cross_corpus_aliases
+
+    parser = PydanticOutputParser(pydantic_object=BatchSelfCheckResult)
+
+    async def batch_self_check_node(
+        batch_results: Dict,
+        cross_corpus_aliases: List[Dict],
+        writer: StreamWriter
+    ) -> Dict:
+        """
+        批量校验
+
+        Args:
+            batch_results: {corpus_id: {entities, triples, confidence}}
+            cross_corpus_aliases: 跨语料别名列表
+            writer: StreamWriter
+
+        Returns:
+            {
+                "verified_results": [...],
+                "rejected_results": [...],
+                "verified_aliases": [...],
+                "retry_suggested": False,
+                "fallback_to_single": False,
+            }
+        """
+        logger.info(f"[Batch_Self_Check] 校验 {len(batch_results)} 条语料结果")
+
+        writer({
+            "step": "batch_self_check",
+            "status": "started",
+            "batch_size": len(batch_results),
+        })
+
+        if not batch_results:
+            return {
+                "verified_results": [],
+                "rejected_results": [],
+                "verified_aliases": [],
+                "retry_suggested": False,
+                "fallback_to_single": False,
+            }
+
+        try:
+            # 格式化输入
+            results_list = [
+                {"corpus_id": cid, **data}
+                for cid, data in batch_results.items()
+            ]
+            results_str = format_batch_results_for_check(results_list)
+            aliases_str = format_cross_corpus_aliases(cross_corpus_aliases)
+
+            # 调用LLM
+            prompt_text = BATCH_SELF_CHECK_PROMPT.invoke({
+                "batch_results": results_str,
+                "cross_corpus_aliases": aliases_str,
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchSelfCheckResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Batch_Self_Check] 完成: 通过 {len(result.verified_results)} 条, "
+                f"拒绝 {len(result.rejected_results)} 条, "
+                f"重试建议: {result.retry_suggested}, "
+                f"单条fallback: {result.fallback_to_single}"
+            )
+
+            writer({
+                "step": "batch_self_check",
+                "status": "completed",
+                "verified_count": len(result.verified_results),
+                "rejected_count": len(result.rejected_results),
+                "retry_suggested": result.retry_suggested,
+                "fallback_to_single": result.fallback_to_single,
+            })
+
+            return {
+                "verified_results": [r.model_dump() for r in result.verified_results],
+                "rejected_results": result.rejected_results,
+                "verified_aliases": result.verified_aliases,
+                "rejected_aliases": result.rejected_aliases,
+                "batch_self_check_result": result.model_dump(),
+                "retry_suggested": result.retry_suggested,
+                "fallback_to_single": result.fallback_to_single,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Self_Check] 失败: {e}")
+            writer({
+                "step": "batch_self_check",
+                "status": "error",
+                "error": str(e),
+            })
+
+            # 校验失败时，保守策略：全部通过但标记低置信度
+            return {
+                "verified_results": [
+                    {"corpus_id": cid, **data, "confidence": "low"}
+                    for cid, data in batch_results.items()
+                ],
+                "rejected_results": [],
+                "verified_aliases": cross_corpus_aliases,
+                "retry_suggested": False,
+                "fallback_to_single": False,
+            }
+
+    return batch_self_check_node
+
+
+# ===== P10新增：批量处理入口函数 =====
+
+async def process_corpus_batch_with_llm(
+    llm: Any,
+    corpus_list: List[Dict],
+    config: ExtractionConfig,
+    batch_joint_node: Any = None,
+    batch_self_check_node: Any = None,
+) -> Dict:
+    """
+    批量处理语料（一次LLM调用处理batch_llm_size条）
+
+    Args:
+        llm: LLM实例
+        corpus_list: 语料列表 [{"id": ..., "text": ...}, ...]
+        config: ExtractionConfig
+
+    Returns:
+        {
+            "batch_results": {corpus_id: {entities, triples}},
+            "cross_corpus_aliases": [...],
+            "fallback_results": [...],  # fallback单条处理的结果
+        }
+    """
+    batch_llm_size = config.batch_llm_size
+    enable_batch_llm = config.enable_batch_llm
+    batch_llm_fallback = config.batch_llm_fallback
+
+    # 如果不启用批量LLM，直接返回空（使用单条处理）
+    if not enable_batch_llm:
+        return {
+            "batch_results": {},
+            "cross_corpus_aliases": [],
+            "needs_single_processing": True,
+        }
+
+    # 创建节点（如果未提供）
+    if batch_joint_node is None:
+        batch_joint_node = create_batch_joint_extraction_node(llm, batch_llm_size)
+    if batch_self_check_node is None:
+        batch_self_check_node = create_batch_self_check_node(llm)
+
+    all_batch_results = {}
+    all_cross_corpus_aliases = []
+    fallback_corpus_list = []
+
+    # 分批处理（每批batch_llm_size条）
+    for i in range(0, len(corpus_list), batch_llm_size):
+        batch_corpus = corpus_list[i:i + batch_llm_size]
+        batch_num = i // batch_llm_size + 1
+
+        logger.info(f"[Batch {batch_num}] 处理 {len(batch_corpus)} 条语料")
+
+        # 创建StreamWriter
+        def dummy_writer(event):
+            pass
+
+        # 批量抽取
+        extraction_result = await batch_joint_node(batch_corpus, dummy_writer)
+
+        if extraction_result.get("needs_fallback"):
+            # 批量抽取失败，需要fallback
+            if batch_llm_fallback:
+                logger.warning(f"[Batch {batch_num}] 抽取失败，退化为单条处理")
+                fallback_corpus_list.extend(batch_corpus)
+            else:
+                # 不启用fallback，记录失败
+                for corpus in batch_corpus:
+                    all_batch_results[corpus["id"]] = {
+                        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                        "triples": [],
+                        "confidence": "error",
+                        "error": extraction_result.get("fallback_reason", "批量处理失败"),
+                    }
+            continue
+
+        # 批量校验（可选）
+        batch_results = extraction_result["batch_results"]
+        cross_corpus_aliases = extraction_result["cross_corpus_aliases"]
+
+        # 如果启用Self-Check，进行校验
+        if config.enable_self_check or config.enable_full_self_check:
+            check_result = await batch_self_check_node(
+                batch_results, cross_corpus_aliases, dummy_writer
+            )
+
+            # 处理校验结果
+            for r in check_result["verified_results"]:
+                all_batch_results[r["corpus_id"]] = r
+
+            # 校验失败的语料，加入fallback列表
+            if batch_llm_fallback:
+                for r in check_result["rejected_results"]:
+                    corpus_id = r.get("corpus_id")
+                    # 找到原语料
+                    for corpus in batch_corpus:
+                        if corpus["id"] == corpus_id:
+                            fallback_corpus_list.append(corpus)
+                            break
+
+            all_cross_corpus_aliases.extend(check_result["verified_aliases"])
+
+        else:
+            # 不校验，直接使用抽取结果
+            all_batch_results.update(batch_results)
+            all_cross_corpus_aliases.extend(cross_corpus_aliases)
+
+    return {
+        "batch_results": all_batch_results,
+        "cross_corpus_aliases": all_cross_corpus_aliases,
+        "fallback_corpus_list": fallback_corpus_list,
+        "needs_single_processing": len(fallback_corpus_list) > 0,
+    }

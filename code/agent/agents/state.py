@@ -31,14 +31,21 @@ def replace_value(current: Any, new: Any) -> Any:
 class StepEnum(str, Enum):
     """工作流步骤枚举"""
     FILTER = "filter"                       # P5新增：文本筛选
+    SELF_CHECK_FILTER = "self_check_filter" # P9新增：筛选校验（可选）
     NORMALIZE = "normalize"                 # P6新增：文本归一化
+    SELF_CHECK_NORMALIZE = "self_check_normalize" # P9新增：归一化校验（可选）
     QA_SCAFFOLD = "qa_scaffold"             # P8新增：QA脚手架
-    NER = "ner"
-    RE = "re"
+    SELF_CHECK_QA = "self_check_qa"         # P9新增：QA校验
+    JOINT_NER_RE = "joint_ner_re"           # P9新增：联合抽取
+    SELF_CHECK_JOINT = "self_check_joint"   # P9新增：联合抽取校验（含Reflexion）
+    NER = "ner"                             # 流水线模式保留
+    RE = "re"                               # 流水线模式保留
+    SELF_CHECK_NER = "self_check_ner"       # 流水线模式：实体校验
+    SELF_CHECK_RE = "self_check_re"         # 流水线模式：三元组校验
     EVAL = "eval"
-    SELF_CHECK_NER = "self_check_ner"  # 新增：实体校验
-    SELF_CHECK_RE = "self_check_re"    # 新增：三元组校验
+    SELF_CHECK_EVAL = "self_check_eval"     # P9新增：评估校验
     LABEL = "label"
+    SELF_CHECK_LABEL = "self_check_label"   # P9新增：标注校验
     DONE = "done"
 
 
@@ -61,6 +68,12 @@ class CorpusState(TypedDict):
     # 输入
     corpus_id: str
     raw_text: str
+
+    # P9新增：配置标记字段（用于路由函数判断后续节点是否启用）
+    _config_enable_normalize: Annotated[bool, replace_value]
+    """标记：是否启用了 Normalize 节点"""
+    _config_enable_qa_scaffold: Annotated[bool, replace_value]
+    """标记：是否启用了 QA Scaffold 节点"""
 
     # Step 0: Filter筛选结果（P5新增）
     filter_result: Annotated[Dict, replace_value]
@@ -101,6 +114,34 @@ class CorpusState(TypedDict):
     self_check_re_result: Annotated[Dict, replace_value]
     """Self-Check-RE 校验结果"""
 
+    # P9新增：联合抽取结果
+    joint_extraction_result: Annotated[Dict, replace_value]
+    """联合抽取结果（Joint NER+RE）"""
+    extraction_strategy: Annotated[str, replace_value]
+    """抽取策略标识：joint/pipeline"""
+
+    # P9新增：所有Self-Check结果
+    self_check_filter_result: Annotated[Dict, replace_value]
+    """Self-Check-Filter 校验结果（可选）"""
+    self_check_normalize_result: Annotated[Dict, replace_value]
+    """Self-Check-Normalize 校验结果（可选）"""
+    self_check_qa_result: Annotated[Dict, replace_value]
+    """Self-Check-QA 校验结果"""
+    self_check_joint_result: Annotated[Dict, replace_value]
+    """Self-Check-Joint 校验结果（含Reflexion）"""
+    self_check_eval_result: Annotated[Dict, replace_value]
+    """Self-Check-Eval 校验结果"""
+    self_check_label_result: Annotated[Dict, replace_value]
+    """Self-Check-Label 校验结果"""
+
+    # P9新增：Reflexion反思字段
+    reflection_text: Annotated[str, replace_value]
+    """自然语言反思建议"""
+    improvement_strategy: Annotated[str, replace_value]
+    """具体改进策略"""
+    reflection_history: Annotated[List[str], merge_list]
+    """多轮反思历史（用于迭代改进追踪）"""
+
     # 最终输出（校验/归一化后）
     final_entities: Annotated[List[Dict], replace_value]
     """最终实体列表（包含别名信息）"""
@@ -116,6 +157,8 @@ class CorpusState(TypedDict):
     """最大重试次数"""
     retry_reason: Annotated[str, replace_value]
     """重试原因描述"""
+    retry_suggested: Annotated[bool, replace_value]
+    """是否建议重试（由Self-Check节点返回，供路由函数判断）"""
     problem_entities: Annotated[List[str], replace_value]
     """NER问题实体（遗漏的实体名）"""
     problem_triples: Annotated[List[Dict], replace_value]

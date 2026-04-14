@@ -2,31 +2,54 @@
 四步骤智能体工作流提示词模板 - 使用LangChain ChatPromptTemplate
 P2改进：简化评估提示词，单次评估包含评分和修正
 P5改进：添加 Filter 筛选提示词
+P10改进：添加批量LLM调用提示词
 """
+from typing import List, Dict, Any, Optional
 from langchain_core.prompts import ChatPromptTemplate
 
 
 # ===== Step 0: Filter 筛选提示词模板（P5新增） =====
 
 FILTER_SYSTEM = """你是一位"地理文本筛选专家"，负责快速判断文本是否值得处理。
-你的任务是高效筛选，识别包含地理信息的文本，跳过无价值文本以节省处理成本。"""
+你的任务是高效筛选，识别包含武汉地理信息的文本，跳过无价值文本和非武汉地区文本以节省处理成本。"""
 
 FILTER_USER = """## 快速筛选标准
 
 **有效文本（is_valid=true）**：
-- 提及地理实体：道路、POI、建筑物、街区、地名等
+- 提及武汉地理实体：武汉的道路、POI、建筑物、街区、地名等（如珞喻路、武汉大学、街道口）
 - 涉及空间关系：位于、旁边、连接、附近、在...内等
 - 地理相关活动：逛街、打卡、拍照、游玩等（暗示地点）
 - 即使主语省略，但有地理暗示（如"这里的樱花很好看"）
+- 无法确定是否武汉地区时，默认放行（保守策略）
 
 **无效文本（is_valid=false）**：
 - 过短文本：少于5个有效字符
 - 无地理信息：纯情感表达、无关话题、纯表情/乱码
 - 纯抽象内容：时间、数字、无地点的活动描述
+- **非武汉地区**：明确提及武汉以外的城市/地区，且无任何武汉相关实体
+  - 明确非武汉城市：北京、上海、广州、深圳、成都、杭州、南京、重庆、西安等
+  - 明确非武汉景点：故宫、长城、西湖、外滩、兵马俑等
+  - 注意：如果文本同时提及武汉和非武汉地区，应放行（is_valid=true）
+
+## 武汉地区判断规则
+
+**判定为武汉相关（is_non_wuhan_region=false）**：
+- 明确提及"武汉"、"汉口"、"武昌"、"汉阳"、"光谷"等武汉核心区域名
+- 提及武汉知名地标：武汉大学、黄鹤楼、东湖、江汉路、珞喻路等
+- 提及武汉特有元素：樱花（武大樱花）、长江大桥（武汉段）
+
+**判定为非武汉地区（is_non_wuhan_region=true）**：
+- 明确提及其他城市名且无武汉相关内容
+- 如"北京故宫很壮观"、"上海外滩夜景漂亮"
+
+**无法确定时（保守策略）**：
+- 如果地名无法确定城市归属（如"大学门口"、"商业街"），设 is_non_wuhan_region=false，放行
+- region_hint 设为"未知"
 
 ## 边界模糊处理
 - 如果判断困难，返回 confidence="low"，让后续流程处理
 - 有地理暗示但无明确实体时，建议保留（is_valid=true, confidence="low")
+- 地区归属存疑时，默认放行（保守策略）
 
 ## 任务示例
 
@@ -37,7 +60,9 @@ FILTER_USER = """## 快速筛选标准
   "confidence": "high",
   "has_geo_entity": true,
   "has_spatial_relation": true,
-  "geo_entity_hint": "武汉大学、珞喻路"
+  "geo_entity_hint": "武汉大学、珞喻路",
+  "is_non_wuhan_region": false,
+  "region_hint": "武汉"
 }}
 
 示例2:
@@ -47,7 +72,9 @@ FILTER_USER = """## 快速筛选标准
   "skip_reason": "无地理信息，纯情感表达",
   "confidence": "high",
   "has_geo_entity": false,
-  "has_spatial_relation": false
+  "has_spatial_relation": false,
+  "is_non_wuhan_region": false,
+  "region_hint": null
 }}
 
 示例3:
@@ -57,17 +84,59 @@ FILTER_USER = """## 快速筛选标准
   "skip_reason": "过短，纯表情，无语义内容",
   "confidence": "high",
   "has_geo_entity": false,
-  "has_spatial_relation": false
+  "has_spatial_relation": false,
+  "is_non_wuhan_region": false,
+  "region_hint": null
 }}
 
 示例4:
-输入: "这里挺好玩"
+输入: "北京故宫真的很壮观，推荐大家去"
+输出: {{
+  "is_valid": false,
+  "skip_reason": "非武汉地区，明确提及北京故宫",
+  "confidence": "high",
+  "has_geo_entity": true,
+  "has_spatial_relation": false,
+  "geo_entity_hint": "故宫",
+  "is_non_wuhan_region": true,
+  "region_hint": "北京"
+}}
+
+示例5:
+输入: "西湖边的风景不错"
+输出: {{
+  "is_valid": false,
+  "skip_reason": "非武汉地区，西湖位于杭州",
+  "confidence": "high",
+  "has_geo_entity": true,
+  "has_spatial_relation": true,
+  "geo_entity_hint": "西湖",
+  "is_non_wuhan_region": true,
+  "region_hint": "杭州"
+}}
+
+示例6:
+输入: "大学门口那条路堵车了"
 输出: {{
   "is_valid": true,
   "confidence": "low",
-  "has_geo_entity": false,
+  "has_geo_entity": true,
   "has_spatial_relation": true,
-  "geo_entity_hint": "这里（模糊地点指代）"
+  "geo_entity_hint": "大学门口、那条路",
+  "is_non_wuhan_region": false,
+  "region_hint": "未知"
+}}
+
+示例7:
+输入: "从武汉去北京出差，顺便逛了故宫"
+输出: {{
+  "is_valid": true,
+  "confidence": "high",
+  "has_geo_entity": true,
+  "has_spatial_relation": false,
+  "geo_entity_hint": "武汉、北京、故宫",
+  "is_non_wuhan_region": false,
+  "region_hint": "武汉（同时提及非武汉）"
 }}
 
 ## 待筛选文本
@@ -333,6 +402,13 @@ NER_USER = """## 候选目标
 2. 其次，根据上下文判断其实体粒度
 3. 最后，将其归入上述四个候选目标之一
 
+## QA脚手架提示（如有）
+前置QA分析可能发现以下实体提示，可作为参考：
+{entity_hints}
+
+上下文依赖提醒：
+{context_dependencies}
+
 ## 任务示例
 输入: "在洪山区的街道口，泛悦汇三楼的这家书店氛围感拉满。"
 输出: {{\"道路\": [], \"POI\": [\"书店\"], \"建筑物\": [\"泛悦汇\"], \"街区\": [\"街道口\"]}}
@@ -485,6 +561,13 @@ RE_USER = """## 候选目标
 
 ---
 
+## QA脚手架提示（如有）
+前置QA分析可能发现以下关系提示，可作为参考：
+{relation_hints}
+
+上下文依赖提醒：
+{context_dependencies}
+
 ## 已识别实体
 {entities}
 
@@ -514,6 +597,13 @@ EVAL_1_USER = """## 评估维度
 - 3分: 可接受
 - 2分: 有问题
 - 1分: 错误
+
+## QA脚手架提示（如有）
+前置QA分析的语义理解可作为参考：
+{semantic_summary}
+
+上下文依赖提醒：
+{context_dependencies}
 
 ## 待评估三元组
 {triples}
@@ -573,6 +663,13 @@ EVAL_SIMPLIFIED_USER = """## 评估维度
 - 修正关系类型（如：将"位于"改为"属于")
 - 修正关系方向（如：将<A, 位于, B>改为<B, 位于, A>)
 - 删除无效三元组（如：幻觉、无依据）
+
+## QA脚手架提示（如有）
+前置QA分析的语义理解可作为参考：
+{semantic_summary}
+
+上下文依赖提醒：
+{context_dependencies}
 
 ## 待评估三元组
 {triples}
@@ -729,6 +826,16 @@ LABEL_USER = """## 任务描述
 
 ---
 
+## QA脚手架提示（如有）
+前置QA分析的语义理解可作为参考：
+{semantic_summary}
+
+实体提示：
+{entity_hints}
+
+关系提示：
+{relation_hints}
+
 ## 待标注实体
 {entities}
 
@@ -757,6 +864,29 @@ def format_entities(entities: dict) -> str:
         else:
             result.append(f"- {entity_type}: (无)")
     return "\n".join(result)
+
+
+# ===== QA Scaffold 上下文格式化函数（P8新增） =====
+
+def format_entity_hints(entity_hints: list) -> str:
+    """格式化实体提示用于 NER 提示词"""
+    if not entity_hints:
+        return "(无实体提示)"
+    return f"可能涉及的实体: {', '.join(entity_hints)}"
+
+
+def format_relation_hints(relation_hints: list) -> str:
+    """格式化关系提示用于 RE 提示词"""
+    if not relation_hints:
+        return "(无关系提示)"
+    return f"可能涉及的关系类型: {', '.join(relation_hints)}"
+
+
+def format_context_dependencies(context_dependencies: list) -> str:
+    """格式化上下文依赖用于提示词"""
+    if not context_dependencies:
+        return "(无上下文依赖)"
+    return "\n".join([f"- {dep}" for dep in context_dependencies])
 
 
 def format_triples(triples: list) -> str:
@@ -835,6 +965,13 @@ SELF_CHECK_NER_USER = """## 校验任务
    - medium: 遗漏2-3个，或有别名问题但可归一化
    - low: 遗漏>3个，或有多处重要实体遗漏
 
+## QA脚手架提示（如有）
+前置QA分析的语义理解可作为参考：
+{semantic_summary}
+
+上下文依赖提醒：
+{context_dependencies}
+
 ## 已抽取实体
 {entities}
 
@@ -883,6 +1020,13 @@ SELF_CHECK_RE_USER = """## 校验任务
    - 如果confidence=low且rejected_triples>3，建议重抽
    - 指明重抽目标（ner/re）和原因
 
+## QA脚手架提示（如有）
+前置QA分析的语义理解可作为参考：
+{semantic_summary}
+
+上下文依赖提醒：
+{context_dependencies}
+
 ## 已抽取三元组
 {triples}
 
@@ -925,3 +1069,656 @@ def format_retry_hint(problem_entities: list, problem_triples: list) -> str:
     if problem_triples:
         hints.append(f"上次问题三元组: {problem_triples[:3]}")
     return "\n".join(hints) if hints else "(无重试提示)"
+
+
+# ===== P9新增：联合抽取提示词 =====
+
+JOINT_NER_RE_SYSTEM = """你是一位"地理语义联合抽取专家"，擅长在一次推理中同时识别实体和关系。
+你的优势在于：能够全局理解文本，避免实体边界识别错误对关系判定的干扰。"""
+
+JOINT_NER_RE_USER = """## 任务描述
+请从文本中**同时**抽取：
+1. 地理实体（道路/POI/建筑物/街区）
+2. 实体间的语义关系（18种关系类型）
+3. 每个抽取的证据依据
+
+## 实体类型定义
+| 类型 | 定义 | 示例 |
+|------|------|------|
+| 道路 | 交通通道 | 珞喻路、关山大道 |
+| POI | 具体地点 | 武汉大学、群光广场 |
+| 建筑物 | 建筑设施 | 泛悦汇、融科天城 |
+| 街区 | 地理区域 | 街道口、光谷商圈 |
+
+## 关系类型（18种）
+### 空间基础关系（8个）
+- 位于、相邻、属于、连接、距离、方向、穿过、变化为
+
+### 社交语义关系（6个）
+- 推荐指数、承载活动、可达方式、消费档次、品类特征、引发情感
+
+### 对比评价关系（3个）
+- 优于、相似、劣于
+
+### 事件关系（1个）
+- 发生事件
+
+## QA脚手架提示（如有）
+{entity_hints}
+{relation_hints}
+{context_dependencies}
+
+## 联合抽取策略（CoT）
+1. **第一步**：扫描文本，识别所有可能的地名、道路、建筑等
+2. **第二步**：对识别的实体，判断其类型和类别
+3. **第三步**：分析实体之间的语义关系，抽取三元组
+4. **第四步**：为每个抽取提供原文依据（evidence）
+5. **第五步**：评估整体置信度
+
+## 任务示例
+
+### 示例1：基础联合抽取
+输入: "武大的樱花开了，很多人在行政楼前拍照打卡"
+
+输出:
+ {{
+  "entities": [
+    {{\"name\": "武汉大学", "type": "POI", "category": "高校", "aliases": ["武大"], "evidence": "武大"}},
+    {{\"name": "行政楼", "type": "建筑物", "category": "教育设施", "aliases": [], "evidence": "行政楼"}}
+  ],
+  "triples": [
+    {{\"head": "行政楼", "relation": "属于", "tail": "武汉大学", "evidence": "行政楼", "confidence": "high"}},
+    {{\"head": "武汉大学", "relation": "承载活动", "tail": "拍照打卡", "evidence": "拍照打卡", "confidence": "high", "attributes": {{\"时段": "樱花季"}}}}
+  ],
+  "entity_relation_mapping": {{
+    "武汉大学": ["<行政楼, 属于, 武汉大学>", "<武汉大学, 承载活动, 拍照打卡>"]
+  }},
+  "overall_confidence": "high"
+ }}
+
+### 示例2：复杂语义关系
+输入: "群光广场就在珞喻路上，比街道口更热闹，周末适合带娃逛街"
+
+输出:
+ {{
+  "entities": [
+    {{\"name\": "群光广场", \"type\": "建筑物", \"category\": "商业综合体", \"aliases\": [], \"evidence\": "群光广场"}},
+    {{\"name\": "珞喻路", \"type\": "道路", \"category\": "主干道", \"aliases\": [], \"evidence\": "珞喻路"}},
+    {{\"name\": "街道口", \"type\": "街区", \"category\": "商圈", \"aliases\": [], \"evidence\": "街道口"}}
+  ],
+  "triples": [
+    {{\"head\": "群光广场", \"relation\": "位于", \"tail\": "珞喻路", \"evidence\": "就在珞喻路上", \"confidence\": "high"}},
+    {{\"head\": "群光广场", \"relation\": "优于", \"tail\": "街道口", \"evidence\": "比街道口更热闹", \"confidence\": "medium", \"attributes\": {{\"维度\": ["氛围"]}}}}
+  ],
+  "entity_relation_mapping": {{
+    "群光广场": ["<群光广场, 位于, 珞喻路>", "<群光广场, 优于, 街道口>"]
+  }},
+  "overall_confidence": "high"
+ }}
+
+## 待处理文本
+{raw_text}
+
+请输出联合抽取结果（JSON格式）。"""
+
+JOINT_NER_RE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", JOINT_NER_RE_SYSTEM),
+    ("human", JOINT_NER_RE_USER),
+])
+
+
+# ===== P9新增：Self-Check-Joint提示词（含Reflexion） =====
+
+SELF_CHECK_JOINT_SYSTEM = """你是一位"联合抽取校验专家"，负责独立审视Joint Extraction结果。
+你的任务是：客观评估、检测幻觉、验证关系、并生成**自然语言反思建议**供重试轮参考。"""
+
+SELF_CHECK_JOINT_USER = """## 校验任务
+
+### 1. 实体校验
+- **遗漏检查**：原文是否提及地理实体但未抽取？
+- **类型验证**：实体类型是否正确？
+- **无关过滤**：是否抽取了非地理实体？
+
+### 2. 关系校验
+- **幻觉检测**：三元组是否在原文中有依据？
+- **关系验证**：关系类型和方向是否正确？
+- **证据匹配**：evidence字段是否来自原文？
+
+### 3. Reflexion反思（核心）
+请生成自然语言形式的反思建议，指导下一轮抽取改进：
+- 总结本次抽取的主要问题
+- 分析问题产生的原因
+- 提出具体的改进策略
+
+### 4. 置信度判断
+- high: 遗漏≤1，幻觉≤1，无严重错误
+- medium: 遗漏2-3，幻觉2-3，可修正
+- low: 遗漏>3，幻觉>3，需重抽
+
+## 待校验结果
+实体: {entities}
+三元组: {triples}
+
+## 原始文本
+{raw_text}
+
+## QA脚手架提示
+{semantic_summary}
+{context_dependencies}
+
+## 重试历史（如有）
+上一轮反思: {previous_reflection}
+改进尝试: {improvement_attempts}
+
+请输出校验结果，重点输出reflection_text和improvement_strategy。"""
+
+SELF_CHECK_JOINT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_JOINT_SYSTEM),
+    ("human", SELF_CHECK_JOINT_USER),
+])
+
+
+# ===== P9新增：Self-Check-QA提示词 =====
+
+SELF_CHECK_QA_SYSTEM = """你是一位"QA脚手架校验专家"，负责独立审视QA Scaffold结果。
+你的任务是：评估问答质量、检查实体覆盖度、验证关系覆盖度，并生成反思建议。"""
+
+SELF_CHECK_QA_USER = """## 校验任务
+
+### 1. QA质量评估
+- **问答一致性**：问答内容是否与原文一致？
+- **维度完整性**：5W1H维度是否覆盖关键信息？
+- **实体覆盖度**：QA是否识别了所有关键地理实体？
+
+### 2. 实体提示验证
+- entity_hints是否遗漏重要实体？
+- 是否包含非地理实体？
+
+### 3. 关系提示验证
+- relation_hints是否覆盖主要关系类型？
+- 是否有误导性提示？
+
+### 4. Reflexion反思
+请生成反思建议：
+- 总结QA生成的不足之处
+- 建议改进方向
+
+### 5. 置信度判断
+- high: 实体遗漏≤1，维度完整
+- medium: 实体遗漏2-3，部分维度缺失
+- low: 实体遗漏>3，QA质量差
+
+## 待校验QA结果
+问答对: {qa_pairs}
+实体提示: {entity_hints}
+关系提示: {relation_hints}
+语义摘要: {semantic_summary}
+
+## 原始文本
+{raw_text}
+
+请输出校验结果。"""
+
+SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_QA_SYSTEM),
+    ("human", SELF_CHECK_QA_USER),
+])
+
+
+# ===== P9新增：Self-Check-Eval提示词 =====
+
+SELF_CHECK_EVAL_SYSTEM = """你是一位"评估结果校验专家"，负责审视三元组评分结果。
+你的任务是：验证评分合理性、检查修正效果，并生成反思建议。"""
+
+SELF_CHECK_EVAL_USER = """## 校验任务
+
+### 1. 评分一致性检查
+- 评分是否与三元组质量匹配？
+- 是否存在评分过高（幻觉三元组得高分）或过低（正确三元组得低分）？
+
+### 2. 修正效果验证
+- corrected_triples是否正确应用了修正？
+- 是否遗漏了需要修正的三元组？
+
+### 3. Reflexion反思
+请生成反思建议：
+- 评估过程中的问题分析
+- 改进建议
+
+### 4. 置信度判断
+- high: 评分准确，修正完整
+- medium: 有评分偏差但可控
+- low: 评分不合理，需重评
+
+## 待校验评估结果
+三元组评分: {eval_scores}
+修正后三元组: {corrected_triples}
+评估通过: {eval_passed}
+
+## 原始文本
+{raw_text}
+
+请输出校验结果。"""
+
+SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_EVAL_SYSTEM),
+    ("human", SELF_CHECK_EVAL_USER),
+])
+
+
+# ===== P9新增：Self-Check-Label提示词 =====
+
+SELF_CHECK_LABEL_SYSTEM = """你是一位"标注结果校验专家"，负责审视属性标注结果。
+你的任务是：验证属性合理性、检查完整性，并生成反思建议。"""
+
+SELF_CHECK_LABEL_USER = """## 校验任务
+
+### 1. 实体属性验证
+- 类别、细分是否正确？
+- 情感标签、体验评价是否与原文匹配？
+- 知名度判断是否合理？
+
+### 2. 关系属性验证
+- 空间精度、语义类型等属性是否正确？
+- 是否遗漏关键属性？
+
+### 3. Reflexion反思
+请生成反思建议：
+- 标注过程中的问题分析
+- 改进建议
+
+### 4. 置信度判断
+- high: 属性完整准确
+- medium: 部分属性缺失或有偏差
+- low: 属性标注质量差
+
+## 待校验标注结果
+实体属性: {entity_attrs}
+关系属性: {relation_attrs}
+
+## 原始文本
+{raw_text}
+
+请输出校验结果。"""
+
+SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_LABEL_SYSTEM),
+    ("human", SELF_CHECK_LABEL_USER),
+])
+
+
+# ===== P9新增：Self-Check-Filter提示词（可选） =====
+
+SELF_CHECK_FILTER_SYSTEM = """你是一位"文本筛选校验专家"，负责独立审视Filter筛选结果。
+你的任务是：验证筛选判定的合理性，检测误筛（有效文本被判定为无效）和误判（无效文本被判定为有效），并生成反思建议。"""
+
+SELF_CHECK_FILTER_USER = """## 校验任务
+
+### 1. 筛选判定验证
+- **is_valid判定是否合理？**
+- 如果判定为无效，是否确实没有地理信息？
+- 如果判定为有效，是否真的包含地理实体或空间关系？
+
+### 2. 误筛检测
+- 是否有地理实体被遗漏？
+- 是否有模糊指代（如"这里"、"那边"）暗示地理信息？
+
+### 3. 误判检测
+- 是否将纯情感/无关文本判定为有效？
+- 是否误读了文本内容？
+
+### 4. Reflexion反思
+请生成反思建议：
+- 筛选判定的主要问题分析
+- 改进策略
+
+### 5. 置信度判断
+- high: 判定准确，无误筛/误判
+- medium: 有轻微偏差但可控
+- low: 判定不合理，需要重筛
+
+## 待校验筛选结果
+is_valid: {is_valid}
+confidence: {confidence}
+skip_reason: {skip_reason}
+has_geo_entity: {has_geo_entity}
+has_spatial_relation: {has_spatial_relation}
+geo_entity_hint: {geo_entity_hint}
+
+## 原始文本
+{raw_text}
+
+请输出校验结果。"""
+
+SELF_CHECK_FILTER_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_FILTER_SYSTEM),
+    ("human", SELF_CHECK_FILTER_USER),
+])
+
+
+# ===== P9新增：Self-Check-Normalize提示词（可选） =====
+
+SELF_CHECK_NORMALIZE_SYSTEM = """你是一位"文本归一化校验专家"，负责独立审视Normalize归一化结果。
+你的任务是：验证归一化质量，检查语义保留，检测信息添加/丢失问题，并生成反思建议。"""
+
+SELF_CHECK_NORMALIZE_USER = """## 校验任务
+
+### 1. 归一化质量验证
+- **别名归一化是否正确？**（如"武大"→"武汉大学"）
+- **指代消解是否合理？**（如"这里"→具体地点）
+- **活动归一化是否恰当？**（如"打卡"→"游览参观"）
+
+### 2. 语义保留检查
+- 是否保留了原文的核心语义？
+- 是否添加了原文不存在的信息？（不应添加）
+- 是否丢失了原文关键信息？（不应丢失）
+
+### 3. 归一化记录校验
+- 每条归一化记录是否合理？
+- 是否有过度归一化或不当归一化？
+
+### 4. Reflexion反思
+请生成反思建议：
+- 归一化过程中的问题分析
+- 改进策略
+
+### 5. 置信度判断
+- high: 归一化准确，语义完全保留
+- medium: 有轻微偏差但语义保留
+- low: 归一化有问题，需要重做
+
+## 待校验归一化结果
+normalized_text: {normalized_text}
+confidence: {confidence}
+has_changes: {has_changes}
+preserved_semantics: {preserved_semantics}
+
+归一化记录:
+{normalizations}
+
+## 原始文本
+{raw_text}
+
+请输出校验结果。"""
+
+SELF_CHECK_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_NORMALIZE_SYSTEM),
+    ("human", SELF_CHECK_NORMALIZE_USER),
+])
+
+
+# ===== P9新增：格式化辅助函数 =====
+
+def format_joint_entities(entities: list) -> str:
+    """格式化联合抽取的实体列表"""
+    if not entities:
+        return "(无实体)"
+    lines = []
+    for e in entities:
+        aliases = e.get("aliases", [])
+        alias_str = f" (别名: {', '.join(aliases)})" if aliases else ""
+        evidence = e.get("evidence", "")
+        lines.append(f"- {e.get('name', '')} [{e.get('type', '')}] 类别:{e.get('category', '')}{alias_str} 证据:\"{evidence}\"")
+    return "\n".join(lines)
+
+
+def format_joint_triples(triples: list) -> str:
+    """格式化联合抽取的三元组列表"""
+    if not triples:
+        return "(无三元组)"
+    lines = []
+    for t in triples:
+        base = f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
+        confidence = t.get("confidence", "")
+        evidence = t.get("evidence", "")
+        attrs = t.get("attributes", {})
+        attr_str = ""
+        if attrs:
+            attr_str = f" [{', '.join(f'{k}={v}' for k, v in attrs.items())}]"
+        lines.append(f"- {base} 置信度:{confidence}{attr_str} 证据:\"{evidence}\"")
+    return "\n".join(lines)
+
+
+def format_qa_pairs_for_check(qa_pairs: list) -> str:
+    """格式化QA问答对用于校验"""
+    if not qa_pairs:
+        return "(无问答对)"
+    lines = []
+    for qa in qa_pairs:
+        dimension = qa.get("dimension", "")
+        q = qa.get("question", "")
+        a = qa.get("answer", "")
+        entities = qa.get("entities_involved", [])
+        entities_str = ", ".join(entities) if entities else "(无)"
+        lines.append(f"- [{dimension}] Q: {q} | A: {a} | 实体: {entities_str}")
+    return "\n".join(lines)
+
+
+def format_eval_scores_for_check(scores: list) -> str:
+    """格式化评估评分用于校验"""
+    if not scores:
+        return "(无评分)"
+    lines = []
+    for s in scores:
+        triple = s.get("triple", {})
+        t_str = f"<{triple.get('head', '')}, {triple.get('relation', '')}, {triple.get('tail', '')}>"
+        lines.append(f"- {t_str} SEM:{s.get('SEM', 0)} FAC:{s.get('FAC', 0)} CON:{s.get('CON', 0)}")
+    return "\n".join(lines)
+
+
+def format_reflection_history(history: list) -> str:
+    """格式化反思历史"""
+    if not history:
+        return "(无历史反思)"
+    lines = []
+    for i, r in enumerate(history[-3:], 1):  # 只显示最近3轮
+        lines.append(f"第{i}轮反思: {r[:200]}...")
+    return "\n".join(lines)
+
+
+def format_normalizations_for_check(normalizations: list) -> str:
+    """格式化归一化记录用于校验"""
+    if not normalizations:
+        return "(无归一化记录)"
+    lines = []
+    for n in normalizations:
+        raw = n.get("raw", "")
+        normalized = n.get("normalized", "")
+        ntype = n.get("type", "")
+        confidence = n.get("confidence", "medium")
+        lines.append(f"- '{raw}' → '{normalized}' 类型:{ntype} 置信度:{confidence}")
+    return "\n".join(lines)
+
+
+# ===== P10新增：批量LLM调用提示词 =====
+
+BATCH_JOINT_SYSTEM = """你是一位"地理语义批量抽取专家"，擅长一次处理多条文本，同时提取地理实体和三元组关系。
+你的核心优势：
+1. **高效处理**：一次推理完成多条语料的抽取，大幅降低成本
+2. **跨语料感知**：识别不同文本中的同名实体和别名（如"武大"和"武汉大学"是同一实体）
+3. **一致性保证**：对相同实体的类型判断保持一致
+"""
+
+BATCH_JOINT_USER = """## 任务描述
+请同时处理以下多条语料（共 {batch_size} 条），为每条语料提取：
+1. 地理实体（道路/POI/建筑物/街区）
+2. 实体间的语义关系三元组
+3. 每个抽取的原文依据
+
+---
+
+## 实体类型定义
+
+| 类型 | 定义 | 示例 |
+|------|------|------|
+| 道路 | 交通通道 | 珞喻路、关山大道、雄楚大道 |
+| POI | 具体地点/机构 | 武汉大学、群光广场、某某咖啡厅 |
+| 建筑物 | 建筑设施 | 泛悦汇、融科天城、行政楼 |
+| 街区 | 地理区域 | 街道口、光谷商圈、华农校区 |
+
+---
+
+## 关系类型（18种）
+
+### 空间基础关系（8个）
+- **位于**：A在B处（如：武汉大学 位于 珞喻路）
+- **相邻**：A和B空间邻近（如：群光广场 相邻 街道口）
+- **属于**：A是B的组成部分（如：行政楼 属于 武汉大学）
+- **连接**：A和B交通连接
+- **距离**：A距离B的远近（属性：近/中等/远）
+- **方向**：A在B的某方位（属性：东/南/西/北/对面/旁边）
+- **穿过**：道路穿越区域
+- **变化为**：A已变更为B
+
+### 社交语义关系（6个）
+- **推荐指数**：用户推荐程度（尾：超推/推荐/一般/不推荐）
+- **承载活动**：场所可进行的活动（属性：时段、适合人群、限制）
+- **可达方式**：交通方式（尾：地铁/公交/步行/自驾）
+- **消费档次**：消费水平（尾：平价/中档/高档/奢侈）
+- **品类特征**：风格/文化特征
+- **引发情感**：情感体验（尾：正面/中性/负面）
+
+### 对比评价关系（3个）
+- **优于**：A在某方面好于B（属性：维度列表）
+- **相似**：A和B相似
+- **劣于**：A在某方面不如B
+
+### 事件关系（1个）
+- **发生事件**：场所发生的特定事件
+
+---
+
+## 跨语料别名发现
+
+在处理多条语料时，请特别注意：
+1. 不同文本中可能用不同名称指代同一实体（如"武大"、"武汉大学"、"WHU"）
+2. 发现别名时，在 `cross_corpus_aliases` 中记录归一化建议
+3. 保持相同实体的类型一致性
+
+---
+
+## 语料列表
+
+{corpus_list}
+
+---
+
+## 输出要求
+
+请输出：
+1. `results`: 每条语料的抽取结果（实体、三元组、置信度）
+2. `cross_corpus_aliases`: 跨语料发现的别名映射
+3. `overall_confidence`: 整体置信度评估
+
+输出JSON格式。
+"""
+
+BATCH_JOINT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", BATCH_JOINT_SYSTEM),
+    ("human", BATCH_JOINT_USER),
+])
+
+
+# ===== 批量校验提示词 =====
+
+BATCH_SELF_CHECK_SYSTEM = """你是一位"批量抽取校验专家"，负责同时校验多条语料的抽取结果。
+你的任务是：
+1. 校验每条语料的实体和三元组质量
+2. 验证跨语料别名映射的准确性
+3. 决定是否需要重试或退化为单条处理
+"""
+
+BATCH_SELF_CHECK_USER = """## 校验任务
+
+请校验以下批量抽取结果：
+
+### 1. 实体校验（每条语料）
+- 是否遗漏重要地理实体？
+- 实体类型是否正确？
+- 是否抽取了非地理实体？
+
+### 2. 三元组校验（每条语料）
+- 是否存在幻觉（无原文依据的三元组）？
+- 关系类型和方向是否正确？
+- 属性是否合理？
+
+### 3. 跨语料别名验证
+- 别名映射是否正确？（如"武大"→"武汉大学"是否合理）
+- 是否有遗漏的别名关系？
+
+### 4. 整体质量评估
+- 如果多数语料质量低，建议重新批量处理
+- 如果只有少数语料有问题，建议退化为单条处理这些语料
+
+---
+
+## 待校验结果
+
+{batch_results}
+
+## 跨语料别名
+{cross_corpus_aliases}
+
+---
+
+## 输出要求
+
+请输出：
+1. `verified_results`: 校验通过的语料结果
+2. `rejected_results`: 校验失败的语料（标注原因）
+3. `verified_aliases`: 校验通过的别名
+4. `retry_suggested`: 是否建议重新批量处理
+5. `fallback_to_single`: 是否建议退化为单条处理
+
+输出JSON格式。
+"""
+
+BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", BATCH_SELF_CHECK_SYSTEM),
+    ("human", BATCH_SELF_CHECK_USER),
+])
+
+
+# ===== 批量处理辅助函数 =====
+
+def format_batch_corpus(corpus_list: List[Dict]) -> str:
+    """格式化批量语料输入"""
+    if not corpus_list:
+        return "(无语料)"
+    lines = []
+    for i, corpus in enumerate(corpus_list, 1):
+        corpus_id = corpus.get("id", f"unknown_{i}")
+        text = corpus.get("text", "")
+        lines.append(f"【语料 {i}】ID: {corpus_id}\n文本: {text}")
+    return "\n\n".join(lines)
+
+
+def format_batch_results_for_check(batch_results: List[Dict]) -> str:
+    """格式化批量结果用于校验"""
+    if not batch_results:
+        return "(无结果)"
+    lines = []
+    for r in batch_results:
+        corpus_id = r.get("corpus_id", "unknown")
+        entities = r.get("entities", {})
+        triples = r.get("triples", [])
+        confidence = r.get("confidence", "medium")
+
+        entity_str = ", ".join([f"{k}: {v}" for k, v in entities.items() if v])
+        triple_str = ", ".join([f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>" for t in triples[:3]])
+
+        lines.append(f"- [{corpus_id}] 置信度:{confidence}\n  实体: {entity_str}\n  三元组: {triple_str}")
+    return "\n".join(lines)
+
+
+def format_cross_corpus_aliases(aliases: List[Dict]) -> str:
+    """格式化跨语料别名"""
+    if not aliases:
+        return "(无别名发现)"
+    lines = []
+    for a in aliases:
+        raw = a.get("raw", "")
+        canonical = a.get("canonical", "")
+        corpus_ids = a.get("corpus_ids", [])
+        lines.append(f"- '{raw}' → '{canonical}' (来源: {', '.join(corpus_ids[:3])})")
+    return "\n".join(lines)

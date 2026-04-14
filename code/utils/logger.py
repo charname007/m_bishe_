@@ -2,10 +2,11 @@
 日志配置工具
 """
 import sys
+from pathlib import Path
 from loguru import logger
 
 
-def setup_logger(log_file: str = None, level: str = "INFO"):
+def setup_logger(log_file: str = "logs/app.log", level: str = "INFO"):
     """
     配置日志
 
@@ -34,6 +35,7 @@ def setup_logger(log_file: str = None, level: str = "INFO"):
 
     # 添加文件处理器
     if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         file_format = (
             "{time:YYYY-MM-DD HH:mm:ss} | "
             "{level: <8} | "

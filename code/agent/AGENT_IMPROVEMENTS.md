@@ -2499,3 +2499,614 @@ qa_scaffold_skip_simple: bool = True
 | **知识库协同** | QA的entity_hints可匹配KG已有实体 |
 
 ---
+
+## 十四、【新增】联合抽取 + Reflexion机制（P9）
+
+### 14.1 方案概述
+
+**核心理念**：
+- **联合抽取**：一次LLM推理同时识别实体、关系和证据，避免流水线错误传播
+- **Reflexion机制**：自然语言反思引导迭代改进，形成"抽取→校验→反思→重抽"闭环
+
+**与现有架构的关系**：
+- 联合抽取模式作为**默认模式**，流水线模式（NER+RE）作为**备选保留**
+- Reflexion机制增强现有的Self-Check节点，添加自然语言反思输出
+
+### 14.2 架构对比
+
+**现有流水线模式**（保留）：
+```
+Filter → Normalize → QA_Scaffold → NER → Self-Check-NER → RE → Self-Check-RE → Eval → Label
+```
+
+**新增联合抽取模式**（默认）：
+```
+Filter → Normalize → QA_Scaffold → Joint_NER_RE → Self-Check-Joint(Reflexion) → Eval → Label
+```
+
+### 14.3 联合抽取优势
+
+| 优势 | 说明 |
+|------|------|
+| **减少错误传播** | 实体边界识别错误不会直接影响关系判定 |
+| **全局理解** | LLM可同时考虑实体和关系的语义一致性 |
+| **效率提升** | 一次推理替代两次，减少API调用和Token消耗 |
+| **证据一致性** | 实体和关系的evidence来源同一推理过程 |
+
+### 14.4 Pydantic模型设计
+
+```python
+# schemas.py 新增
+
+class JointEntity(BaseModel):
+    """联合抽取的单个实体"""
+    name: str = Field(description="实体名称")
+    type: str = Field(description="实体类型：道路/POI/建筑物/街区")
+    category: str = Field(description="细分类别")
+    aliases: List[str] = Field(default_factory=list, description="别名/简称")
+    evidence: str = Field(description="原文依据")
+
+
+class JointTriple(BaseModel):
+    """联合抽取的单个三元组"""
+    head: str = Field(description="头实体")
+    relation: str = Field(description="关系类型（18种之一）")
+    tail: str = Field(description="尾实体")
+    evidence: str = Field(description="原文依据")
+    confidence: str = Field(description="置信度：high/medium/low")
+    attributes: Dict[str, Any] = Field(default_factory=dict, description="关系属性")
+
+
+class JointExtractionResult(BaseModel):
+    """联合抽取结果 - 实体和关系同时输出"""
+    entities: List[JointEntity] = Field(default_factory=list, description="抽取的实体列表")
+    triples: List[JointTriple] = Field(default_factory=list, description="抽取的三元组列表")
+    entity_relation_mapping: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="实体-关系映射：{'武汉大学': ['<武汉大学, 位于, 珞喻路>', ...]}"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    extraction_strategy: str = Field(
+        default="joint",
+        description="抽取策略标识：joint/pipeline"
+    )
+
+
+class SelfCheckJointResult(BaseModel):
+    """联合抽取校验结果 + Reflexion"""
+    verified_entities: List[JointEntity] = Field(description="校验通过的实体")
+    verified_triples: List[JointTriple] = Field(description="校验通过的三元组")
+    rejected_entities: List[str] = Field(description="拒绝的实体（非地理实体）")
+    rejected_triples: List[Dict] = Field(description="拒绝的三元组（幻觉/错误）")
+    
+    # Reflexion核心：自然语言反思
+    reflection_text: str = Field(
+        description="自然语言形式的反思建议，如：'本次抽取遗漏了空间方向关系，建议关注方位介词'"
+    )
+    improvement_strategy: str = Field(
+        description="具体改进策略，如：'增加对方位介词的敏感度，检查是否遗漏位于/相邻关系'"
+    )
+    
+    overall_confidence: str = Field(description="整体置信度")
+    retry_suggested: bool = Field(description="是否建议重试")
+    retry_reason: str = Field(description="重试原因")
+```
+
+### 14.5 联合抽取提示词设计
+
+```python
+# prompts.py 新增
+
+JOINT_NER_RE_SYSTEM = """你是一位"地理语义联合抽取专家"，擅长在一次推理中同时识别实体和关系。
+你的优势在于：能够全局理解文本，避免实体边界识别错误对关系判定的干扰。"""
+
+JOINT_NER_RE_USER = """## 任务描述
+请从文本中**同时**抽取：
+1. 地理实体（道路/POI/建筑物/街区）
+2. 实体间的语义关系（18种关系类型）
+3. 每个抽取的证据依据
+
+## 实体类型定义
+| 类型 | 定义 | 示例 |
+|------|------|------|
+| 道路 | 交通通道 | 珞喻路、关山大道 |
+| POI | 具体地点 | 武汉大学、群光广场 |
+| 建筑物 | 建筑设施 | 泛悦汇、融科天城 |
+| 街区 | 地理区域 | 街道口、光谷商圈 |
+
+## 关系类型（18种）
+### 空间基础关系（8个）
+- 位于、相邻、属于、连接、距离、方向、穿过、变化为
+
+### 社交语义关系（6个）
+- 推荐指数、承载活动、可达方式、消费档次、品类特征、引发情感
+
+### 对比评价关系（3个）
+- 优于、相似、劣于
+
+### 事件关系（1个）
+- 发生事件
+
+## QA脚手架提示（如有）
+{entity_hints}
+{relation_hints}
+{context_dependencies}
+
+## 联合抽取策略（CoT）
+1. **第一步**：扫描文本，识别所有可能的地名、道路、建筑等
+2. **第二步**：对识别的实体，判断其类型和类别
+3. **第三步**：分析实体之间的语义关系，抽取三元组
+4. **第四步**：为每个抽取提供原文依据（evidence）
+5. **第五步**：评估整体置信度
+
+## 任务示例
+
+### 示例1：基础联合抽取
+输入: "武大的樱花开了，很多人在行政楼前拍照打卡"
+
+输出:
+{
+  "entities": [
+    {"name": "武汉大学", "type": "POI", "category": "高校", "aliases": ["武大"], "evidence": "武大"},
+    {"name": "行政楼", "type": "建筑物", "category": "教育设施", "aliases": [], "evidence": "行政楼"},
+    {"name": "樱花", "type": "POI", "category": "景点", "aliases": [], "evidence": "樱花"}
+  ],
+  "triples": [
+    {"head": "行政楼", "relation": "属于", "tail": "武汉大学", "evidence": "行政楼", "confidence": "high"},
+    {"head": "武汉大学", "relation": "承载活动", "tail": "拍照打卡", "evidence": "拍照打卡", "confidence": "high", "attributes": {"时段": "樱花季"}},
+    {"head": "武汉大学", "relation": "引发情感", "tail": "正面", "evidence": "樱花开了", "confidence": "medium"}
+  ],
+  "entity_relation_mapping": {
+    "武汉大学": ["<行政楼, 属于, 武汉大学>", "<武汉大学, 承载活动, 拍照打卡>"],
+    "行政楼": ["<行政楼, 属于, 武汉大学>"]
+  },
+  "overall_confidence": "high"
+}
+
+### 示例2：复杂语义关系
+输入: "群光广场就在珞喻路上，比街道口更热闹，周末适合带娃逛街"
+
+输出:
+{
+  "entities": [
+    {"name": "群光广场", "type": "建筑物", "category": "商业综合体", "aliases": [], "evidence": "群光广场"},
+    {"name": "珞喻路", "type": "道路", "category": "主干道", "aliases": [], "evidence": "珞喻路"},
+    {"name": "街道口", "type": "街区", "category": "商圈", "aliases": [], "evidence": "街道口"}
+  ],
+  "triples": [
+    {"head": "群光广场", "relation": "位于", "tail": "珞喻路", "evidence": "就在珞喻路上", "confidence": "high"},
+    {"head": "群光广场", "relation": "优于", "tail": "街道口", "evidence": "比街道口更热闹", "confidence": "medium", "attributes": {"维度": ["氛围"]}},
+    {"head": "群光广场", "relation": "承载活动", "tail": "逛街", "evidence": "逛街", "confidence": "high", "attributes": {"时段": "周末", "适合人群": "亲子"}}
+  ],
+  "overall_confidence": "high"
+}
+
+## 待处理文本
+{raw_text}
+
+请输出联合抽取结果（JSON格式）。"""
+
+JOINT_NER_RE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", JOINT_NER_RE_SYSTEM),
+    ("human", JOINT_NER_RE_USER),
+])
+```
+
+### 14.6 Reflexion校验提示词设计
+
+```python
+# prompts.py 新增
+
+SELF_CHECK_JOINT_SYSTEM = """你是一位"联合抽取校验专家"，负责独立审视Joint Extraction结果。
+你的任务是：客观评估、检测幻觉、验证关系、并生成**自然语言反思建议**供重试轮参考。"""
+
+SELF_CHECK_JOINT_USER = """## 校验任务
+
+### 1. 实体校验
+- **遗漏检查**：原文是否提及地理实体但未抽取？
+- **类型验证**：实体类型是否正确？
+- **无关过滤**：是否抽取了非地理实体？
+
+### 2. 关系校验
+- **幻觉检测**：三元组是否在原文中有依据？
+- **关系验证**：关系类型和方向是否正确？
+- **证据匹配**：evidence字段是否来自原文？
+
+### 3. Reflexion反思（核心）
+请生成自然语言形式的反思建议，指导下一轮抽取改进：
+- 总结本次抽取的主要问题
+- 分析问题产生的原因
+- 提出具体的改进策略
+
+### 4. 置信度判断
+- high: 遗漏≤1，幻觉≤1，无严重错误
+- medium: 遗漏2-3，幻觉2-3，可修正
+- low: 遗漏>3，幻觉>3，需重抽
+
+## 待校验结果
+实体: {entities}
+三元组: {triples}
+
+## 原始文本
+{raw_text}
+
+## QA脚手架提示
+{semantic_summary}
+{context_dependencies}
+
+## 重试历史（如有）
+上一轮反思: {previous_reflection}
+改进尝试: {improvement_attempts}
+
+请输出校验结果，重点输出reflection_text和improvement_strategy。"""
+
+SELF_CHECK_JOINT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SELF_CHECK_JOINT_SYSTEM),
+    ("human", SELF_CHECK_JOINT_USER),
+])
+```
+
+### 14.7 节点实现
+
+```python
+# nodes.py 新增
+
+def create_joint_ner_re_node(llm: Any):
+    """创建联合抽取节点"""
+    parser = PydanticOutputParser(pydantic_object=JointExtractionResult)
+
+    async def joint_ner_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Joint NER + RE: 一次推理同时抽取实体和关系"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Joint_NER_RE] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "joint_ner_re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始联合抽取"
+        })
+
+        try:
+            # 使用归一化文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 获取 QA Scaffold 上下文
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_relation_hints = state.get("qa_relation_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
+            # 调用 LLM
+            prompt_text = JOINT_NER_RE_PROMPT.invoke({
+                "raw_text": text_for_processing,
+                "entity_hints": format_entity_hints(qa_entity_hints),
+                "relation_hints": format_relation_hints(qa_relation_hints),
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: JointExtractionResult = parser.parse(response.content)
+
+            # 转换为现有格式（兼容后续节点）
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            for e in result.entities:
+                if e.type in entities_dict:
+                    entities_dict[e.type].append(e.name)
+
+            triples_list = [
+                {
+                    "head": t.head,
+                    "relation": t.relation,
+                    "tail": t.tail,
+                    "evidence": t.evidence,
+                    "confidence": t.confidence,
+                    "attributes": t.attributes,
+                }
+                for t in result.triples
+            ]
+
+            logger.info(
+                f"[Joint_NER_RE] 完成: {len(result.entities)}个实体, "
+                f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
+            )
+
+            writer({
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "entity_count": len(result.entities),
+                "triple_count": len(result.triples),
+                "confidence": result.overall_confidence
+            })
+
+            return {
+                "entities": entities_dict,
+                "triples": triples_list,
+                "joint_extraction_result": result.model_dump(),
+                "extraction_strategy": "joint",
+                "current_step": StepEnum.EVAL,
+            }
+
+        except Exception as e:
+            logger.error(f"[Joint_NER_RE] 失败: {e}")
+            return {
+                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "triples": [],
+                "error": str(e),
+                "current_step": StepEnum.EVAL,
+            }
+
+    return joint_ner_re_node
+
+
+def create_self_check_joint_node(llm: Any):
+    """创建联合抽取校验节点（含Reflexion）"""
+    parser = PydanticOutputParser(pydantic_object=SelfCheckJointResult)
+
+    async def self_check_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        logger.info(f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}")
+
+        try:
+            text = _get_text_for_processing(state)
+            
+            # 获取反思历史（用于迭代改进）
+            reflection_history = state.get("reflection_history", [])
+            previous_reflection = "\n".join(reflection_history[-2:]) if reflection_history else "(无)"
+            
+            prompt_text = SELF_CHECK_JOINT_PROMPT.invoke({
+                "raw_text": text,
+                "entities": format_entities(state["entities"]),
+                "triples": format_triples(state["triples"]),
+                "semantic_summary": state.get("semantic_summary", ""),
+                "context_dependencies": format_context_dependencies(state.get("qa_context_dependencies", [])),
+                "previous_reflection": previous_reflection,
+                "improvement_attempts": state.get("improvement_strategy", ""),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckJointResult = parser.parse(response.content)
+
+            # 记录反思历史
+            reflection_history.append(result.reflection_text)
+
+            logger.info(
+                f"[Self-Check-Joint] 完成: confidence={result.overall_confidence}, "
+                f"retry_suggested={result.retry_suggested}"
+            )
+            logger.info(f"[Self-Check-Joint] 反思: {result.reflection_text[:100]}...")
+
+            return {
+                "self_check_joint_result": result.model_dump(),
+                "reflection_text": result.reflection_text,
+                "improvement_strategy": result.improvement_strategy,
+                "reflection_history": reflection_history,
+                "retry_count": retry_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.EVAL,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Joint] 失败: {e}")
+            return {
+                "self_check_joint_result": {},
+                "error": str(e),
+                "retry_count": retry_count + 1,
+                "current_step": StepEnum.EVAL,
+            }
+
+    return self_check_joint_node
+```
+
+### 14.8 状态定义更新
+
+```python
+# state.py CorpusState 新增字段
+
+class CorpusState(TypedDict):
+    ...
+    # 联合抽取结果（新增）
+    joint_extraction_result: Annotated[Dict, replace_value]
+    extraction_strategy: Annotated[str, replace_value]  # "joint" / "pipeline"
+    
+    # Self-Check-Joint结果（新增）
+    self_check_joint_result: Annotated[Dict, replace_value]
+    
+    # Reflexion字段（新增）
+    reflection_text: Annotated[str, replace_value]
+    improvement_strategy: Annotated[str, replace_value]
+    reflection_history: Annotated[List[str], merge_list]  # 多轮反思历史
+    
+    # 重试控制
+    retry_suggested: Annotated[bool, replace_value]
+    retry_reason: Annotated[str, replace_value]
+
+
+# state.py StepEnum 新增枚举
+
+class StepEnum(str, Enum):
+    FILTER = "filter"
+    NORMALIZE = "normalize"
+    QA_SCAFFOLD = "qa_scaffold"
+    JOINT_NER_RE = "joint_ner_re"       # 新增：联合抽取
+    SELF_CHECK_JOINT = "self_check_joint"  # 新增：联合校验
+    NER = "ner"                         # 保留：流水线NER
+    RE = "re"                           # 保留：流水线RE
+    SELF_CHECK_NER = "self_check_ner"
+    SELF_CHECK_RE = "self_check_re"
+    EVAL = "eval"
+    LABEL = "label"
+    DONE = "done"
+```
+
+### 14.9 工作流更新
+
+```python
+# workflow.py build_corpus_workflow 更新
+
+def build_corpus_workflow(
+    llm: Any,
+    use_simplified_eval: bool = True,
+    enable_self_check: bool = False,
+    enable_filter: bool = False,
+    enable_normalize: bool = False,
+    enable_qa_scaffold: bool = False,
+    use_joint_extraction: bool = True,  # 新增参数：默认使用联合抽取
+    max_retries: int = DEFAULT_MAX_RETRIES
+) -> CompiledStateGraph:
+    """
+    构建单条语料处理工作流
+    
+    模式选择：
+    - use_joint_extraction=True: 联合抽取模式（默认）
+    - use_joint_extraction=False: 流水线模式（NER→RE）
+    """
+    
+    builder = StateGraph(CorpusState)
+    
+    # 前置节点（Filter/Normalize/QA_Scaffold）...
+    
+    if use_joint_extraction:
+        # 联合抽取模式
+        joint_node = create_joint_ner_re_node(llm)
+        self_check_joint = create_self_check_joint_node(llm)
+        eval_node = create_eval_simplified_node(llm)
+        label_node = create_label_node(llm)
+        
+        builder.add_node("joint_ner_re", joint_node)
+        builder.add_node("self_check_joint", self_check_joint)
+        builder.add_node("eval", eval_node)
+        builder.add_node("label", label_node)
+        
+        # 路由：QA_Scaffold → Joint_NER_RE
+        if enable_qa_scaffold:
+            builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold)
+        else:
+            builder.add_edge(START, "joint_ner_re")
+        
+        # Self-Check + Reflexion重试循环
+        builder.add_conditional_edges(
+            "joint_ner_re",
+            route_after_joint_extraction,
+            {"self_check_joint": "self_check_joint", "eval": "eval"}
+        )
+        
+        builder.add_conditional_edges(
+            "self_check_joint",
+            route_after_self_check_joint,
+            {"joint_ner_re": "joint_ner_re", "eval": "eval"}
+        )
+        
+        builder.add_edge("eval", "label")
+        builder.add_edge("label", END)
+        
+        logger.info("[Workflow] 启用联合抽取模式 + Reflexion机制")
+    
+    else:
+        # 流水线模式（保留）
+        ner_node = create_ner_node(llm)
+        re_node = create_re_node(llm)
+        # ... 现有流水线逻辑 ...
+        logger.info("[Workflow] 启用流水线模式")
+    
+    return builder.compile(checkpointer=InMemorySaver())
+```
+
+### 14.10 路由函数设计
+
+```python
+# workflow.py 新增路由函数
+
+def route_after_joint_extraction(state: CorpusState) -> str:
+    """Joint_NER_RE 后路由"""
+    if state.get("error"):
+        return END
+    
+    # 直接进入Self-Check进行校验
+    return "self_check_joint"
+
+
+def route_after_self_check_joint(state: CorpusState) -> str:
+    """Self-Check-Joint 后路由 - Reflexion驱动的重试"""
+    
+    if state.get("error"):
+        return END
+    
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+    
+    check_result = state.get("self_check_joint_result", {})
+    retry_suggested = check_result.get("retry_suggested", False)
+    confidence = check_result.get("overall_confidence", "medium")
+    
+    # 达到最大重试次数，强制通过
+    if retry_count >= max_retries:
+        logger.warning(f"[Self-Check-Joint-Route] 达到最大重试 {retry_count}/{max_retries}")
+        return "eval"
+    
+    # Reflexion建议重试
+    if retry_suggested and confidence == "low":
+        reflection = state.get("reflection_text", "")
+        logger.info(f"[Self-Check-Joint-Route] 触发重试，反思: {reflection[:100]}...")
+        return "joint_ner_re"  # 回退到联合抽取
+    
+    # 通过
+    logger.info(f"[Self-Check-Joint-Route] 通过，置信度: {confidence}")
+    return "eval"
+```
+
+### 14.11 配置扩展
+
+```python
+# config.py ExtractionConfig 新增
+
+use_joint_extraction: bool = True
+"""是否使用联合抽取模式（默认True，False则使用流水线模式）"""
+
+enable_reflexion: bool = True
+"""是否启用Reflexion反思机制（仅在联合抽取模式下有效）"""
+
+reflexion_max_retries: int = 3
+"""Reflexion反思循环最大重试次数"""
+```
+
+### 14.12 成本分析
+
+| 模式 | LLM调用次数 | Token消耗 | 适用场景 |
+|------|------------|-----------|----------|
+| **联合抽取** | 1次（NER+RE合并） | 较低 | 大规模处理、成本敏感 |
+| **流水线** | 2次（NER + RE） | 较高 | 复杂文本、需要精细控制 |
+| **联合+Reflexion** | 1-4次（含重试） | 中等 | 高质量要求、学术研究 |
+
+### 14.13 学术价值
+
+| 改进 | 学术贡献点 | 论文表述 |
+|------|------------|----------|
+| **联合抽取** | 验证"一次推理vs流水线"的质量差异 | "提出联合抽取架构，减少错误传播" |
+| **Reflexion机制** | 展示"反思→改进"闭环 | "引入Reflexion机制，实现迭代式质量提升" |
+| **反思历史追踪** | 可量化多轮改进效果 | "反思历史可视化，展示迭代改进轨迹" |
+
+### 14.14 实施优先级
+
+| 优先级 | 内容 | 复杂度 | 收益 |
+|--------|------|--------|------|
+| **P0** | JointEntity/JointTriple模型定义 | 低 | 基础 |
+| **P1** | Joint_NER_RE节点实现 | 中 | 高（减少调用） |
+| **P2** | Self-Check-Joint节点（含Reflexion） | 中 | 高（质量提升） |
+| **P3** | 工作流集成（use_joint_extraction参数） | 低 | 配置化 |
+| **P4** | 反思历史追踪与可视化 | 低 | 学术价值 |
+| **P5** | 对比实验（联合vs流水线） | 中 | 学术验证 |
+
+### 14.15 与现有方案的协同
+
+| 协同方案 | 协同效果 |
+|----------|----------|
+| **QA Scaffold** | entity_hints/relation_hints作为联合抽取的提示输入 |
+| **Normalize** | 归一化文本作为联合抽取的输入文本 |
+| **Filter** | 无效文本提前跳过，节省联合抽取成本 |
+| **Eval节点** | 联合抽取结果仍需Eval评估（简化版） |
+| **Label节点** | 联合抽取的attributes与Label阶段属性互补 |
+
+---

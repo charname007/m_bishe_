@@ -38,6 +38,16 @@ class ExtractionConfig:
     batch_size: int = 100
     """每批次从数据库读取的语料数量"""
 
+    # ===== P10新增：批量LLM调用配置 =====
+    batch_llm_size: int = 5
+    """每次LLM调用处理的语料数量（批量输入模式）"""
+
+    enable_batch_llm: bool = True
+    """是否启用批量LLM调用模式（一次调用处理多条语料）"""
+
+    batch_llm_fallback: bool = True
+    """批量处理失败时是否自动退化为单条处理"""
+
     # ===== 文本验证配置 =====
     max_text_length: int = 10000
     """最大文本长度（超出会被截断）"""
@@ -82,6 +92,34 @@ class ExtractionConfig:
     # ===== Normalize 归一化配置（P6新增） =====
     enable_normalize: bool = False
     """是否启用 Normalize 归一化节点，消解指代和归一化别名"""
+
+    # ===== QA Scaffold 配置（P8新增） =====
+    enable_qa_scaffold: bool = False
+    """是否启用苏格拉底式QA引导节点，构建语义脚手架"""
+
+    qa_scaffold_min_text_length: int = 20
+    """启用QA脚手架的最小文本长度（过短文本跳过）"""
+
+    # ===== 联合抽取配置（P9新增） =====
+    use_joint_extraction: bool = True
+    """是否使用联合抽取模式（默认True，一次推理同时抽取实体和关系）"""
+
+    # ===== 二次检查配置（P9新增） =====
+    enable_full_self_check: bool = False
+    """是否启用所有节点二次检查（QA、Joint、Eval、Label）"""
+
+    enable_reflexion: bool = True
+    """是否启用Reflexion反思机制（仅在联合抽取模式下有效）"""
+
+    reflexion_max_retries: int = 3
+    """Reflexion反思循环最大重试次数"""
+
+    # ===== Filter/Normalize二次检查配置（P9新增，可选） =====
+    enable_self_check_filter: bool = False
+    """是否启用Filter筛选二次检查（可选，默认False）"""
+
+    enable_self_check_normalize: bool = False
+    """是否启用Normalize归一化二次检查（可选，默认False）"""
 
     @classmethod
     def from_env(cls) -> "ExtractionConfig":
@@ -145,6 +183,20 @@ class ExtractionConfig:
             self_check_re_low_threshold=get_int("SELF_CHECK_RE_LOW_THRESHOLD", 2),
             enable_filter=get_bool("ENABLE_FILTER", False),
             enable_normalize=get_bool("ENABLE_NORMALIZE", False),
+            enable_qa_scaffold=get_bool("ENABLE_QA_SCAFFOLD", False),
+            qa_scaffold_min_text_length=get_int("QA_SCAFFOLD_MIN_TEXT_LENGTH", 20),
+            # P9新增参数
+            use_joint_extraction=get_bool("USE_JOINT_EXTRACTION", True),
+            enable_full_self_check=get_bool("ENABLE_FULL_SELF_CHECK", False),
+            enable_reflexion=get_bool("ENABLE_REFLEXION", True),
+            reflexion_max_retries=get_int("REFLEXION_MAX_RETRIES", 3),
+            # P9新增：Filter/Normalize二次检查（可选）
+            enable_self_check_filter=get_bool("ENABLE_SELF_CHECK_FILTER", False),
+            enable_self_check_normalize=get_bool("ENABLE_SELF_CHECK_NORMALIZE", False),
+            # P10新增：批量LLM调用参数
+            batch_llm_size=get_int("BATCH_LLM_SIZE", 5),
+            enable_batch_llm=get_bool("ENABLE_BATCH_LLM", True),
+            batch_llm_fallback=get_bool("BATCH_LLM_FALLBACK", True),
         )
 
     @classmethod
@@ -170,6 +222,20 @@ class ExtractionConfig:
             self_check_re_low_threshold=config_dict.get("self_check_re_low_threshold", 2),
             enable_filter=config_dict.get("enable_filter", False),
             enable_normalize=config_dict.get("enable_normalize", False),
+            enable_qa_scaffold=config_dict.get("enable_qa_scaffold", False),
+            qa_scaffold_min_text_length=config_dict.get("qa_scaffold_min_text_length", 20),
+            # P9新增参数
+            use_joint_extraction=config_dict.get("use_joint_extraction", True),
+            enable_full_self_check=config_dict.get("enable_full_self_check", False),
+            enable_reflexion=config_dict.get("enable_reflexion", True),
+            reflexion_max_retries=config_dict.get("reflexion_max_retries", 3),
+            # P9新增：Filter/Normalize二次检查（可选）
+            enable_self_check_filter=config_dict.get("enable_self_check_filter", False),
+            enable_self_check_normalize=config_dict.get("enable_self_check_normalize", False),
+            # P10新增：批量LLM调用参数
+            batch_llm_size=config_dict.get("batch_llm_size", 5),
+            enable_batch_llm=config_dict.get("enable_batch_llm", True),
+            batch_llm_fallback=config_dict.get("batch_llm_fallback", True),
         )
 
     def to_dict(self) -> dict:
@@ -194,6 +260,20 @@ class ExtractionConfig:
             "self_check_re_low_threshold": self.self_check_re_low_threshold,
             "enable_filter": self.enable_filter,
             "enable_normalize": self.enable_normalize,
+            "enable_qa_scaffold": self.enable_qa_scaffold,
+            "qa_scaffold_min_text_length": self.qa_scaffold_min_text_length,
+            # P9新增参数
+            "use_joint_extraction": self.use_joint_extraction,
+            "enable_full_self_check": self.enable_full_self_check,
+            "enable_reflexion": self.enable_reflexion,
+            "reflexion_max_retries": self.reflexion_max_retries,
+            # P9新增：Filter/Normalize二次检查（可选）
+            "enable_self_check_filter": self.enable_self_check_filter,
+            "enable_self_check_normalize": self.enable_self_check_normalize,
+            # P10新增：批量LLM调用参数
+            "batch_llm_size": self.batch_llm_size,
+            "enable_batch_llm": self.enable_batch_llm,
+            "batch_llm_fallback": self.batch_llm_fallback,
         }
 
 

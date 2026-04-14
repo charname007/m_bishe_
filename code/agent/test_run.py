@@ -1,5 +1,6 @@
 """
 测试智能体工作流 - 不保存到数据库
+P9改进：添加联合抽取 + Reflexion + 全Self-Check测试
 """
 import asyncio
 import os
@@ -40,15 +41,37 @@ def create_llm():
 
 
 def create_initial_state(corpus_id: str, raw_text: str) -> CorpusState:
-    """创建初始状态"""
+    """创建初始状态（含P9新增字段）"""
     return {
         "corpus_id": corpus_id,
         "raw_text": raw_text,
+        # P9新增：配置标记字段（用于路由函数判断后续节点是否启用）
+        "_config_enable_normalize": False,
+        "_config_enable_qa_scaffold": False,
         # P5: Filter 筛选初始状态
         "filter_result": {},
         # P6: Normalize 归一化初始状态
         "normalize_result": {},
         "normalized_text": "",
+        # P8: QA Scaffold 脚手架初始状态
+        "qa_scaffold_result": {},
+        "semantic_summary": "",
+        "qa_entity_hints": [],
+        "qa_relation_hints": [],
+        "qa_context_dependencies": [],
+        # P9新增：联合抽取初始状态
+        "joint_extraction_result": {},
+        "extraction_strategy": "",
+        # P9新增：Self-Check初始状态
+        "self_check_filter_result": {},
+        "self_check_normalize_result": {},
+        "self_check_qa_result": {},
+        "self_check_joint_result": {},
+        "self_check_eval_result": {},
+        "self_check_label_result": {},
+        "reflection_text": "",
+        "improvement_strategy": "",
+        "reflection_history": [],
         # Step 1: NER
         "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
         # Step 2: RE
@@ -67,6 +90,7 @@ def create_initial_state(corpus_id: str, raw_text: str) -> CorpusState:
         "retry_count": 0,
         "max_retries": DEFAULT_MAX_RETRIES,
         "retry_reason": "",
+        "retry_suggested": False,
         "problem_entities": [],
         "problem_triples": [],
         "needs_review": False,
@@ -79,11 +103,11 @@ def create_initial_state(corpus_id: str, raw_text: str) -> CorpusState:
     }
 
 
-async def test_single_corpus(enable_filter=False, enable_normalize=False):
+async def test_single_corpus(enable_filter=False, enable_normalize=False, enable_qa_scaffold=False):
     """测试单条语料处理"""
     print("\n" + "=" * 60)
     print(f"[测试] 单条语料处理")
-    print(f"[配置] enable_filter={enable_filter}, enable_normalize={enable_normalize}")
+    print(f"[配置] enable_filter={enable_filter}, enable_normalize={enable_normalize}, enable_qa_scaffold={enable_qa_scaffold}")
     print("=" * 60)
 
     llm = create_llm()
@@ -93,6 +117,7 @@ async def test_single_corpus(enable_filter=False, enable_normalize=False):
         use_simplified_eval=True,
         enable_filter=enable_filter,
         enable_normalize=enable_normalize,
+        enable_qa_scaffold=enable_qa_scaffold,
         enable_self_check=False,
     )
 
@@ -121,6 +146,8 @@ async def test_single_corpus(enable_filter=False, enable_normalize=False):
             print(f"[Filter] confidence: {fr.get('confidence')}")
             print(f"[Filter] skip_reason: {fr.get('skip_reason')}")
             print(f"[Filter] has_geo_entity: {fr.get('has_geo_entity')}")
+            print(f"[Filter] is_non_wuhan_region: {fr.get('is_non_wuhan_region')}")
+            print(f"[Filter] region_hint: {fr.get('region_hint')}")
 
         # Normalize 结果
         if enable_normalize and result.get("normalize_result"):
@@ -132,6 +159,22 @@ async def test_single_corpus(enable_filter=False, enable_normalize=False):
                 print("[Normalize] 归一化记录:")
                 for n in nr["normalizations"]:
                     print(f"  - {n.get('raw')} → {n.get('normalized')} ({n.get('type')})")
+
+        # QA Scaffold 结果（P8新增）
+        if enable_qa_scaffold and result.get("qa_scaffold_result"):
+            qr = result["qa_scaffold_result"]
+            print(f"\n[QA_Scaffold] semantic_summary: {qr.get('semantic_summary')}")
+            print(f"[QA_Scaffold] overall_confidence: {qr.get('overall_confidence')}")
+            print(f"[QA_Scaffold] should_skip: {qr.get('should_skip_detailed_extraction')}")
+            if qr.get("entity_hints"):
+                print(f"[QA_Scaffold] entity_hints: {qr.get('entity_hints')}")
+            if qr.get("relation_hints"):
+                print(f"[QA_Scaffold] relation_hints: {qr.get('relation_hints')}")
+            if qr.get("qa_pairs"):
+                print("[QA_Scaffold] 问答对:")
+                for qa in qr["qa_pairs"]:
+                    print(f"  - [{qa.get('dimension')}] Q: {qa.get('question')}")
+                    print(f"    A: {qa.get('answer')}")
 
         # NER 结果
         entities = result.get("entities", {})
@@ -170,7 +213,7 @@ async def test_single_corpus(enable_filter=False, enable_normalize=False):
         if result.get("error"):
             print(f"\n[错误] {result['error']}")
 
-        print("\n[测试] 完成 ✅")
+        print("\n[测试] 完成 [OK]")
         return result
 
     except Exception as e:
@@ -218,6 +261,8 @@ async def test_invalid_corpus():
         print(f"\n[Filter] is_valid: {fr.get('is_valid')}")
         print(f"[Filter] skip_reason: {fr.get('skip_reason')}")
         print(f"[Filter] confidence: {fr.get('confidence')}")
+        print(f"[Filter] is_non_wuhan_region: {fr.get('is_non_wuhan_region')}")
+        print(f"[Filter] region_hint: {fr.get('region_hint')}")
 
         # 应该没有后续处理结果
         entities = result.get("entities", {})
@@ -226,9 +271,147 @@ async def test_invalid_corpus():
         print(f"\n[验证] 后续处理是否执行: {has_entities or len(triples) > 0}")
 
         if not fr.get("is_valid") and not has_entities and len(triples) == 0:
-            print("\n[测试] Filter 正确跳过无效语料 ✅")
+            print("\n[测试] Filter 正确跳过无效语料 [OK]")
         else:
-            print("\n[测试] Filter 未正确跳过无效语料 ❌")
+            print("\n[测试] Filter 未正确跳过无效语料 [FAIL]")
+
+        return result
+
+    except Exception as e:
+        print(f"\n[错误] 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def test_joint_extraction_with_full_self_check():
+    """
+    P9新增测试：联合抽取 + Reflexion + 全Self-Check模式
+
+    这是P9改进的核心测试，验证：
+    1. 联合抽取节点（Joint_NER_RE）一次性抽取实体和关系
+    2. Self-Check-Joint节点生成反思建议
+    3. 全Self-Check节点（QA、Eval、Label）的二次检查
+    4. Reflexion驱动的重试机制
+    """
+    print("\n" + "=" * 60)
+    print("[测试P9] 联合抽取 + Reflexion + 全Self-Check模式")
+    print("=" * 60)
+
+    llm = create_llm()
+
+    workflow = build_corpus_workflow(
+        llm,
+        use_simplified_eval=True,
+        enable_filter=True,
+        enable_normalize=True,
+        enable_qa_scaffold=True,
+        enable_self_check=False,  # 兼容参数
+        use_joint_extraction=True,  # P9: 联合抽取模式
+        enable_full_self_check=True,  # P9: 全Self-Check
+        max_retries=3,
+    )
+
+    # 测试语料
+    corpus_id = "test_p9_joint"
+    raw_text = "群光广场就在珞喻路上，比街道口更热闹，周末适合带娃逛街"
+
+    initial_state = create_initial_state(corpus_id, raw_text)
+
+    print(f"\n[输入] 语料ID: {corpus_id}")
+    print(f"[输入] 原文: {raw_text}")
+    print(f"[配置] use_joint_extraction=True, enable_full_self_check=True")
+
+    thread_config = {"configurable": {"thread_id": f"test_{corpus_id}_{os.getpid()}"}}
+
+    try:
+        result = await workflow.ainvoke(initial_state, thread_config)
+
+        print("\n" + "-" * 40)
+        print("[输出结果]")
+        print("-" * 40)
+
+        # Filter 结果
+        fr = result.get("filter_result", {})
+        print(f"\n[Filter] is_valid: {fr.get('is_valid')}")
+
+        # Normalize 结果
+        nr = result.get("normalize_result", {})
+        print(f"\n[Normalize] normalized_text: {nr.get('normalized_text')}")
+
+        # QA Scaffold 结果
+        qr = result.get("qa_scaffold_result", {})
+        print(f"\n[QA_Scaffold] semantic_summary: {qr.get('semantic_summary')}")
+        print(f"\n[QA_Scaffold] entity_hints: {qr.get('entity_hints')}")
+        print(f"\n[QA_Scaffold] relation_hints: {qr.get('relation_hints')}")
+
+        # P9: Self-Check-QA 结果
+        sc_qa = result.get("self_check_qa_result", {})
+        if sc_qa:
+            print(f"\n[Self-Check-QA] confidence: {sc_qa.get('overall_confidence')}")
+            print(f"\n[Self-Check-QA] retry_suggested: {sc_qa.get('retry_suggested')}")
+
+        # P9: 联合抽取结果
+        jer = result.get("joint_extraction_result", {})
+        extraction_strategy = result.get("extraction_strategy", "")
+        print(f"\n[Joint_NER_RE] extraction_strategy: {extraction_strategy}")
+        print(f"\n[Joint_NER_RE] entities ({len(jer.get('entities', []))} 个):")
+        for e in jer.get("entities", []):
+            print(f"  - {e.get('name')} [{e.get('type')}] 类别:{e.get('category')}")
+        print(f"\n[Joint_NER_RE] triples ({len(jer.get('triples', []))} 条):")
+        for t in jer.get("triples", []):
+            attrs = t.get("attributes", {})
+            attr_str = f" [{', '.join(f'{k}={v}' for k, v in attrs.items())}]" if attrs else ""
+            print(f"  - <{t.get('head')}, {t.get('relation')}, {t.get('tail')}>{attr_str}")
+
+        # P9: Self-Check-Joint 结果（含Reflexion）
+        sc_joint = result.get("self_check_joint_result", {})
+        if sc_joint:
+            print(f"\n[Self-Check-Joint] confidence: {sc_joint.get('overall_confidence')}")
+            print(f"\n[Self-Check-Joint] retry_suggested: {sc_joint.get('retry_suggested')}")
+            reflection = result.get("reflection_text", "")
+            if reflection:
+                print(f"\n[Reflexion] 反思建议: {reflection[:200]}...")
+            improvement = result.get("improvement_strategy", "")
+            if improvement:
+                print(f"\n[Reflexion] 改进策略: {improvement[:200]}...")
+
+        # Eval 结果
+        corrected_triples = result.get("corrected_triples", [])
+        print(f"\n[Eval] 修正后三元组 ({len(corrected_triples)} 条)")
+
+        # P9: Self-Check-Eval 结果
+        sc_eval = result.get("self_check_eval_result", {})
+        if sc_eval:
+            print(f"\n[Self-Check-Eval] confidence: {sc_eval.get('overall_confidence')}")
+
+        # Label 结果
+        entity_attrs = result.get("entity_attrs", {})
+        print(f"\n[Label] 实体属性 ({len(entity_attrs)} 个)")
+
+        # P9: Self-Check-Label 结果
+        sc_label = result.get("self_check_label_result", {})
+        if sc_label:
+            print(f"\n[Self-Check-Label] confidence: {sc_label.get('overall_confidence')}")
+
+        # 重试历史
+        retry_count = result.get("retry_count", 0)
+        reflection_history = result.get("reflection_history", [])
+        print(f"\n[Retry] 总重试次数: {retry_count}")
+        print(f"\n[Reflexion History] {len(reflection_history)} 轮反思")
+
+        # 验证
+        entities = jer.get("entities", [])
+        triples = jer.get("triples", [])
+        if len(entities) >= 2 and len(triples) >= 1:
+            print("\n[测试P9] 联合抽取成功 [OK]")
+        else:
+            print("\n[测试P9] 联合抽取结果不完整 [WARN]")
+
+        if extraction_strategy == "joint":
+            print("\n[测试P9] 抽取策略正确 [OK]")
+        else:
+            print("\n[测试P9] 抽取策略异常 [WARN]")
 
         return result
 
@@ -246,19 +429,25 @@ async def main():
     print("=" * 60)
 
     # 测试 1: 基础模式（无 Filter，无 Normalize）
-    await test_single_corpus(enable_filter=False, enable_normalize=False)
+    await test_single_corpus(enable_filter=False, enable_normalize=False, enable_qa_scaffold=False)
 
     # 测试 2: 启用 Filter
-    await test_single_corpus(enable_filter=True, enable_normalize=False)
+    await test_single_corpus(enable_filter=True, enable_normalize=False, enable_qa_scaffold=False)
 
     # 测试 3: 启用 Normalize
-    await test_single_corpus(enable_filter=False, enable_normalize=True)
+    await test_single_corpus(enable_filter=False, enable_normalize=True, enable_qa_scaffold=False)
 
     # 测试 4: 启用 Filter + Normalize
-    await test_single_corpus(enable_filter=True, enable_normalize=True)
+    await test_single_corpus(enable_filter=True, enable_normalize=True, enable_qa_scaffold=False)
 
-    # 测试 5: 无效语料测试
+    # 测试 5: 启用 Filter + Normalize + QA Scaffold（完整流程）
+    await test_single_corpus(enable_filter=True, enable_normalize=True, enable_qa_scaffold=True)
+
+    # 测试 6: 无效语料测试
     await test_invalid_corpus()
+
+    # 测试 7: P9联合抽取 + Reflexion + 全Self-Check模式
+    await test_joint_extraction_with_full_self_check()
 
     print("\n" + "=" * 60)
     print("所有测试完成")
