@@ -31,8 +31,20 @@ class Settings:
         self.PG_USER = os.getenv('PG_USER', 'cznb6666')
         self.PG_PASSWORD = os.getenv('PG_PASSWORD', 'cznb6666')
 
+        # ===== 嵌入模型配置 =====
+        # 本地模型: sentence-transformers
+        self.EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'shibing624/text2vec-base-chinese')
+        self.EMBEDDING_DIM = int(os.getenv('EMBEDDING_DIM', '768'))  # 向量维度
+
         # ===== 文件路径配置 =====
         self.SHPFILES_DIR = os.getenv('SHPFILES_DIR', './shpfiles')
+
+    def get_embedding_config(self) -> dict:
+        """获取嵌入模型配置"""
+        return {
+            "model": self.EMBEDDING_MODEL,
+            "dim": self.EMBEDDING_DIM
+        }
 
     def get_neo4j_config(self) -> dict:
         """获取Neo4j连接配置"""

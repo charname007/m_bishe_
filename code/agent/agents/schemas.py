@@ -3,7 +3,7 @@ Pydantic模型定义 - 用于LangChain with_structured_output
 v2.2改进：适配新的18个关系体系和属性标注体系
 """
 from typing import List, Dict, Optional, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from enum import Enum
 
 
@@ -67,6 +67,90 @@ class LimitNodeEnum(str, Enum):
     PEOPLE_LIMIT = "人数限制"
     MIN_CONSUMPTION = "消费门槛"
     SEASON_LIMIT = "季节限制"
+
+
+# ===== 距离值枚举 =====
+
+class DistanceValueEnum(str, Enum):
+    """距离值枚举"""
+    NEAR = "近"
+    MEDIUM = "中等"
+    FAR = "远"
+
+
+# ===== 方向值枚举 =====
+
+class DirectionValueEnum(str, Enum):
+    """方向值枚举"""
+    EAST = "东"
+    SOUTH = "南"
+    WEST = "西"
+    NORTH = "北"
+    NORTHEAST = "东北"
+    SOUTHWEST = "西南"
+    EAST_SIDE = "东侧"
+    WEST_SIDE = "西侧"
+    OPPOSITE = "对面"
+    BESIDE = "旁边"
+
+
+# ===== 情感节点枚举 =====
+
+class EmotionNodeEnum(str, Enum):
+    """情感节点枚举"""
+    POSITIVE = "正面"
+    NEUTRAL = "中性"
+    NEGATIVE = "负面"
+
+
+# ===== 评价等级枚举 =====
+
+class RatingNodeEnum(str, Enum):
+    """评价等级枚举"""
+    SUPER_RECOMMEND = "超推"
+    RECOMMEND = "推荐"
+    ORDINARY = "一般"
+    NOT_RECOMMEND = "不推荐"
+
+
+# ===== 消费等级枚举 =====
+
+class ConsumptionNodeEnum(str, Enum):
+    """消费等级枚举"""
+    AFFORDABLE = "平价"
+    MID_RANGE = "中档"
+    HIGH_END = "高档"
+    LUXURY = "奢侈"
+
+
+# ===== 事件类别枚举 =====
+
+class EventCategoryEnum(str, Enum):
+    """事件类别枚举"""
+    NATURAL = "自然事件"
+    CULTURAL = "人文事件"
+    COMMERCIAL = "商业事件"
+    SOCIAL = "社会事件"
+    NEGATIVE = "负面事件"
+
+
+# ===== 事件状态枚举 =====
+
+class EventStateEnum(str, Enum):
+    """事件状态枚举"""
+    ONGOING = "正在进行"
+    ENDED = "已结束"
+    PLANNED = "计划中"
+    PERIODIC = "周期性"
+
+
+# ===== 置信度枚举 =====
+
+class ConfidenceEnum(str, Enum):
+    """置信度枚举"""
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
 
 
 # ===== Filter阶段输出模型 =====
@@ -200,17 +284,19 @@ class EntityRecognitionResult(BaseModel):
 # ===== RE阶段输出模型（v2.2改进：添加attributes字段） =====
 
 class TripleAttributes(BaseModel):
-    """三元组属性（RE阶段直接抽取）"""
+    """三元组属性（RE阶段直接抽取，硬校验枚举值+拒绝额外字段）"""
+    model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
+
     # 空间关系属性
     联动推荐: Optional[bool] = Field(
         default=None,
         description="相邻关系的联动推荐属性（布尔）"
     )
-    距离值: Optional[str] = Field(
+    距离值: Optional[DistanceValueEnum] = Field(
         default=None,
         description="距离关系的距离值：近/中等/远"
     )
-    方向值: Optional[str] = Field(
+    方向值: Optional[DirectionValueEnum] = Field(
         default=None,
         description="方向关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边"
     )
@@ -224,11 +310,11 @@ class TripleAttributes(BaseModel):
         default=None,
         description="承载活动关系的时段属性"
     )
-    适合人群: Optional[str] = Field(
+    适合人群: Optional[CrowdNodeEnum] = Field(
         default=None,
         description="承载活动关系的适合人群属性"
     )
-    具有限制: Optional[List[str]] = Field(
+    具有限制: Optional[List[LimitNodeEnum]] = Field(
         default=None,
         description="承载活动关系的限制节点列表"
     )
@@ -244,30 +330,211 @@ class TripleAttributes(BaseModel):
     )
 
     # 事件关系属性
-    事件类别: Optional[str] = Field(
+    事件类别: Optional[EventCategoryEnum] = Field(
         default=None,
-        description="发生事件关系的类别：自然事件/人文事件/商业事件/社会事件/负面事件"
+        description="发生事件关系的类别"
     )
-    状态: Optional[str] = Field(
+    状态: Optional[EventStateEnum] = Field(
         default=None,
-        description="发生事件关系的状态：正在进行/已结束/计划中/周期性"
+        description="发生事件关系的状态"
     )
     时间: Optional[str] = Field(
         default=None,
         description="发生事件关系的时间节点"
     )
 
+    # ===== 值映射校验器（处理LLM输出的变体值） =====
+
+    @field_validator('距离值', mode='before')
+    @classmethod
+    def normalize_distance(cls, v):
+        """将距离值变体映射到标准枚举值"""
+        if v is None:
+            return None
+        if isinstance(v, DistanceValueEnum):
+            return v
+        # 变体值映射
+        distance_mapping = {
+            '近': '近', '很近': '近', '附近': '近', '旁边': '近', '不远': '近',
+            '中等': '中等', '有点远': '中等', '稍微远': '中等', '几百米': '中等',
+            '远': '远', '很远': '远', '比较远': '远', '距离较远': '远',
+        }
+        normalized = distance_mapping.get(str(v))
+        if normalized:
+            return DistanceValueEnum(normalized)
+        raise ValueError(f"无效的距离值: {v}，有效值为: 近/中等/远")
+
+    @field_validator('方向值', mode='before')
+    @classmethod
+    def normalize_direction(cls, v):
+        """将方向值变体映射到标准枚举值"""
+        if v is None:
+            return None
+        if isinstance(v, DirectionValueEnum):
+            return v
+        # 方向映射（包含变体）
+        direction_mapping = {
+            '东': '东', '东边': '东', '东侧': '东侧',
+            '南': '南', '南边': '南',
+            '西': '西', '西边': '西', '西侧': '西侧',
+            '北': '北', '北边': '北',
+            '东北': '东北',
+            '西南': '西南',
+            '对面': '对面', '对面是': '对面',
+            '旁边': '旁边', '旁边是': '旁边',
+        }
+        normalized = direction_mapping.get(str(v))
+        if normalized:
+            return DirectionValueEnum(normalized)
+        raise ValueError(f"无效的方向值: {v}，有效值为: 东/南/西/北/东北/西南/东侧/西侧/对面/旁边")
+
+    @field_validator('适合人群', mode='before')
+    @classmethod
+    def normalize_crowd(cls, v):
+        """将人群变体映射到标准枚举值"""
+        if v is None:
+            return None
+        if isinstance(v, CrowdNodeEnum):
+            return v
+        # 人群映射（包含变体）
+        crowd_mapping = {
+            '亲子': '亲子/宝妈', '宝妈': '亲子/宝妈', '带孩子': '亲子/宝妈', '亲子/宝妈': '亲子/宝妈',
+            '学生党': '学生党', '学生': '学生党', '大学生': '学生党',
+            '情侣': '情侣', '约会': '情侣',
+            '打工人': '打工人', '上班族': '打工人',
+            '特种兵': '特种兵',
+            '银发族': '银发族', '老人': '银发族', '老年人': '银发族',
+            '宠物主': '宠物主', '带宠物': '宠物主', '遛狗': '宠物主',
+            '独行者': '独行者', '独自': '独行者',
+            '团建': '团建', '聚会': '团建',
+        }
+        normalized = crowd_mapping.get(str(v))
+        if normalized:
+            return CrowdNodeEnum(normalized)
+        raise ValueError(f"无效的人群值: {v}")
+
+    @field_validator('具有限制', mode='before')
+    @classmethod
+    def normalize_limits(cls, v):
+        """将限制变体映射到标准枚举值列表"""
+        if v is None:
+            return None
+        if isinstance(v, list) and all(isinstance(item, LimitNodeEnum) for item in v):
+            return v
+        # 限制映射
+        limit_mapping = {
+            '需预约': '需预约', '要预约': '需预约', '预约难': '需预约',
+            '排队久': '排队久', '排队': '排队久', '排队很长': '排队久',
+            '停车难': '停车难', '没车位': '停车难', '停车要排队': '停车难',
+            '限流': '限流', '人太多': '限流',
+            '谢绝宠物': '谢绝宠物', '不能带宠物': '谢绝宠物',
+            '只收现金': '只收现金',
+            '时间限制': '时间限制',
+            '人数限制': '人数限制',
+            '消费门槛': '消费门槛', '最低消费': '消费门槛',
+            '季节限制': '季节限制',
+        }
+        if isinstance(v, list):
+            normalized = []
+            for item in v:
+                mapped = limit_mapping.get(str(item))
+                if mapped:
+                    normalized.append(LimitNodeEnum(mapped))
+                else:
+                    raise ValueError(f"无效的限制值: {item}")
+            return normalized
+        # 单个值
+        mapped = limit_mapping.get(str(v))
+        if mapped:
+            return [LimitNodeEnum(mapped)]
+        raise ValueError(f"无效的限制值: {v}")
+
+    @field_validator('事件类别', mode='before')
+    @classmethod
+    def normalize_event_category(cls, v):
+        """将事件类别变体映射到标准枚举值"""
+        if v is None:
+            return None
+        if isinstance(v, EventCategoryEnum):
+            return v
+        # 事件类别映射
+        category_mapping = {
+            '自然事件': '自然事件', '樱花盛开': '自然事件', '荷花盛开': '自然事件',
+            '人文事件': '人文事件', '樱花节': '人文事件', '音乐节': '人文事件', '夜市': '人文事件', '展览': '人文事件',
+            '商业事件': '商业事件', '开业': '商业事件', '打折': '商业事件', '促销': '商业事件',
+            '社会事件': '社会事件', '施工': '社会事件', '装修': '社会事件', '关闭': '社会事件',
+            '负面事件': '负面事件', '停业': '负面事件', '整顿': '负面事件',
+        }
+        normalized = category_mapping.get(str(v))
+        if normalized:
+            return EventCategoryEnum(normalized)
+        raise ValueError(f"无效的事件类别: {v}")
+
+    @field_validator('状态', mode='before')
+    @classmethod
+    def normalize_event_state(cls, v):
+        """将事件状态变体映射到标准枚举值"""
+        if v is None:
+            return None
+        if isinstance(v, EventStateEnum):
+            return v
+        # 状态映射
+        state_mapping = {
+            '正在进行': '正在进行', '正在举办': '正在进行', '进行中': '正在进行',
+            '已结束': '已结束', '结束了': '已结束',
+            '计划中': '计划中', '即将举办': '计划中', '快开了': '计划中',
+            '周期性': '周期性', '每年': '周期性', '周末': '周期性',
+        }
+        normalized = state_mapping.get(str(v))
+        if normalized:
+            return EventStateEnum(normalized)
+        raise ValueError(f"无效的事件状态: {v}")
+
 
 class Triple(BaseModel):
-    """单个三元组（v2.2改进：包含属性）"""
+    """单个三元组（v2.2改进：硬校验枚举值+强类型属性）"""
     head: str = Field(description="头实体名称")
-    relation: str = Field(description="关系类型（18种之一）")
+    relation: RelationTypeEnum = Field(description="关系类型（18种之一，硬校验）")
     tail: str = Field(description="尾实体名称或枚举节点")
     evidence: Optional[str] = Field(default="", description="文本证据")
-    attributes: Optional[Dict[str, Any]] = Field(
-        default_factory=dict,
-        description="关系属性（根据关系类型不同）"
+    attributes: Optional[TripleAttributes] = Field(
+        default=None,
+        description="关系属性（强类型约束，根据关系类型不同）"
     )
+
+    @field_validator('relation', mode='before')
+    @classmethod
+    def normalize_relation(cls, v):
+        """将关系类型变体映射到标准枚举值"""
+        if v is None:
+            raise ValueError("relation 不能为空")
+        if isinstance(v, RelationTypeEnum):
+            return v
+        # 关系类型映射（包含常见变体）
+        relation_mapping = {
+            '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
+            '相邻': '相邻', '旁边': '相邻', '旁边是': '相邻', '隔壁': '相邻',
+            '属于': '属于', '隶属于': '属于', '是...的一部分': '属于',
+            '连接': '连接', '连通': '连接', '通往': '连接',
+            '距离': '距离', '离': '距离', '距离...很近': '距离', '附近': '距离',
+            '方向': '方向', '在...东边': '方向', '东边': '方向',
+            '穿过': '穿过', '横穿': '穿过', '穿越': '穿过',
+            '变化为': '变化为', '变成': '变化为', '改为': '变化为',
+            '推荐指数': '推荐指数', '推荐': '推荐指数', '强烈推荐': '推荐指数',
+            '承载活动': '承载活动', '可以...': '承载活动', '适合...': '承载活动',
+            '可达方式': '可达方式', '交通': '可达方式', '怎么去': '可达方式',
+            '消费档次': '消费档次', '消费': '消费档次', '人均': '消费档次',
+            '品类特征': '品类特征', '特色': '品类特征', '风格': '品类特征',
+            '引发情感': '引发情感', '情感': '引发情感', '感觉': '引发情感',
+            '优于': '优于', '比...好': '优于', '比...便宜': '优于',
+            '相似': '相似', '和...差不多': '相似', '类似': '相似',
+            '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
+            '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
+        }
+        normalized = relation_mapping.get(str(v))
+        if normalized:
+            return RelationTypeEnum(normalized)
+        raise ValueError(f"无效的关系类型: {v}，有效值为18个预定义关系类型")
 
 
 class RelationExtractionResult(BaseModel):
@@ -278,9 +545,9 @@ class RelationExtractionResult(BaseModel):
 # ===== Eval阶段输出模型 =====
 
 class TripleForEval(BaseModel):
-    """用于评估的三元组"""
+    """用于评估的三元组（硬校验）"""
     head: str = Field(description="头实体名称")
-    relation: str = Field(description="关系类型")
+    relation: RelationTypeEnum = Field(description="关系类型")
     tail: str = Field(description="尾实体名称")
 
 
@@ -713,13 +980,50 @@ class JointEntity(BaseModel):
 
 
 class JointTriple(BaseModel):
-    """联合抽取的单个三元组"""
+    """联合抽取的单个三元组（硬校验+强类型属性）"""
     head: str = Field(description="头实体")
-    relation: str = Field(description="关系类型（18种之一）")
+    relation: RelationTypeEnum = Field(description="关系类型（18种之一）")
     tail: str = Field(description="尾实体")
     evidence: str = Field(description="原文依据")
-    confidence: str = Field(description="置信度：high/medium/low")
-    attributes: Dict[str, Any] = Field(default_factory=dict, description="关系属性")
+    confidence: ConfidenceEnum = Field(description="置信度")
+    attributes: Optional[TripleAttributes] = Field(
+        default=None,
+        description="关系属性（强类型约束，拒绝额外字段）"
+    )
+
+    @field_validator('relation', mode='before')
+    @classmethod
+    def normalize_relation(cls, v):
+        """将关系类型变体映射到标准枚举值"""
+        if v is None:
+            raise ValueError("relation 不能为空")
+        if isinstance(v, RelationTypeEnum):
+            return v
+        # 使用与 Triple 相同的映射逻辑
+        relation_mapping = {
+            '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
+            '相邻': '相邻', '旁边': '相邻', '旁边是': '相邻', '隔壁': '相邻',
+            '属于': '属于', '隶属于': '属于', '是...的一部分': '属于',
+            '连接': '连接', '连通': '连接', '通往': '连接',
+            '距离': '距离', '离': '距离', '距离...很近': '距离', '附近': '距离',
+            '方向': '方向', '在...东边': '方向', '东边': '方向',
+            '穿过': '穿过', '横穿': '穿过', '穿越': '穿过',
+            '变化为': '变化为', '变成': '变化为', '改为': '变化为',
+            '推荐指数': '推荐指数', '推荐': '推荐指数', '强烈推荐': '推荐指数',
+            '承载活动': '承载活动', '可以...': '承载活动', '适合...': '承载活动',
+            '可达方式': '可达方式', '交通': '可达方式', '怎么去': '可达方式',
+            '消费档次': '消费档次', '消费': '消费档次', '人均': '消费档次',
+            '品类特征': '品类特征', '特色': '品类特征', '风格': '品类特征',
+            '引发情感': '引发情感', '情感': '引发情感', '感觉': '引发情感',
+            '优于': '优于', '比...好': '优于', '比...便宜': '优于',
+            '相似': '相似', '和...差不多': '相似', '类似': '相似',
+            '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
+            '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
+        }
+        normalized = relation_mapping.get(str(v))
+        if normalized:
+            return RelationTypeEnum(normalized)
+        raise ValueError(f"无效的关系类型: {v}，有效值为18个预定义关系类型")
 
 
 class JointExtractionResult(BaseModel):

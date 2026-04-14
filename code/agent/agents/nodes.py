@@ -475,14 +475,14 @@ def create_re_node(llm: Any):
             response = await llm.ainvoke(full_prompt)
             result: RelationExtractionResult = parser.parse(response.content)
 
-            # v2.2改进：提取三元组及属性
+            # v2.2改进：提取三元组及属性（Enum转字符串+强类型属性转字典）
             triples = [
                 {
                     "head": t.head,
-                    "relation": t.relation,
+                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,  # Enum转字符串
                     "tail": t.tail,
                     "evidence": t.evidence or "",
-                    "attributes": t.attributes or {},  # 新增：关系属性
+                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
                 }
                 for t in result.triples
             ]
@@ -1182,9 +1182,32 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 # 收集三元组，并写入relation_attrs
                 relation_attrs = corpus_state.get("relation_attrs", {})
                 corrected_triples = corpus_state.get("corrected_triples", [])
+
+                # v2.2改进：关系类型到细分属性的映射
+                RELATION_SUBTYPE_MAP = {
+                    "位于": "语义类型",
+                    "相邻": "相邻类型",
+                    "属于": "层级类型",
+                    "连接": "连接类型",
+                    "距离": "距离类型",
+                    "方向": "方向类型",
+                    "穿过": "穿过类型",
+                    "变化为": "变化类型",
+                    "推荐指数": "推荐强度",
+                    "承载活动": "活动类型",
+                    "可达方式": "可达程度",
+                    "消费档次": "消费类型",
+                    "品类特征": "特征类型",
+                    "引发情感": "情感类型",
+                    "优于": "优势程度",
+                    "相似": "相似程度",
+                    "劣于": "劣势程度",
+                    "发生事件": "事件类别",
+                }
+
                 for triple in corrected_triples:
                     triple["_corpus_id"] = corpus_id
-                    # 查找关系属性并写入（使用标准格式）
+                    # 查找关系属性（使用标准格式）
                     triple_key = f"<{triple['head']}, {triple['relation']}, {triple['tail']}>"
 
                     # 尝试多种 key 格式查找
@@ -1195,8 +1218,14 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     )
 
                     if attrs:
-                        triple["relation_type"] = attrs.get("类型", "")
-                        triple["relation_subtype"] = attrs.get("细分", "")
+                        # v2.2改进：relation_type 直接使用18种标准关系类型
+                        triple["relation_type"] = triple.get("relation", "")
+                        # 根据关系类型选择对应的细分属性
+                        relation = triple.get("relation", "")
+                        subtype_field = RELATION_SUBTYPE_MAP.get(relation, "")
+                        triple["relation_subtype"] = attrs.get(subtype_field, "") if subtype_field else ""
+                        # 保留完整属性供下游使用
+                        triple["relation_attrs"] = attrs
                     all_triples.append(triple)
 
         # 实体去重
@@ -1813,11 +1842,11 @@ def create_joint_ner_re_node(llm: Any):
             triples_list = [
                 {
                     "head": t.head,
-                    "relation": t.relation,
+                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,  # Enum转字符串
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": t.confidence,
-                    "attributes": t.attributes,
+                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,  # Enum转字符串
+                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
                 }
                 for t in result.triples
             ]

@@ -1,6 +1,15 @@
 """
 从Neo4j提取所有地理实体name，保存到文件/PostgreSQL
 用于后续语义相似度比对
+
+表结构说明：
+- geo_entity_names: 地理实体表，包含 id, entity_id, name, type, embedding, created_at
+- corpus_entity_names: 语料实体表，包含 id, name, type, category, aliases, embedding, created_at
+- embedding 列维度由 settings.EMBEDDING_DIM 配置或模型实际维度决定
+
+依赖关系：
+- extract_entity_names.py 创建表结构（embedding 列初始为 NULL）
+- embed_entity_names.py 计算并填充 embedding 数据
 """
 import json
 import sys
@@ -107,8 +116,16 @@ def save_to_postgres(entities: List[Dict], pg_client: PostgresClient, source: st
         entities: 实体列表
         pg_client: PostgreSQL客户端
         source: 数据来源 ("geo" 或 "corpus")
+
+    注意：
+        - embedding 列初始为 NULL，由 embed_entity_names.py 脚本填充
+        - 嵌入维度由 settings.EMBEDDING_DIM 配置（默认 768）
+        - 如果维度需要修改，运行 embed_entity_names.py --modify-column
     """
     from psycopg2.extras import execute_values
+
+    # 从配置获取嵌入维度
+    embedding_dim = settings.get_embedding_config()["dim"]
 
     # 检查 pgvector 扩展是否可用
     has_vector = False
@@ -136,13 +153,13 @@ def save_to_postgres(entities: List[Dict], pg_client: PostgresClient, source: st
         if source == "geo":
             # 地理实体表
             if has_vector:
-                cur.execute("""
+                cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS geo_entity_names (
                         id SERIAL PRIMARY KEY,
                         entity_id VARCHAR(100) NOT NULL UNIQUE,
                         name VARCHAR(200) NOT NULL,
                         type VARCHAR(50),
-                        embedding VECTOR(1536),
+                        embedding VECTOR({embedding_dim}),
                         created_at TIMESTAMP DEFAULT NOW()
                     )
                 """)
@@ -177,14 +194,14 @@ def save_to_postgres(entities: List[Dict], pg_client: PostgresClient, source: st
         else:
             # 语料实体表
             if has_vector:
-                cur.execute("""
+                cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS corpus_entity_names (
                         id SERIAL PRIMARY KEY,
                         name VARCHAR(200) NOT NULL UNIQUE,
                         type VARCHAR(50),
                         category VARCHAR(50),
                         aliases TEXT[],
-                        embedding VECTOR(1536),
+                        embedding VECTOR({embedding_dim}),
                         created_at TIMESTAMP DEFAULT NOW()
                     )
                 """)
