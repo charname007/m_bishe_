@@ -44,6 +44,8 @@ from .nodes import (
     create_qa_mentor_node,
     create_qa_approval_node,
     create_revision_joint_node,
+    # P11新增：实体对齐节点
+    create_entity_alignment_node,
 )
 
 
@@ -812,6 +814,8 @@ def build_corpus_workflow(
     enable_full_self_check: bool = False,  # P9新增：启用所有二次检查
     enable_self_check_filter: bool = False,  # P9新增：Filter二次检查（可选）
     enable_self_check_normalize: bool = False,  # P9新增：Normalize二次检查（可选）
+    enable_entity_alignment: bool = False,  # P11新增：实体对齐
+    config: ExtractionConfig = None,  # P11新增：配置对象（用于实体对齐）
     max_retries: int = DEFAULT_MAX_RETRIES
 ) -> CompiledStateGraph:
     """
@@ -830,6 +834,9 @@ def build_corpus_workflow(
     - 联合抽取模式: START → Filter → Normalize → QA_Scaffold → Self-Check-QA → Joint_NER_RE → Self-Check-Joint(Reflexion) → Eval → Self-Check-Eval → Label → Self-Check-Label → END
     - 含Filter/Normalize二次检查: START → Filter → Self-Check-Filter → Normalize → Self-Check-Normalize → QA_Scaffold → ...
 
+    P11新增模式（实体对齐）：
+    - 实体对齐模式: ... → Label → Entity_Alignment → END
+
     P1改进：为 LLM 调用节点添加 RetryPolicy，自动处理临时故障
     P2改进：支持简化评估模式，减少 LLM 调用成本
     P4改进：支持 Self-Check + 反思循环，提升抽取质量
@@ -837,6 +844,7 @@ def build_corpus_workflow(
     P6改进：支持 Normalize 归一化节点，消解指代和归一化别名
     P8改进：支持 QA Scaffold 节点，5W1H问答构建语义脚手架
     P9改进：支持联合抽取 + Reflexion机制 + 所有节点二次检查
+    P11改进：支持实体对齐节点，将抽取实体与数据库已有实体匹配
 
     Args:
         llm: LangChain LLM 实例
@@ -847,8 +855,14 @@ def build_corpus_workflow(
         enable_qa_scaffold: 是否启用 QA Scaffold 脚手架节点，默认False
         use_joint_extraction: 是否使用联合抽取模式（默认True，False则使用流水线NER+RE）
         enable_full_self_check: 是否启用所有节点二次检查（QA、Joint、Eval、Label），默认False
+        enable_entity_alignment: 是否启用实体对齐节点，默认False
+        config: ExtractionConfig配置对象（用于实体对齐节点的参数）
         max_retries: 反思循环最大重试次数，默认3
     """
+
+    # 使用默认配置如果未提供
+    if config is None:
+        config = DEFAULT_CONFIG
 
     # 创建节点函数
     ner_node = create_ner_node(llm)
@@ -1109,18 +1123,40 @@ def build_corpus_workflow(
                 {"eval": "eval", "label": "label"}
             )
             builder.add_edge("label", "self_check_label")
-            builder.add_conditional_edges(
-                "self_check_label",
-                route_after_self_check_label,
-                {"label": "label", END: END}
-            )
-            logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查启用")
+
+            # P11新增：实体对齐节点（在self_check_label之后）
+            if enable_entity_alignment:
+                entity_alignment_node = create_entity_alignment_node(llm, config)
+                builder.add_node("entity_alignment", entity_alignment_node)
+                builder.add_conditional_edges(
+                    "self_check_label",
+                    route_after_self_check_label,
+                    {"label": "label", "entity_alignment": "entity_alignment"}
+                )
+                builder.add_edge("entity_alignment", END)
+                logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查 + 实体对齐启用")
+            else:
+                builder.add_conditional_edges(
+                    "self_check_label",
+                    route_after_self_check_label,
+                    {"label": "label", END: END}
+                )
+                logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查启用")
         else:
-            # 简化流程: Joint_NER_RE → Eval → Label → END
+            # 简化流程: Joint_NER_RE → Eval → Label → [Entity_Alignment] → END
             builder.add_edge("joint_ner_re", "eval")
             builder.add_edge("eval", "label")
-            builder.add_edge("label", END)
-            logger.info(f"[Workflow] 联合抽取模式启用（无二次检查）")
+
+            # P11新增：实体对齐节点（在label之后）
+            if enable_entity_alignment:
+                entity_alignment_node = create_entity_alignment_node(llm, config)
+                builder.add_node("entity_alignment", entity_alignment_node)
+                builder.add_edge("label", "entity_alignment")
+                builder.add_edge("entity_alignment", END)
+                logger.info(f"[Workflow] 联合抽取模式 + 实体对齐启用")
+            else:
+                builder.add_edge("label", END)
+                logger.info(f"[Workflow] 联合抽取模式启用（无二次检查）")
 
         return builder.compile(checkpointer=InMemorySaver())
 

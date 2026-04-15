@@ -43,6 +43,8 @@ from .schemas import (
     # P10新增：QA导师模型
     ApprovalStatusEnum, ApprovalFeedback, NodeApprovalResult, QAApprovalResult,
     MentorGuidance, QAMentorScaffoldResult,
+    # P11新增：实体对齐模型
+    EntityCandidate, EntityAlignmentItem, EntityAlignmentResult,
     # v3.2新增：常量列表
     RELATION_TYPES, FUNCTION_NODES, FEATURE_TAGS, COMPARE_DIMENSIONS, EVENT_CATEGORIES,
 )
@@ -64,12 +66,16 @@ from .prompts import (
     BATCH_JOINT_PROMPT, BATCH_SELF_CHECK_PROMPT,
     # P10新增：QA导师模式提示词
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
+    # P11新增：实体对齐提示词
+    ENTITY_ALIGNMENT_PROMPT,
     format_entities, format_triples,
     format_entity_hints, format_relation_hints, format_context_dependencies,
     # P10新增：批量格式化函数
     format_batch_corpus, format_batch_results_for_check, format_cross_corpus_aliases,
     # P10新增：QA导师格式化函数
     format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
+    # P11新增：实体对齐格式化函数
+    format_alignment_candidates, format_alignment_result_for_output,
 )
 from .nodes import (
     create_ner_node,
@@ -103,6 +109,8 @@ from .nodes import (
     create_qa_mentor_node,
     create_qa_approval_node,
     create_revision_joint_node,
+    # P11新增：实体对齐节点
+    create_entity_alignment_node,
 )
 from .workflow import (
     build_corpus_workflow,
@@ -153,6 +161,8 @@ __all__ = [
     # P10新增：QA导师模型
     "ApprovalStatusEnum", "ApprovalFeedback", "NodeApprovalResult", "QAApprovalResult",
     "MentorGuidance", "QAMentorScaffoldResult",
+    # P11新增：实体对齐模型
+    "EntityCandidate", "EntityAlignmentItem", "EntityAlignmentResult",
     # 提示词
     "NER_PROMPT", "RE_PROMPT",
     "EVAL_PROMPT_1", "EVAL_PROMPT_2", "EVAL_PROMPT_SIMPLIFIED", "LABEL_PROMPT",
@@ -169,6 +179,18 @@ __all__ = [
     "SELF_CHECK_FILTER_PROMPT", "SELF_CHECK_NORMALIZE_PROMPT",
     # P10新增：批量LLM调用提示词
     "BATCH_JOINT_PROMPT", "BATCH_SELF_CHECK_PROMPT",
+    # P10新增：QA导师模式提示词
+    "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
+    # P11新增：实体对齐提示词
+    "ENTITY_ALIGNMENT_PROMPT",
+    "format_entities", "format_triples",
+    "format_entity_hints", "format_relation_hints", "format_context_dependencies",
+    # P10新增：批量格式化函数
+    "format_batch_corpus", "format_batch_results_for_check", "format_cross_corpus_aliases",
+    # P10新增：QA导师格式化函数
+    "format_mentor_guidance", "format_feedbacks_for_revision", "format_joint_for_approval",
+    # P11新增：实体对齐格式化函数
+    "format_alignment_candidates", "format_alignment_result_for_output",
     # P10新增：QA导师模式提示词
     "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
     "format_entities", "format_triples",

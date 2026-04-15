@@ -86,9 +86,9 @@ async def test_full_workflow(corpus_list: list, output_file: str):
 
     # 配置完整工作流
     config = ExtractionConfig(
-        # 批量处理
+        # 批量处理 - 禁用以使用完整流程（包括Label属性标注）
         batch_llm_size=5,
-        enable_batch_llm=True,
+        enable_batch_llm=False,  # 禁用批量模式，使用完整流程
         batch_llm_fallback=True,
         # 完整流程节点
         enable_filter=True,

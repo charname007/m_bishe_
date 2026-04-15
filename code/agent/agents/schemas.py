@@ -604,23 +604,51 @@ class EntityAttributes(BaseModel):
 
 
 class RelationAttributes(BaseModel):
-    """关系属性（v3.2精简版：仅保留必要属性，全部可选）"""
-    # 方位关系属性（合并原相邻+距离+方向）
-    空间精度: Optional[str] = Field(
+    """关系属性（v3.2精简版：与TripleAttributes保持一致）
+
+    根据 Schema v3.2，关系属性包括：
+    - 方位关系属性：距离值、方向值、联动推荐
+    - 功能关系属性：时段、适合人群、具有限制、情感倾向
+    - 对比关系属性：维度
+
+    所有属性可选，语料中出现才标注。
+    """
+    # ===== 方位关系属性（合并原相邻+距离+方向） =====
+    距离值: Optional[DistanceValueEnum] = Field(
         default=None,
-        description="空间精度：精确/近似/模糊（语料中出现才标注）"
+        description="方位关系的距离值：近/中等/远（语料中出现才标注）"
+    )
+    方向值: Optional[DirectionValueEnum] = Field(
+        default=None,
+        description="方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（语料中出现才标注）"
+    )
+    联动推荐: Optional[bool] = Field(
+        default=None,
+        description="方位关系的联动推荐属性（语料中出现才标注）"
     )
 
-    # 对比关系属性
-    对比可靠性: Optional[str] = Field(
+    # ===== 功能关系属性（原承载活动关系） =====
+    时段: Optional[str] = Field(
         default=None,
-        description="对比可靠性：主观对比/客观对比（语料中出现才标注）"
+        description="功能的适用时段：周末/晚上/樱花季等（语料中出现才标注）"
+    )
+    适合人群: Optional[CrowdNodeEnum] = Field(
+        default=None,
+        description="功能的适合人群（语料中出现才标注）"
+    )
+    具有限制: Optional[List[LimitNodeEnum]] = Field(
+        default=None,
+        description="功能的限制条件列表（语料中出现才标注）"
+    )
+    情感倾向: Optional[EmotionNodeEnum] = Field(
+        default=None,
+        description="功能的情感倾向：正面/中性/负面（语料中出现才标注）"
     )
 
-    # 事件关系属性
-    事件影响度: Optional[str] = Field(
+    # ===== 对比关系属性 =====
+    维度: Optional[List[CompareDimensionEnum]] = Field(
         default=None,
-        description="事件影响度：重大影响/一般影响/微弱影响（语料中出现才标注）"
+        description="优于/相似/劣于关系的维度列表（语料中出现才标注）"
     )
 
 
@@ -1375,4 +1403,67 @@ class QAMentorScaffoldResult(BaseModel):
     deep_analysis: str = Field(
         default="",
         description="深度语义分析"
+    )
+
+
+# ===== 实体对齐模型（P11新增） =====
+
+class EntityCandidate(BaseModel):
+    """实体对齐候选 - 从数据库检索的相似实体"""
+    db_entity_id: str = Field(description="数据库中的实体ID")
+    db_name: str = Field(description="数据库中的实体名称")
+    db_type: str = Field(default="", description="数据库中的实体类型")
+    similarity: float = Field(description="相似度分数 (0-1)")
+    longitude: Optional[float] = Field(default=None, description="经度")
+    latitude: Optional[float] = Field(default=None, description="纬度")
+    source: str = Field(default="unknown", description="数据来源")
+
+
+class EntityAlignmentItem(BaseModel):
+    """单个实体的对齐结果"""
+    extracted_name: str = Field(description="抽取的实体名称")
+    extracted_type: str = Field(default="", description="抽取的实体类型")
+    candidates: List[EntityCandidate] = Field(
+        default_factory=list,
+        description="候选实体列表（按相似度排序）"
+    )
+    best_match: Optional[EntityCandidate] = Field(
+        default=None,
+        description="最佳匹配（LLM确认后）"
+    )
+    alignment_status: str = Field(
+        default="pending",
+        description="对齐状态: pending/aligned/new_entity/skip"
+    )
+    llm_decision: Optional[str] = Field(
+        default=None,
+        description="LLM决策说明"
+    )
+
+
+class EntityAlignmentResult(BaseModel):
+    """实体对齐节点输出 - 整体对齐结果"""
+    alignment_items: List[EntityAlignmentItem] = Field(
+        default_factory=list,
+        description="每个实体的对齐结果"
+    )
+    aligned_entities: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="已对齐的实体（含DB ID）"
+    )
+    new_entities: List[str] = Field(
+        default_factory=list,
+        description="新实体（未找到匹配）"
+    )
+    skipped_entities: List[str] = Field(
+        default_factory=list,
+        description="跳过的实体（相似度过低）"
+    )
+    overall_alignment_rate: float = Field(
+        default=0.0,
+        description="整体对齐率（已对齐/总实体）"
+    )
+    alignment_confidence: str = Field(
+        default="medium",
+        description="整体对齐置信度: high/medium/low"
     )

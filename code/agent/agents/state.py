@@ -43,6 +43,7 @@ class StepEnum(str, Enum):
     REVISION_JOINT = "revision_joint"       # P10新增：修改联合抽取
     REVISION_EVAL = "revision_eval"         # P10新增：修改评估
     REVISION_LABEL = "revision_label"       # P10新增：修改标注
+    ENTITY_ALIGNMENT = "entity_alignment"   # P11新增：实体对齐
     NER = "ner"                             # 流水线模式保留
     RE = "re"                               # 流水线模式保留
     SELF_CHECK_NER = "self_check_ner"       # 流水线模式：实体校验
@@ -196,6 +197,14 @@ class CorpusState(TypedDict):
     reasoning_trace: Annotated[str, replace_value]
     """推理过程：Reasoner模型的输出（可选保存）"""
 
+    # P11新增：实体对齐结果
+    entity_alignment_result: Annotated[Dict, replace_value]
+    """实体对齐结果：与数据库已有实体的匹配情况"""
+    aligned_entity_ids: Annotated[Dict[str, str], replace_value]
+    """已对齐的实体ID映射：{抽取实体名: 数据库实体ID}"""
+    new_entity_names: Annotated[List[str], replace_value]
+    """新实体名称列表：未找到匹配的实体"""
+
     # Step 4: 属性标注
     entity_attrs: Annotated[Dict[str, Dict], replace_value]
     relation_attrs: Annotated[Dict[str, Dict], replace_value]
@@ -297,8 +306,8 @@ EMOTION_NODES = ["正面", "中性", "负面"]
 # v2.2改进：评价等级枚举
 RATING_NODES = ["超推", "推荐", "一般", "不推荐"]
 
-# v2.2改进：消费等级枚举
-CONSUMPTION_NODES = ["平价", "中档", "高档", "奢侈"]
+# v3.2精简版：删除消费等级枚举（由外部商业数据补充）
+# 原 CONSUMPTION_NODES 已删除
 
 # v2.2改进：距离值枚举
 DISTANCE_VALUES = ["近", "中等", "远"]
@@ -306,20 +315,20 @@ DISTANCE_VALUES = ["近", "中等", "远"]
 # v2.2改进：方向值枚举
 DIRECTION_VALUES = ["东", "南", "西", "北", "东北", "西南", "东侧", "西侧", "对面", "旁边"]
 
-# v2.2改进：事件类别枚举
-EVENT_CATEGORIES = ["自然事件", "人文事件", "商业事件", "社会事件", "负面事件"]
+# v3.2精简版：事件类别枚举（7个）
+EVENT_CATEGORIES = ["自然事件", "人文事件", "商业活动", "社会事件", "业态变更", "停业/关闭", "其他"]
 
 # v2.2改进：事件状态枚举
 EVENT_STATES = ["正在进行", "已结束", "计划中", "周期性"]
 
-# v2.2改进：对比维度枚举
-COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "氛围", "交通", "停车", "口味", "性价比"]
+# v3.2精简版：对比维度枚举（7个）
+COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味"]
 
-# v2.2改进：情感标签枚举
-EMOTION_TAGS = ["氛围感", "治愈", "高级感", "温暖", "文艺", "复古", "现代", "网红感", "小清新", "赛博朋克感"]
+# v3.2精简版：情感标签已合并入特征标签，此枚举已删除
+# 原 EMOTION_TAGS 内容已归入 FeatureTagEnum
 
-# v2.2改进：体验评价枚举
-EXPERIENCE_EVALUATIONS = ["服务好", "环境舒适", "商品丰富", "性价比高", "停车方便", "交通便利", "人流量适中"]
+# v3.2精简版：体验评价已合并入特征标签，此枚举已删除
+# 原 EXPERIENCE_EVALUATIONS 内容已归入 FeatureTagEnum
 
-# v2.2改进：知名度枚举
-POPULARITY_LEVELS = ["热门", "小众", "隐藏宝藏", "必去", "打卡圣地"]
+# v3.2精简版：知名度已合并入特征标签，此枚举已删除
+# 原 POPULARITY_LEVELS 内容已归入 FeatureTagEnum

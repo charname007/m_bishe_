@@ -147,6 +147,25 @@ class ExtractionConfig:
     enable_qa_reasoning_trace: bool = True
     """是否保存QA的推理过程（Reasoner模型输出）"""
 
+    # ===== 实体对齐配置（P11新增） =====
+    enable_entity_alignment: bool = False
+    """是否启用实体对齐节点，将抽取实体与数据库已有实体匹配"""
+
+    alignment_similarity_threshold: float = 0.75
+    """实体对齐相似度阈值（低于此值直接跳过，不交给LLM判断）"""
+
+    alignment_top_k: int = 5
+    """对齐时检索的候选数量（交给LLM判断的候选数）"""
+
+    alignment_high_confidence_threshold: float = 0.90
+    """高置信度阈值（超过此值直接确认匹配，无需LLM判断）"""
+
+    alignment_embedding_model: str = "shibing624/text2vec-base-chinese"
+    """实体嵌入模型名称"""
+
+    alignment_use_llm_decision: bool = True
+    """是否使用LLM对候选进行最终判断"""
+
     @classmethod
     def from_env(cls) -> "ExtractionConfig":
         """
@@ -232,6 +251,13 @@ class ExtractionConfig:
             qa_llm_temperature=get_float("QA_LLM_TEMPERATURE", 0.7),
             worker_llm_temperature=get_float("WORKER_LLM_TEMPERATURE", 0.0),
             enable_qa_reasoning_trace=get_bool("ENABLE_QA_REASONING_TRACE", True),
+            # P11新增：实体对齐参数
+            enable_entity_alignment=get_bool("ENABLE_ENTITY_ALIGNMENT", False),
+            alignment_similarity_threshold=get_float("ALIGNMENT_SIMILARITY_THRESHOLD", 0.75),
+            alignment_top_k=get_int("ALIGNMENT_TOP_K", 5),
+            alignment_high_confidence_threshold=get_float("ALIGNMENT_HIGH_CONFIDENCE_THRESHOLD", 0.90),
+            alignment_embedding_model=os.getenv("ALIGNMENT_EMBEDDING_MODEL", "shibing624/text2vec-base-chinese"),
+            alignment_use_llm_decision=get_bool("ALIGNMENT_USE_LLM_DECISION", True),
         )
 
     @classmethod
@@ -280,6 +306,13 @@ class ExtractionConfig:
             qa_llm_temperature=config_dict.get("qa_llm_temperature", 0.7),
             worker_llm_temperature=config_dict.get("worker_llm_temperature", 0.0),
             enable_qa_reasoning_trace=config_dict.get("enable_qa_reasoning_trace", True),
+            # P11新增：实体对齐参数
+            enable_entity_alignment=config_dict.get("enable_entity_alignment", False),
+            alignment_similarity_threshold=config_dict.get("alignment_similarity_threshold", 0.75),
+            alignment_top_k=config_dict.get("alignment_top_k", 5),
+            alignment_high_confidence_threshold=config_dict.get("alignment_high_confidence_threshold", 0.90),
+            alignment_embedding_model=config_dict.get("alignment_embedding_model", "shibing624/text2vec-base-chinese"),
+            alignment_use_llm_decision=config_dict.get("alignment_use_llm_decision", True),
         )
 
     def to_dict(self) -> dict:
@@ -327,6 +360,13 @@ class ExtractionConfig:
             "qa_llm_temperature": self.qa_llm_temperature,
             "worker_llm_temperature": self.worker_llm_temperature,
             "enable_qa_reasoning_trace": self.enable_qa_reasoning_trace,
+            # P11新增：实体对齐参数
+            "enable_entity_alignment": self.enable_entity_alignment,
+            "alignment_similarity_threshold": self.alignment_similarity_threshold,
+            "alignment_top_k": self.alignment_top_k,
+            "alignment_high_confidence_threshold": self.alignment_high_confidence_threshold,
+            "alignment_embedding_model": self.alignment_embedding_model,
+            "alignment_use_llm_decision": self.alignment_use_llm_decision,
         }
 
 

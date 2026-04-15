@@ -75,6 +75,8 @@ from .prompts import (
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
     format_eval_for_approval, format_label_for_approval, format_revision_feedbacks,
+    # P11新增：实体对齐提示词和格式化函数
+    ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
 )
 
 
@@ -951,62 +953,30 @@ def create_label_node(llm: Any):
             response = await llm.ainvoke(full_prompt)
             result: LabelResult = parser.parse(response.content)
 
-            # v2.2改进：提取实体属性（含情感标签、体验评价、知名度）
+            # v3.2精简版：仅提取schema定义的属性
             entity_attrs = {}
             for name, attrs in result.entities.items():
                 entity_attrs[name] = {
                     "类别": attrs.类别,
                     "细分": attrs.细分,
-                    "情感标签": attrs.情感标签 or [],  # 新增
-                    "体验评价": attrs.体验评价 or [],  # 新增
-                    "知名度": attrs.知名度 or "",  # 新增
-                    "来源可信度": attrs.来源可信度 or "中",  # 新增
+                    "特征标签": attrs.特征标签 or [],
+                    "推荐指数": attrs.推荐指数,
+                    "情感倾向": attrs.情感倾向,
                 }
 
-            # v2.2改进：提取关系属性（含空间精度、语义类型等）
+            # v3.2精简版：仅提取schema定义的属性
             relation_attrs = {}
             for key, attrs in result.relations.items():
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
-                    # 提取所有Label阶段补充的属性
                     relation_attrs[normalized_key] = {
-                        "空间精度": attrs.空间精度 or "",
-                        "语义类型": attrs.语义类型 or "",
-                        "相邻类型": attrs.相邻类型 or "",  # v2.2新增
-                        "层级类型": attrs.层级类型 or "",
-                        "连接类型": attrs.连接类型 or "",
-                        "交通方式": attrs.交通方式 or "",
-                        "距离类型": attrs.距离类型 or "",
-                        "方向类型": attrs.方向类型 or "",
-                        "穿过类型": attrs.穿过类型 or "",
-                        "变化类型": attrs.变化类型 or "",
-                        "推荐强度": attrs.推荐强度 or "",
-                        "推荐场景": attrs.推荐场景 or "",
-                        "活动类型": attrs.活动类型 or "",
-                        "活动频率": attrs.活动频率 or "",
-                        "可达程度": attrs.可达程度 or "",
-                        "交通效率": attrs.交通效率 or "",
-                        "价格区间": attrs.价格区间 or "",
-                        "消费类型": attrs.消费类型 or "",
-                        "特征类型": attrs.特征类型 or "",
-                        "特征显著性": attrs.特征显著性 or "",
-                        "情感强度": attrs.情感强度 or "",
-                        "情感类型": attrs.情感类型 or "",
-                        "优势程度": attrs.优势程度 or "",  # v2.2改进：拆分为三个独立字段
-                        "相似程度": attrs.相似程度 or "",
-                        "劣势程度": attrs.劣势程度 or "",
-                        "对比可靠性": attrs.对比可靠性 or "",
-                        "替代性": attrs.替代性 or "",
-                        "风险等级": attrs.风险等级 or "",
-                        "事件影响度": attrs.事件影响度 or "",
-                        "事件持续性": attrs.事件持续性 or "",
-                        "来源可信度": attrs.来源可信度 or "中",
+                        "空间精度": attrs.空间精度,
+                        "对比可靠性": attrs.对比可靠性,
+                        "事件影响度": attrs.事件影响度,
                     }
                 else:
                     # 无法解析时保留原始 key
-                    relation_attrs[key] = {
-                        "来源可信度": attrs.来源可信度 or "中",
-                    }
+                    relation_attrs[key] = {}
 
             logger.debug(f"[Label] 完成: {len(entity_attrs)}个实体, {len(relation_attrs)}个关系")
 
@@ -1187,25 +1157,19 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 relation_attrs = corpus_state.get("relation_attrs", {})
                 corrected_triples = corpus_state.get("corrected_triples", [])
 
-                # v2.2改进：关系类型到细分属性的映射
+                # v3.2精简版：关系类型到细分属性的映射（8个关系）
                 RELATION_SUBTYPE_MAP = {
-                    "位于": "语义类型",
-                    "相邻": "相邻类型",
-                    "属于": "层级类型",
-                    "连接": "连接类型",
-                    "距离": "距离类型",
-                    "方向": "方向类型",
-                    "穿过": "穿过类型",
-                    "变化为": "变化类型",
-                    "推荐指数": "推荐强度",
-                    "承载活动": "活动类型",
-                    "可达方式": "可达程度",
-                    "消费档次": "消费类型",
-                    "品类特征": "特征类型",
-                    "引发情感": "情感类型",
-                    "优于": "优势程度",
-                    "相似": "相似程度",
-                    "劣于": "劣势程度",
+                    # 空间基础关系（3个）
+                    "位于": "空间精度",
+                    "包含": "空间精度",
+                    "方位": "空间精度",       # 合并了相邻/距离/方向
+                    # 社交语义关系（1个）
+                    "具有功能": "功能类型",   # 原承载活动
+                    # 对比评价关系（3个）
+                    "优于": "维度",
+                    "相似": "维度",
+                    "劣于": "维度",
+                    # 事件关系（1个）
                     "发生事件": "事件类别",
                 }
 
@@ -3129,3 +3093,307 @@ def create_revision_joint_node(llm: Any):
             }
 
     return revision_joint_node
+
+
+# ===== P11新增：实体对齐节点 =====
+
+def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
+    """
+    创建实体对齐节点 - 将抽取实体与数据库已有实体匹配
+
+    流程：
+    1. 从state获取抽取的实体名称
+    2. 对每个实体name进行向量嵌入
+    3. 在数据库geo_entity_names表中检索相似实体
+    4. 相似度判断：
+       - >= high_threshold: 直接确认匹配
+       - >= threshold && < high_threshold: 交给LLM判断
+       - < threshold: 直接跳过（新实体）
+    """
+    from .schemas import EntityAlignmentResult, EntityAlignmentItem, EntityCandidate
+    parser = PydanticOutputParser(pydantic_object=EntityAlignmentItem)
+
+    # 嵌入模型缓存（避免重复加载）
+    _embedding_model = None
+
+    def _get_embedding_model():
+        """懒加载嵌入模型"""
+        if _embedding_model is None:
+            import os
+            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像加速
+            from sentence_transformers import SentenceTransformer
+            model_name = config.alignment_embedding_model
+            logger.info(f"[Entity_Alignment] 加载嵌入模型: {model_name}")
+            _embedding_model = SentenceTransformer(model_name)
+        return _embedding_model
+
+    async def entity_alignment_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """实体对齐节点"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Entity_Alignment] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "entity_alignment",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始实体对齐"
+        })
+
+        try:
+            # 连接数据库
+            from settings import settings
+            from kg.postgres_client import PostgresClient
+
+            pg_config = settings.get_postgres_config()
+            pg_client = PostgresClient(**pg_config)
+
+            # 获取抽取的实体（从joint_extraction_result或entities）
+            joint_result = state.get("joint_extraction_result", {})
+            entities_dict = state.get("entities", {})
+
+            # 提取实体名称列表
+            entity_names = []
+            entity_types = {}
+            if joint_result and "entities" in joint_result:
+                # 从联合抽取结果获取
+                for e in joint_result["entities"]:
+                    name = e.get("name", "")
+                    type_ = e.get("type", "")
+                    if name and name not in entity_names:
+                        entity_names.append(name)
+                        entity_types[name] = type_
+            else:
+                # 从传统entities字典获取
+                for type_, names in entities_dict.items():
+                    for name in names:
+                        if name and name not in entity_names:
+                            entity_names.append(name)
+                            entity_types[name] = type_
+
+            if not entity_names:
+                logger.info(f"[Entity_Alignment] 无实体需要对齐")
+                return {
+                    "entity_alignment_result": {
+                        "alignment_items": [],
+                        "aligned_entities": [],
+                        "new_entities": [],
+                        "skipped_entities": [],
+                        "overall_alignment_rate": 0.0,
+                        "alignment_confidence": "high"
+                    },
+                    "aligned_entity_ids": {},
+                    "new_entity_names": [],
+                    "current_step": StepEnum.DONE,
+                }
+
+            # 加载嵌入模型
+            model = _get_embedding_model()
+
+            # 生成实体嵌入向量
+            entity_embeddings = model.encode(entity_names, show_progress_bar=False, convert_to_numpy=True)
+
+            # 对齐配置
+            high_threshold = config.alignment_high_confidence_threshold
+            low_threshold = config.alignment_similarity_threshold
+            top_k = config.alignment_top_k
+            use_llm = config.alignment_use_llm_decision
+
+            alignment_items = []
+            aligned_entities = []
+            new_entities = []
+            skipped_entities = []
+            aligned_ids = {}
+
+            # 对每个实体进行相似度搜索和对齐
+            for i, (name, embedding) in enumerate(zip(entity_names, entity_embeddings)):
+                logger.debug(f"[Entity_Alignment] 对齐实体: {name}")
+
+                # 在数据库中检索相似实体
+                with pg_client.conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT entity_id, name, type, longitude, latitude,
+                               1 - (embedding <=> %s::vector) as similarity
+                        FROM geo_entity_names
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                    """, (embedding.tolist(), embedding.tolist(), top_k))
+
+                    candidates_raw = cur.fetchall()
+
+                # 转换候选实体
+                candidates = []
+                for row in candidates_raw:
+                    db_id, db_name, db_type, lon, lat, sim = row
+                    candidates.append({
+                        "db_entity_id": db_id,
+                        "db_name": db_name,
+                        "db_type": db_type or "",
+                        "similarity": sim,
+                        "longitude": lon,
+                        "latitude": lat,
+                        "source": "geo_entity_names"
+                    })
+
+                # 判断对齐状态
+                best_candidate = candidates[0] if candidates else None
+                best_similarity = best_candidate.get("similarity", 0.0) if best_candidate else 0.0
+
+                alignment_item = {
+                    "extracted_name": name,
+                    "extracted_type": entity_types.get(name, ""),
+                    "candidates": candidates,
+                    "best_match": None,
+                    "alignment_status": "pending",
+                    "llm_decision": None
+                }
+
+                # 高置信度：直接匹配
+                if best_similarity >= high_threshold:
+                    alignment_item["alignment_status"] = "aligned"
+                    alignment_item["best_match"] = best_candidate
+                    alignment_item["llm_decision"] = f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
+
+                    aligned_entities.append({
+                        "name": name,
+                        "db_id": best_candidate["db_entity_id"],
+                        "db_name": best_candidate["db_name"],
+                        "similarity": best_similarity
+                    })
+                    aligned_ids[name] = best_candidate["db_entity_id"]
+
+                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['db_name']} (高置信度)")
+
+                # 低置信度：直接跳过（新实体）
+                elif best_similarity < low_threshold:
+                    alignment_item["alignment_status"] = "new_entity"
+                    alignment_item["llm_decision"] = f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
+
+                    new_entities.append(name)
+
+                    logger.debug(f"[Entity_Alignment] {name} -> 新实体 (低置信度)")
+
+                # 中置信度：交给LLM判断
+                elif use_llm and candidates:
+                    # 格式化候选信息
+                    candidates_text = format_alignment_candidates(candidates)
+
+                    # 调用LLM判断
+                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke({
+                        "extracted_name": name,
+                        "extracted_type": entity_types.get(name, ""),
+                        "raw_text": state.get("raw_text", ""),
+                        "candidates": candidates_text,
+                    })
+
+                    try:
+                        response = await llm.ainvoke(prompt_text.messages[1].content)
+
+                        # 解析LLM输出
+                        import re
+                        status_match = re.search(r'alignment_status[=:]\s*"?(\w+)"?', response.content, re.IGNORECASE)
+                        index_match = re.search(r'best_match_index[=:]\s*(\d+)', response.content, re.IGNORECASE)
+                        decision_match = re.search(r'llm_decision[=:]\s*"([^"]+)"', response.content, re.IGNORECASE)
+
+                        llm_status = status_match.group(1) if status_match else "new_entity"
+                        best_index = int(index_match.group(1)) if index_match else -1
+                        llm_decision = decision_match.group(1) if decision_match else "LLM判断"
+
+                        alignment_item["alignment_status"] = llm_status
+                        alignment_item["llm_decision"] = llm_decision
+
+                        if llm_status == "aligned" and best_index >= 0 and best_index < len(candidates):
+                            best_match = candidates[best_index]
+                            alignment_item["best_match"] = best_match
+
+                            aligned_entities.append({
+                                "name": name,
+                                "db_id": best_match["db_entity_id"],
+                                "db_name": best_match["db_name"],
+                                "similarity": best_match["similarity"]
+                            })
+                            aligned_ids[name] = best_match["db_entity_id"]
+
+                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['db_name']} (LLM判断匹配)")
+                        else:
+                            new_entities.append(name)
+                            logger.debug(f"[Entity_Alignment] {name} -> 新实体 (LLM判断)")
+
+                    except Exception as e:
+                        logger.warning(f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体")
+                        alignment_item["alignment_status"] = "new_entity"
+                        alignment_item["llm_decision"] = f"LLM判断异常，默认为新实体"
+                        new_entities.append(name)
+
+                else:
+                    # 不使用LLM判断，默认为新实体
+                    alignment_item["alignment_status"] = "new_entity"
+                    alignment_item["llm_decision"] = f"中置信度({best_similarity:.3f})，未启用LLM判断"
+                    new_entities.append(name)
+
+                alignment_items.append(alignment_item)
+
+            # 关闭数据库连接
+            pg_client.close()
+
+            # 计算整体对齐率
+            total_entities = len(entity_names)
+            aligned_count = len(aligned_entities)
+            alignment_rate = aligned_count / total_entities if total_entities > 0 else 0.0
+
+            # 整体置信度判断
+            if alignment_rate >= 0.8:
+                overall_confidence = "high"
+            elif alignment_rate >= 0.5:
+                overall_confidence = "medium"
+            else:
+                overall_confidence = "low"
+
+            logger.info(
+                f"[Entity_Alignment] 完成: {aligned_count}/{total_entities} 已对齐, "
+                f"{len(new_entities)} 新实体, 对齐率={alignment_rate:.1%}"
+            )
+
+            writer({
+                "step": "entity_alignment",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "aligned_count": aligned_count,
+                "new_count": len(new_entities),
+                "alignment_rate": alignment_rate,
+                "confidence": overall_confidence
+            })
+
+            return {
+                "entity_alignment_result": {
+                    "alignment_items": alignment_items,
+                    "aligned_entities": aligned_entities,
+                    "new_entities": new_entities,
+                    "skipped_entities": skipped_entities,
+                    "overall_alignment_rate": alignment_rate,
+                    "alignment_confidence": overall_confidence
+                },
+                "aligned_entity_ids": aligned_ids,
+                "new_entity_names": new_entities,
+                "current_step": StepEnum.DONE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Entity_Alignment] 处理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            writer({
+                "step": "entity_alignment",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "entity_alignment_result": {},
+                "aligned_entity_ids": {},
+                "new_entity_names": [],
+                "error": str(e),
+                "current_step": StepEnum.DONE,
+            }
+
+    return entity_alignment_node
