@@ -35,9 +35,14 @@ class StepEnum(str, Enum):
     NORMALIZE = "normalize"                 # P6新增：文本归一化
     SELF_CHECK_NORMALIZE = "self_check_normalize" # P9新增：归一化校验（可选）
     QA_SCAFFOLD = "qa_scaffold"             # P8新增：QA脚手架
+    QA_MENTOR = "qa_mentor"                 # P10新增：QA导师模式
     SELF_CHECK_QA = "self_check_qa"         # P9新增：QA校验
     JOINT_NER_RE = "joint_ner_re"           # P9新增：联合抽取
     SELF_CHECK_JOINT = "self_check_joint"   # P9新增：联合抽取校验（含Reflexion）
+    QA_APPROVAL = "qa_approval"             # P10新增：QA审批节点
+    REVISION_JOINT = "revision_joint"       # P10新增：修改联合抽取
+    REVISION_EVAL = "revision_eval"         # P10新增：修改评估
+    REVISION_LABEL = "revision_label"       # P10新增：修改标注
     NER = "ner"                             # 流水线模式保留
     RE = "re"                               # 流水线模式保留
     SELF_CHECK_NER = "self_check_ner"       # 流水线模式：实体校验
@@ -166,6 +171,31 @@ class CorpusState(TypedDict):
     needs_review: Annotated[bool, replace_value]
     """是否需要人工复核"""
 
+    # ===== QA导师模式字段（P10新增） =====
+    mentor_guidance: Annotated[Dict, replace_value]
+    """导师指导信息：后续节点应遵循的指导"""
+
+    qa_approval_result: Annotated[Dict, replace_value]
+    """QA审批结果：对各节点结果的审批"""
+
+    integrated_semantic_summary: Annotated[str, replace_value]
+    """整合后的语义摘要：QA审批后更新的语义理解"""
+
+    revision_feedbacks: Annotated[List[Dict], merge_list]
+    """修改反馈列表：QA给出的改进建议"""
+
+    revision_cycle_count: Annotated[int, replace_value]
+    """修改循环计数：当前修改轮次"""
+
+    max_revision_cycles: Annotated[int, replace_value]
+    """最大修改轮次：默认3"""
+
+    pending_approval_nodes: Annotated[List[str], merge_list]
+    """待审批节点列表：哪些节点需要QA审批"""
+
+    reasoning_trace: Annotated[str, replace_value]
+    """推理过程：Reasoner模型的输出（可选保存）"""
+
     # Step 4: 属性标注
     entity_attrs: Annotated[Dict[str, Dict], replace_value]
     relation_attrs: Annotated[Dict[str, Dict], replace_value]
@@ -235,12 +265,12 @@ ENTITY_TYPES = {
     "街区": "具有边界感的生活区域（如：街道口、华农校区）"
 }
 
-# v2.2改进：18个关系类型
+# v3.2精简版：6个关系类型
 RELATION_TYPES = [
-    # 空间基础关系（8个）
-    "位于", "相邻", "属于", "连接", "距离", "方向", "穿过", "变化为",
-    # 社交语义关系（6个）
-    "推荐指数", "承载活动", "可达方式", "消费档次", "品类特征", "引发情感",
+    # 空间基础关系（3个）
+    "位于", "包含", "方位",
+    # 社交语义关系（1个）
+    "具有功能",
     # 对比评价关系（3个）
     "优于", "相似", "劣于",
     # 事件关系（1个）

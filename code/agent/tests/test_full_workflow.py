@@ -173,6 +173,8 @@ async def test_full_workflow(corpus_list: list, output_file: str):
             corpus_id = corpus_result.get("corpus_id", "unknown")
             entities = corpus_result.get("entities", {})
             triples = corpus_result.get("triples", [])
+            entity_attrs = corpus_result.get("entity_attrs", {})
+            relation_attrs = corpus_result.get("relation_attrs", {})
             eval_passed = corpus_result.get("eval_passed", False)
             confidence = corpus_result.get("verification_confidence", "medium")
             error = corpus_result.get("error")
@@ -189,6 +191,8 @@ async def test_full_workflow(corpus_list: list, output_file: str):
                 "original_text": original_text,
                 "entities": entities,
                 "triples": triples,
+                "entity_attrs": entity_attrs,
+                "relation_attrs": relation_attrs,
                 "eval_passed": eval_passed,
                 "confidence": confidence,
                 "error": error,
@@ -227,6 +231,8 @@ async def test_full_workflow(corpus_list: list, output_file: str):
         corpus_id = corpus_result.get("corpus_id", "unknown")
         entities = corpus_result.get("entities", {})
         triples = corpus_result.get("triples", [])
+        entity_attrs = corpus_result.get("entity_attrs", {})
+        relation_attrs = corpus_result.get("relation_attrs", {})
         confidence = corpus_result.get("verification_confidence", "medium")
 
         # 找原文本
@@ -246,10 +252,22 @@ async def test_full_workflow(corpus_list: list, output_file: str):
                 entity_strs.append(f"{etype}: {names[:3]}...")
         print(f"    实体: {', '.join(entity_strs)}")
 
+        # 显示实体属性（如果有）
+        if entity_attrs:
+            print(f"    实体属性 ({len(entity_attrs)}个):")
+            for name, attrs in list(entity_attrs.items())[:2]:
+                attr_str = ", ".join([f"{k}:{v}" for k, v in attrs.items() if v])
+                if attr_str:
+                    print(f"      - {name}: {attr_str}")
+
         if triples:
             print(f"    三元组 ({len(triples)}个):")
             for t in triples[:3]:
-                print(f"      - <{t.get('head')}, {t.get('relation')}, {t.get('tail')}>")
+                attrs = t.get('attributes', {})
+                attr_str = ""
+                if attrs:
+                    attr_str = " | 属性: " + ", ".join([f"{k}={v}" for k, v in attrs.items() if v])
+                print(f"      - <{t.get('head')}, {t.get('relation')}, {t.get('tail')}>{attr_str}")
 
     print("\n" + "-" * 50)
     print(f"结果已保存到: {output_file}")

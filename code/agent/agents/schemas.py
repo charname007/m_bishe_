@@ -1,35 +1,26 @@
 """
 Pydantic模型定义 - 用于LangChain with_structured_output
-v2.2改进：适配新的18个关系体系和属性标注体系
+v3.2改进：精简版6关系体系 + 5实体属性 + 9功能大类
+核心原则：所有属性和关系必须有原文依据（明确出现/暗示表达/语义推断），禁止幻觉
 """
 from typing import List, Dict, Optional, Any, Union
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from enum import Enum
 
 
-# ===== 关系类型枚举（18个） =====
+# ===== 关系类型枚举（v3.2精简版：6个） =====
 
 class RelationTypeEnum(str, Enum):
-    """关系类型枚举"""
-    # 空间基础关系（8个）
-    LOCATED = "位于"
-    ADJACENT = "相邻"
-    BELONGS_TO = "属于"
-    CONNECTS = "连接"
-    DISTANCE = "距离"
-    DIRECTION = "方向"
-    CROSS = "穿过"
-    CHANGED_TO = "变化为"
+    """关系类型枚举（v3.2精简版：6个关系）"""
+    # 空间基础关系（3个）—— 图谱骨架
+    LOCATED = "位于"           # 空间定位/归属（合并原"属于"）
+    CONTAINS = "包含"          # 空间包含（位于的反向）
+    ORIENTATION = "方位"       # 空间邻近+方位（合并原"相邻+距离+方向"，原名"空间方位")
 
-    # 社交语义关系（6个）
-    RECOMMEND_INDEX = "推荐指数"
-    HOSTS_ACTIVITY = "承载活动"
-    ACCESSIBLE_BY = "可达方式"
-    CONSUMPTION_LEVEL = "消费档次"
-    CATEGORY_FEATURE = "品类特征"
-    TRIGGERS_EMOTION = "引发情感"
+    # 社交语义关系（1个）—— 图谱血肉
+    HAS_FUNCTION = "具有功能"  # 场所的功能用途（原"承载活动"）
 
-    # 对比评价关系（3个）
+    # 对比评价关系（3个）—— 特色
     BETTER_THAN = "优于"
     SIMILAR_TO = "相似"
     WORSE_THAN = "劣于"
@@ -67,6 +58,63 @@ class LimitNodeEnum(str, Enum):
     PEOPLE_LIMIT = "人数限制"
     MIN_CONSUMPTION = "消费门槛"
     SEASON_LIMIT = "季节限制"
+
+
+# ===== 功能节点枚举（v3.2新增：9大类） =====
+
+class FunctionEnum(str, Enum):
+    """功能节点枚举（v3.2精简版：9大类）"""
+    DINING = "餐饮"       # 高频：吃饭、探店、下午茶
+    SHOPPING = "购物"     # 高频：逛街、买东西
+    LEISURE = "休闲"      # 高频：游玩、散步、放松
+    SOCIAL = "社交"       # 高频：聚会、打卡、约会
+    VIEWING = "观景"      # 高频：赏花、观展、拍照
+    ACCOMMODATION = "住宿"  # 中频：住酒店、民宿体验
+    CULTURE = "文化"      # 中频：学习、体验、参观
+    WORK = "工作"         # 低频：办公、产业
+    OTHER = "其他"        # 兜底
+
+
+# ===== 特征标签枚举（v3.2新增：约16个核心词汇） =====
+
+class FeatureTagEnum(str, Enum):
+    """特征标签枚举（v3.2精简版：约16个高频核心词汇）"""
+    # 氛围/风格类
+    ATMOSPHERE = "氛围感"
+    VIRAL = "网红"
+    ARTISTIC = "文艺"
+    RETRO = "复古"
+    NICHE = "小众"
+
+    # 定位/特征类
+    OLD_BRAND = "老字号"
+    CHAIN = "连锁"
+    CREATIVE = "文创"
+    HIGH_END = "高端"
+
+    # 知名度类
+    POPULAR = "热门"
+    HIDDEN_GEM = "宝藏"
+    MUST_VISIT = "打卡圣地"
+
+    # 体验正面类
+    GOOD_SERVICE = "服务好"
+    GOOD_ENVIRONMENT = "环境好"
+    GOOD_VALUE = "性价比高"
+    CONVENIENT_TRANSPORT = "交通便利"
+
+
+# ===== 对比维度枚举（v3.2新增：7个） =====
+
+class CompareDimensionEnum(str, Enum):
+    """对比维度枚举（v3.2精简版：7个）"""
+    PRICE = "价格"
+    ENVIRONMENT = "环境"
+    SERVICE = "服务"
+    CROWD = "人流量"
+    QUALITY = "品质"
+    TRANSPORT = "交通"
+    TASTE = "口味"
 
 
 # ===== 距离值枚举 =====
@@ -113,25 +161,17 @@ class RatingNodeEnum(str, Enum):
     NOT_RECOMMEND = "不推荐"
 
 
-# ===== 消费等级枚举 =====
-
-class ConsumptionNodeEnum(str, Enum):
-    """消费等级枚举"""
-    AFFORDABLE = "平价"
-    MID_RANGE = "中档"
-    HIGH_END = "高档"
-    LUXURY = "奢侈"
-
-
-# ===== 事件类别枚举 =====
+# ===== 事件类别枚举（v3.2精简版：7个） =====
 
 class EventCategoryEnum(str, Enum):
-    """事件类别枚举"""
-    NATURAL = "自然事件"
-    CULTURAL = "人文事件"
-    COMMERCIAL = "商业事件"
-    SOCIAL = "社会事件"
-    NEGATIVE = "负面事件"
+    """事件类别枚举（v3.2精简版：7个）"""
+    NATURAL = "自然事件"      # 自然现象相关：樱花盛开、荷花盛开
+    CULTURAL = "人文事件"     # 文化活动相关：樱花节、音乐节、展览、夜市
+    COMMERCIAL = "商业活动"   # 短期商业行为：开业、打折、促销
+    SOCIAL = "社会事件"       # 社会相关事件：施工、装修
+    BUSINESS_CHANGE = "业态变更"  # 经营性质变化：书店→咖啡厅
+    SHUTDOWN = "停业/关闭"    # 经营终止：停业、倒闭、整顿
+    OTHER = "其他"            # 无法归类
 
 
 # ===== 事件状态枚举 =====
@@ -281,66 +321,51 @@ class EntityRecognitionResult(BaseModel):
     街区: List[str] = Field(default_factory=list, description="街区实体列表")
 
 
-# ===== RE阶段输出模型（v2.2改进：添加attributes字段） =====
+# ===== RE阶段输出模型（v3.2改进：精简版三元组属性） =====
 
 class TripleAttributes(BaseModel):
-    """三元组属性（RE阶段直接抽取，硬校验枚举值+拒绝额外字段）"""
+    """三元组属性（v3.2精简版：方位+功能关系属性，全部可选）
+
+    原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
+    """
     model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
 
-    # 空间关系属性
-    联动推荐: Optional[bool] = Field(
-        default=None,
-        description="相邻关系的联动推荐属性（布尔）"
-    )
+    # ===== 方位关系属性（合并原距离+方向+相邻） =====
     距离值: Optional[DistanceValueEnum] = Field(
         default=None,
-        description="距离关系的距离值：近/中等/远"
+        description="方位关系的距离值：近/中等/远（必须有原文依据，如'附近'→近）"
     )
     方向值: Optional[DirectionValueEnum] = Field(
         default=None,
-        description="方向关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边"
+        description="方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（必须有原文依据）"
     )
-    变化时间: Optional[str] = Field(
+    联动推荐: Optional[bool] = Field(
         default=None,
-        description="变化为关系的变化时间"
+        description="方位关系的联动推荐属性（必须有原文依据，如'一起逛'→联动推荐=true）"
     )
 
-    # 社交语义关系属性
+    # ===== 功能关系属性（原承载活动关系） =====
     时段: Optional[str] = Field(
         default=None,
-        description="承载活动关系的时段属性"
+        description="功能的适用时段：周末/晚上/樱花季/春季/夏季等（必须有原文依据）"
     )
     适合人群: Optional[CrowdNodeEnum] = Field(
         default=None,
-        description="承载活动关系的适合人群属性"
+        description="功能的适合人群（必须有原文依据，如'带孩子来'→亲子）"
     )
     具有限制: Optional[List[LimitNodeEnum]] = Field(
         default=None,
-        description="承载活动关系的限制节点列表"
+        description="功能的限制条件列表（必须有原文依据，如'排队2小时'→排队久）"
     )
-    具体表达: Optional[str] = Field(
+    情感倾向: Optional[EmotionNodeEnum] = Field(
         default=None,
-        description="引发情感关系的具体情感表达"
-    )
-
-    # 对比关系属性
-    维度: Optional[List[str]] = Field(
-        default=None,
-        description="优于/相似/劣于关系的维度列表"
+        description="功能的情感倾向：正面/中性/负面（必须有原文依据）"
     )
 
-    # 事件关系属性
-    事件类别: Optional[EventCategoryEnum] = Field(
+    # ===== 对比关系属性 =====
+    维度: Optional[List[CompareDimensionEnum]] = Field(
         default=None,
-        description="发生事件关系的类别"
-    )
-    状态: Optional[EventStateEnum] = Field(
-        default=None,
-        description="发生事件关系的状态"
-    )
-    时间: Optional[str] = Field(
-        default=None,
-        description="发生事件关系的时间节点"
+        description="优于/相似/劣于关系的维度列表（必须有原文依据）"
     )
 
     # ===== 值映射校验器（处理LLM输出的变体值） =====
@@ -449,92 +474,53 @@ class TripleAttributes(BaseModel):
             return [LimitNodeEnum(mapped)]
         raise ValueError(f"无效的限制值: {v}")
 
-    @field_validator('事件类别', mode='before')
-    @classmethod
-    def normalize_event_category(cls, v):
-        """将事件类别变体映射到标准枚举值"""
-        if v is None:
-            return None
-        if isinstance(v, EventCategoryEnum):
-            return v
-        # 事件类别映射
-        category_mapping = {
-            '自然事件': '自然事件', '樱花盛开': '自然事件', '荷花盛开': '自然事件',
-            '人文事件': '人文事件', '樱花节': '人文事件', '音乐节': '人文事件', '夜市': '人文事件', '展览': '人文事件',
-            '商业事件': '商业事件', '开业': '商业事件', '打折': '商业事件', '促销': '商业事件',
-            '社会事件': '社会事件', '施工': '社会事件', '装修': '社会事件', '关闭': '社会事件',
-            '负面事件': '负面事件', '停业': '负面事件', '整顿': '负面事件',
-        }
-        normalized = category_mapping.get(str(v))
-        if normalized:
-            return EventCategoryEnum(normalized)
-        raise ValueError(f"无效的事件类别: {v}")
-
-    @field_validator('状态', mode='before')
-    @classmethod
-    def normalize_event_state(cls, v):
-        """将事件状态变体映射到标准枚举值"""
-        if v is None:
-            return None
-        if isinstance(v, EventStateEnum):
-            return v
-        # 状态映射
-        state_mapping = {
-            '正在进行': '正在进行', '正在举办': '正在进行', '进行中': '正在进行',
-            '已结束': '已结束', '结束了': '已结束',
-            '计划中': '计划中', '即将举办': '计划中', '快开了': '计划中',
-            '周期性': '周期性', '每年': '周期性', '周末': '周期性',
-        }
-        normalized = state_mapping.get(str(v))
-        if normalized:
-            return EventStateEnum(normalized)
-        raise ValueError(f"无效的事件状态: {v}")
-
 
 class Triple(BaseModel):
-    """单个三元组（v2.2改进：硬校验枚举值+强类型属性）"""
+    """单个三元组（v3.2精简版：6个关系，强类型属性，全部可选）"""
     head: str = Field(description="头实体名称")
-    relation: RelationTypeEnum = Field(description="关系类型（18种之一，硬校验）")
-    tail: str = Field(description="尾实体名称或枚举节点")
+    relation: RelationTypeEnum = Field(description="关系类型（6种之一，硬校验）")
+    tail: str = Field(description="尾实体名称或预定义节点")
     evidence: Optional[str] = Field(default="", description="文本证据")
     attributes: Optional[TripleAttributes] = Field(
         default=None,
-        description="关系属性（强类型约束，根据关系类型不同）"
+        description="关系属性（强类型约束，全部可选，语料中出现才标注）"
     )
 
     @field_validator('relation', mode='before')
     @classmethod
     def normalize_relation(cls, v):
-        """将关系类型变体映射到标准枚举值"""
+        """将关系类型变体映射到标准枚举值（v3.2精简版：6个关系）"""
         if v is None:
             raise ValueError("relation 不能为空")
         if isinstance(v, RelationTypeEnum):
             return v
-        # 关系类型映射（包含常见变体）
+        # 关系类型映射（v3.2精简版）
         relation_mapping = {
+            # 空间基础关系（3个）
             '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
-            '相邻': '相邻', '旁边': '相邻', '旁边是': '相邻', '隔壁': '相邻',
-            '属于': '属于', '隶属于': '属于', '是...的一部分': '属于',
-            '连接': '连接', '连通': '连接', '通往': '连接',
-            '距离': '距离', '离': '距离', '距离...很近': '距离', '附近': '距离',
-            '方向': '方向', '在...东边': '方向', '东边': '方向',
-            '穿过': '穿过', '横穿': '穿过', '穿越': '穿过',
-            '变化为': '变化为', '变成': '变化为', '改为': '变化为',
-            '推荐指数': '推荐指数', '推荐': '推荐指数', '强烈推荐': '推荐指数',
-            '承载活动': '承载活动', '可以...': '承载活动', '适合...': '承载活动',
-            '可达方式': '可达方式', '交通': '可达方式', '怎么去': '可达方式',
-            '消费档次': '消费档次', '消费': '消费档次', '人均': '消费档次',
-            '品类特征': '品类特征', '特色': '品类特征', '风格': '品类特征',
-            '引发情感': '引发情感', '情感': '引发情感', '感觉': '引发情感',
+            '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
+            '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
+            '方位': '方位', '空间方位': '方位',
+            '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
+            '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
+            '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
+
+            # 社交语义关系（1个）
+            '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
+            '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
+
+            # 对比评价关系（3个）
             '优于': '优于', '比...好': '优于', '比...便宜': '优于',
             '相似': '相似', '和...差不多': '相似', '类似': '相似',
             '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
+
+            # 事件关系（1个）
             '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
         }
         normalized = relation_mapping.get(str(v))
         if normalized:
             return RelationTypeEnum(normalized)
-        raise ValueError(f"无效的关系类型: {v}，有效值为18个预定义关系类型")
+        raise ValueError(f"无效的关系类型: {v}，有效值为6个预定义关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件")
 
 
 class RelationExtractionResult(BaseModel):
@@ -585,200 +571,61 @@ class EvalResultSimplified(BaseModel):
     corrections: List[Correction] = Field(default_factory=list, description="修正列表（仅当need_correction=True时有效）")
 
 
-# ===== Label阶段输出模型（v2.2改进：扩展实体属性） =====
+# ===== Label阶段输出模型（v3.2精简版：5个可选属性） =====
 
 class EntityAttributes(BaseModel):
-    """实体属性（v2.2改进：扩展情感标签、体验评价、知名度）"""
-    # 基础分类属性（GIS标准）
-    类别: str = Field(description="实体类别：POI/建筑物/街区/道路")
-    细分: str = Field(description="细分类别")
+    """实体属性（v3.2精简版：5个属性，全部可选，必须有原文依据）
 
-    # 文本属性（从语料提取）
-    情感标签: List[str] = Field(
-        default_factory=list,
-        description="情感标签：氛围感/治愈/高级感/温暖/文艺/复古/现代/网红感/小清新"
+    原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
+    """
+    # 基础分类属性（可选）
+    类别: Optional[str] = Field(
+        default=None,
+        description="实体类别：道路/POI/建筑物/街区（必须有原文依据）"
     )
-    体验评价: List[str] = Field(
-        default_factory=list,
-        description="体验评价：服务好/环境舒适/商品丰富/性价比高/停车方便/交通便利"
-    )
-    知名度: str = Field(
-        default="",
-        description="知名度：热门/小众/隐藏宝藏/必去/打卡圣地"
+    细分: Optional[str] = Field(
+        default=None,
+        description="细分类别：餐饮/商业综合体/商圈/主干道等（必须有原文依据）"
     )
 
-    # 元数据属性（质量控制）
-    来源可信度: str = Field(
-        default="中",
-        description="来源可信度：高/中/低"
+    # 文本属性（从语料提取，全部可选）
+    特征标签: Optional[List[FeatureTagEnum]] = Field(
+        default=None,
+        description="特征标签：氛围感/网红/热门/服务好/性价比高等（必须有原文依据：明确出现或暗示表达）"
+    )
+    推荐指数: Optional[RatingNodeEnum] = Field(
+        default=None,
+        description="推荐程度：超推/推荐/一般/不推荐（必须有原文依据）"
+    )
+    情感倾向: Optional[EmotionNodeEnum] = Field(
+        default=None,
+        description="情感倾向：正面/中性/负面（必须有原文依据）"
     )
 
 
 class RelationAttributes(BaseModel):
-    """关系属性（v2.2改进：根据关系类型定义）"""
-    # 空间精度（通用）
+    """关系属性（v3.2精简版：仅保留必要属性，全部可选）"""
+    # 方位关系属性（合并原相邻+距离+方向）
     空间精度: Optional[str] = Field(
         default=None,
-        description="空间精度：精确/近似/模糊"
+        description="空间精度：精确/近似/模糊（语料中出现才标注）"
     )
 
-    # 语义类型（位于关系）
-    语义类型: Optional[str] = Field(
-        default=None,
-        description="语义类型：内部/区域内/附近/周边"
-    )
-
-    # 相邻类型（相邻关系）
-    相邻类型: Optional[str] = Field(
-        default=None,
-        description="相邻类型：直接相邻/邻近/隔街相望"
-    )
-
-    # 层级类型（属于关系）
-    层级类型: Optional[str] = Field(
-        default=None,
-        description="层级类型：组成部分/行政隶属/功能隶属"
-    )
-
-    # 连接属性（连接关系）
-    连接类型: Optional[str] = Field(
-        default=None,
-        description="连接类型：直达/换乘/途径/沿线"
-    )
-    交通方式: Optional[str] = Field(
-        default=None,
-        description="交通方式：地铁/公交/步行/自驾/骑行"
-    )
-
-    # 距离属性（距离关系）
-    距离类型: Optional[str] = Field(
-        default=None,
-        description="距离类型：物理距离/感知距离/步行距离"
-    )
-
-    # 方向属性（方向关系）
-    方向类型: Optional[str] = Field(
-        default=None,
-        description="方向类型：绝对方位/相对方位/定性方位"
-    )
-
-    # 穿过属性（穿过关系）
-    穿过类型: Optional[str] = Field(
-        default=None,
-        description="穿过类型：横穿/纵穿/穿越"
-    )
-
-    # 变化属性（变化为关系）
-    变化类型: Optional[str] = Field(
-        default=None,
-        description="变化类型：业态变更/功能转变/建筑改造/关闭拆除"
-    )
-
-    # 推荐属性（推荐指数关系）
-    推荐强度: Optional[str] = Field(
-        default=None,
-        description="推荐强度：强烈/一般/较弱"
-    )
-    推荐场景: Optional[str] = Field(
-        default=None,
-        description="推荐场景：日常/周末/节假日/约会/团建"
-    )
-
-    # 活动属性（承载活动关系）
-    活动类型: Optional[str] = Field(
-        default=None,
-        description="活动类型：体验型/消费型/社交型/休闲型/观赏型"
-    )
-    活动频率: Optional[str] = Field(
-        default=None,
-        description="活动频率：高频/中频/低频/季节性"
-    )
-
-    # 可达属性（可达方式关系）
-    可达程度: Optional[str] = Field(
-        default=None,
-        description="可达程度：直达/换乘/需步行/不便"
-    )
-    交通效率: Optional[str] = Field(
-        default=None,
-        description="交通效率：高效/一般/低效"
-    )
-
-    # 消费属性（消费档次关系）
-    价格区间: Optional[str] = Field(
-        default=None,
-        description="价格区间（补充具体数值）：如人均50-100"
-    )
-    消费类型: Optional[str] = Field(
-        default=None,
-        description="消费类型：日常消费/休闲消费/高端消费"
-    )
-
-    # 品类属性（品类特征关系）
-    特征类型: Optional[str] = Field(
-        default=None,
-        description="特征类型：风格特征/文化特征/历史特征/功能特征"
-    )
-    特征显著性: Optional[str] = Field(
-        default=None,
-        description="特征显著性：显著/一般/微弱"
-    )
-
-    # 情感属性（引发情感关系）
-    情感强度: Optional[str] = Field(
-        default=None,
-        description="情感强度：强烈/一般/微弱"
-    )
-    情感类型: Optional[str] = Field(
-        default=None,
-        description="情感类型：愉悦型/放松型/感动型/浪漫型/负面型"
-    )
-
-    # 对比属性（优于/相似/劣于关系）
-    优势程度: Optional[str] = Field(
-        default=None,
-        description="优势程度（优于关系）：明显优势/稍有优势/相当"
-    )
-    相似程度: Optional[str] = Field(
-        default=None,
-        description="相似程度（相似关系）：高度相似/部分相似/风格相近"
-    )
-    劣势程度: Optional[str] = Field(
-        default=None,
-        description="劣势程度（劣于关系）：明显劣势/稍有劣势/相当"
-    )
+    # 对比关系属性
     对比可靠性: Optional[str] = Field(
         default=None,
-        description="对比可靠性：主观对比/客观对比"
-    )
-    替代性: Optional[str] = Field(
-        default=None,
-        description="替代性（相似关系）：可替代/部分替代/不可替代"
-    )
-    风险等级: Optional[str] = Field(
-        default=None,
-        description="风险等级（劣于关系）：高风险/中风险/低风险"
+        description="对比可靠性：主观对比/客观对比（语料中出现才标注）"
     )
 
-    # 事件属性（发生事件关系）
+    # 事件关系属性
     事件影响度: Optional[str] = Field(
         default=None,
-        description="事件影响度：重大影响/一般影响/微弱影响"
-    )
-    事件持续性: Optional[str] = Field(
-        default=None,
-        description="事件持续性：长期事件/短期事件/周期性事件"
-    )
-
-    # 元数据属性（通用）
-    来源可信度: str = Field(
-        default="中",
-        description="来源可信度：高/中/低"
+        description="事件影响度：重大影响/一般影响/微弱影响（语料中出现才标注）"
     )
 
 
 class LabelResult(BaseModel):
-    """属性标注结果（v2.2改进）"""
+    """属性标注结果（v3.2精简版）"""
     entities: Dict[str, EntityAttributes] = Field(
         default_factory=dict,
         description="实体属性字典，键为实体名"
@@ -910,18 +757,22 @@ ENTITY_CATEGORY_DETAIL = {
     "道路": ["主干道", "次干道", "支路", "小巷", "地铁线路"]
 }
 
-# ===== 关系类型列表（用于Prompt和校验） =====
+# ===== 关系类型列表（v3.2精简版：6个） =====
 
 RELATION_TYPES = [
-    # 空间基础关系（8个）
-    "位于", "相邻", "属于", "连接", "距离", "方向", "穿过", "变化为",
-    # 社交语义关系（6个）
-    "推荐指数", "承载活动", "可达方式", "消费档次", "品类特征", "引发情感",
+    # 空间基础关系（3个）
+    "位于", "包含", "方位",
+    # 社交语义关系（1个）
+    "具有功能",
     # 对比评价关系（3个）
     "优于", "相似", "劣于",
     # 事件关系（1个）
     "发生事件"
 ]
+
+# ===== 功能节点枚举（v3.2新增：9大类） =====
+
+FUNCTION_NODES = ["餐饮", "购物", "休闲", "社交", "观景", "住宿", "文化", "工作", "其他"]
 
 # ===== 情感节点枚举 =====
 
@@ -931,10 +782,6 @@ EMOTION_NODES = ["正面", "中性", "负面"]
 
 RATING_NODES = ["超推", "推荐", "一般", "不推荐"]
 
-# ===== 消费等级枚举 =====
-
-CONSUMPTION_NODES = ["平价", "中档", "高档", "奢侈"]
-
 # ===== 距离值枚举 =====
 
 DISTANCE_VALUES = ["近", "中等", "远"]
@@ -943,29 +790,30 @@ DISTANCE_VALUES = ["近", "中等", "远"]
 
 DIRECTION_VALUES = ["东", "南", "西", "北", "东北", "西南", "东侧", "西侧", "对面", "旁边"]
 
-# ===== 事件类别枚举 =====
+# ===== 事件类别枚举（v3.2精简版：7个） =====
 
-EVENT_CATEGORIES = ["自然事件", "人文事件", "商业事件", "社会事件", "负面事件"]
+EVENT_CATEGORIES = ["自然事件", "人文事件", "商业活动", "社会事件", "业态变更", "停业/关闭", "其他"]
 
 # ===== 事件状态枚举 =====
 
 EVENT_STATES = ["正在进行", "已结束", "计划中", "周期性"]
 
-# ===== 对比维度枚举 =====
+# ===== 对比维度枚举（v3.2精简版：7个） =====
 
-COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "氛围", "交通", "停车", "口味", "性价比"]
+COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味"]
 
-# ===== 情感标签枚举 =====
+# ===== 特征标签枚举（v3.2精简版：约16个） =====
 
-EMOTION_TAGS = ["氛围感", "治愈", "高级感", "温暖", "文艺", "复古", "现代", "网红感", "小清新", "赛博朋克感"]
-
-# ===== 体验评价枚举 =====
-
-EXPERIENCE_EVALUATIONS = ["服务好", "环境舒适", "商品丰富", "性价比高", "停车方便", "交通便利", "人流量适中"]
-
-# ===== 知名度枚举 =====
-
-POPULARITY_LEVELS = ["热门", "小众", "隐藏宝藏", "必去", "打卡圣地"]
+FEATURE_TAGS = [
+    # 氛围/风格类
+    "氛围感", "网红", "文艺", "复古", "小众",
+    # 定位/特征类
+    "老字号", "连锁", "文创", "高端",
+    # 知名度类
+    "热门", "宝藏", "打卡圣地",
+    # 体验正面类
+    "服务好", "环境好", "性价比高", "交通便利"
+]
 
 
 # ===== 联合抽取模型（P9新增） =====
@@ -980,50 +828,52 @@ class JointEntity(BaseModel):
 
 
 class JointTriple(BaseModel):
-    """联合抽取的单个三元组（硬校验+强类型属性）"""
+    """联合抽取的单个三元组（v3.2精简版：6个关系，强类型属性）"""
     head: str = Field(description="头实体")
-    relation: RelationTypeEnum = Field(description="关系类型（18种之一）")
+    relation: RelationTypeEnum = Field(description="关系类型（6种之一）")
     tail: str = Field(description="尾实体")
     evidence: str = Field(description="原文依据")
     confidence: ConfidenceEnum = Field(description="置信度")
     attributes: Optional[TripleAttributes] = Field(
         default=None,
-        description="关系属性（强类型约束，拒绝额外字段）"
+        description="关系属性（强类型约束，全部可选，语料中出现才标注）"
     )
 
     @field_validator('relation', mode='before')
     @classmethod
     def normalize_relation(cls, v):
-        """将关系类型变体映射到标准枚举值"""
+        """将关系类型变体映射到标准枚举值（v3.2精简版：6个关系）"""
         if v is None:
             raise ValueError("relation 不能为空")
         if isinstance(v, RelationTypeEnum):
             return v
-        # 使用与 Triple 相同的映射逻辑
+        # 关系类型映射（v3.2精简版）
         relation_mapping = {
+            # 空间基础关系（3个）
             '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
-            '相邻': '相邻', '旁边': '相邻', '旁边是': '相邻', '隔壁': '相邻',
-            '属于': '属于', '隶属于': '属于', '是...的一部分': '属于',
-            '连接': '连接', '连通': '连接', '通往': '连接',
-            '距离': '距离', '离': '距离', '距离...很近': '距离', '附近': '距离',
-            '方向': '方向', '在...东边': '方向', '东边': '方向',
-            '穿过': '穿过', '横穿': '穿过', '穿越': '穿过',
-            '变化为': '变化为', '变成': '变化为', '改为': '变化为',
-            '推荐指数': '推荐指数', '推荐': '推荐指数', '强烈推荐': '推荐指数',
-            '承载活动': '承载活动', '可以...': '承载活动', '适合...': '承载活动',
-            '可达方式': '可达方式', '交通': '可达方式', '怎么去': '可达方式',
-            '消费档次': '消费档次', '消费': '消费档次', '人均': '消费档次',
-            '品类特征': '品类特征', '特色': '品类特征', '风格': '品类特征',
-            '引发情感': '引发情感', '情感': '引发情感', '感觉': '引发情感',
+            '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
+            '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
+            '方位': '方位', '空间方位': '方位',
+            '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
+            '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
+            '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
+
+            # 社交语义关系（1个）
+            '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
+            '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
+
+            # 对比评价关系（3个）
             '优于': '优于', '比...好': '优于', '比...便宜': '优于',
             '相似': '相似', '和...差不多': '相似', '类似': '相似',
             '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
+
+            # 事件关系（1个）
             '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
         }
         normalized = relation_mapping.get(str(v))
         if normalized:
             return RelationTypeEnum(normalized)
-        raise ValueError(f"无效的关系类型: {v}，有效值为18个预定义关系类型")
+        raise ValueError(f"无效的关系类型: {v}，有效值为6个预定义关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件")
 
 
 class JointExtractionResult(BaseModel):
@@ -1318,4 +1168,211 @@ class BatchSelfCheckResult(BaseModel):
     fallback_to_single: bool = Field(
         default=False,
         description="是否建议退化为单条处理"
+    )
+
+
+# ===== QA导师架构模型（P10新增） =====
+
+class ApprovalStatusEnum(str, Enum):
+    """审批状态枚举"""
+    APPROVED = "approved"              # 审批通过
+    NEEDS_REVISION = "needs_revision"  # 需要修改
+    REJECTED = "rejected"              # 拒绝（严重错误）
+
+
+class ApprovalFeedback(BaseModel):
+    """审批反馈项"""
+    target_node: str = Field(
+        description="目标节点: joint_ner_re/eval/label"
+    )
+    issue_type: str = Field(
+        description="问题类型: hallucination/missing_entity/relation_error/attribute_error/overall"
+    )
+    severity: str = Field(
+        description="严重程度: high/medium/low"
+    )
+    description: str = Field(
+        description="问题描述"
+    )
+    suggestion: str = Field(
+        description="改进建议"
+    )
+    specific_entities: List[str] = Field(
+        default_factory=list,
+        description="涉及的具体实体"
+    )
+    specific_triples: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="涉及的具体三元组"
+    )
+
+
+class NodeApprovalResult(BaseModel):
+    """单个节点的审批结果"""
+    node_name: str = Field(description="节点名称")
+    approval_status: ApprovalStatusEnum = Field(description="审批状态")
+    confidence: str = Field(description="审批置信度: high/medium/low")
+    feedbacks: List[ApprovalFeedback] = Field(
+        default_factory=list,
+        description="反馈列表"
+    )
+    approved_items: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="审批通过的内容"
+    )
+    rejected_items: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="拒绝的内容"
+    )
+    revision_required: bool = Field(
+        default=False,
+        description="是否需要重新执行节点"
+    )
+
+
+class QAApprovalResult(BaseModel):
+    """QA审批结果 - 整合所有节点的审批"""
+    # 各节点审批结果
+    joint_approval: Optional[NodeApprovalResult] = Field(
+        default=None,
+        description="联合抽取审批结果"
+    )
+    eval_approval: Optional[NodeApprovalResult] = Field(
+        default=None,
+        description="评估审批结果"
+    )
+    label_approval: Optional[NodeApprovalResult] = Field(
+        default=None,
+        description="标注审批结果"
+    )
+
+    # 整体评估
+    overall_status: ApprovalStatusEnum = Field(description="整体审批状态")
+    overall_confidence: str = Field(description="整体置信度")
+
+    # 整合后的语义脚手架
+    integrated_semantic_summary: str = Field(
+        default="",
+        description="整合后的语义摘要"
+    )
+    integrated_entity_hints: List[str] = Field(
+        default_factory=list,
+        description="整合后的实体提示"
+    )
+    integrated_relation_hints: List[str] = Field(
+        default_factory=list,
+        description="整合后的关系提示"
+    )
+
+    # 反馈汇总
+    all_feedbacks: List[ApprovalFeedback] = Field(
+        default_factory=list,
+        description="所有反馈汇总"
+    )
+
+    # 重试建议
+    retry_suggested: bool = Field(
+        default=False,
+        description="是否建议重试"
+    )
+    retry_target_nodes: List[str] = Field(
+        default_factory=list,
+        description="建议重试的节点列表"
+    )
+    retry_reason: str = Field(
+        default="",
+        description="重试原因"
+    )
+
+
+class MentorGuidance(BaseModel):
+    """导师指导信息 - QA向后续节点发出的指导"""
+    guidance_type: str = Field(
+        default="initial",
+        description="指导类型: initial/revision/approval"
+    )
+
+    # 指导内容
+    semantic_focus: List[str] = Field(
+        default_factory=list,
+        description="语义关注点：后续节点应重点关注的语义方面"
+    )
+    entity_priorities: List[str] = Field(
+        default_factory=list,
+        description="实体优先级：重要实体的优先级排序"
+    )
+    relation_priorities: List[str] = Field(
+        default_factory=list,
+        description="关系优先级：重要关系的优先级"
+    )
+    quality_standards: List[str] = Field(
+        default_factory=list,
+        description="质量标准：后续节点应达到的质量标准"
+    )
+
+    # 预期约束
+    expected_entity_types: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="预期实体类型分布"
+    )
+    expected_relations: List[str] = Field(
+        default_factory=list,
+        description="预期关系类型"
+    )
+
+    # 已知问题提示
+    known_issues: List[str] = Field(
+        default_factory=list,
+        description="已知问题提示"
+    )
+    avoid_patterns: List[str] = Field(
+        default_factory=list,
+        description="避免的模式"
+    )
+
+
+class QAMentorScaffoldResult(BaseModel):
+    """QA导师脚手架结果 - 扩展原有QAScaffoldResult"""
+    # 原有字段（继承）
+    qa_pairs: List[Any] = Field(
+        default_factory=list,
+        description="5W1H问答对列表"
+    )
+    semantic_summary: str = Field(
+        default="",
+        description="语义摘要：整合问答后的文本理解"
+    )
+    entity_hints: List[str] = Field(
+        default_factory=list,
+        description="实体提示列表：可能涉及的地理实体"
+    )
+    relation_hints: List[str] = Field(
+        default_factory=list,
+        description="关系提示列表：可能存在的关系类型"
+    )
+    context_dependencies: List[str] = Field(
+        default_factory=list,
+        description="上下文依赖：需要后续节点注意的依赖关系"
+    )
+    overall_confidence: str = Field(
+        default="medium",
+        description="整体脚手架置信度: high/medium/low"
+    )
+    should_skip_detailed_extraction: bool = Field(
+        default=False,
+        description="是否建议跳过详细抽取"
+    )
+
+    # 新增导师字段
+    mentor_guidance: Optional[MentorGuidance] = Field(
+        default=None,
+        description="导师指导信息"
+    )
+    reasoning_trace: str = Field(
+        default="",
+        description="推理过程（Reasoner模型输出）"
+    )
+    deep_analysis: str = Field(
+        default="",
+        description="深度语义分析"
     )

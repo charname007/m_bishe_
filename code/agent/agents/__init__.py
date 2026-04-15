@@ -7,6 +7,8 @@ P6改进：添加Normalize归一化节点
 P7改进：添加分批次处理入口
 P8改进：添加QA Scaffold脚手架节点和Self-Check二次对话节点
 P9改进：添加联合抽取 + Reflexion机制 + 全节点二次检查 + Filter/Normalize二次检查（可选）
+P10改进：添加批量LLM调用 + QA导师模式
+v3.2改进：精简版6关系体系 + 5实体属性 + 9功能大类 + 可选属性原则
 """
 from .config import ExtractionConfig, DEFAULT_CONFIG
 from .state import (
@@ -21,6 +23,15 @@ from .schemas import (
     Correction, LabelResult,
     EntityAttributes, RelationAttributes,
     QAPair, QAScaffoldResult,
+    # P5新增：Filter筛选模型
+    FilterResult,
+    # P6新增：Normalize归一化模型
+    NormalizationRecord, NormalizeResult,
+    # v3.2新增：精简版枚举
+    RelationTypeEnum, FunctionEnum, FeatureTagEnum, CompareDimensionEnum,
+    EventCategoryEnum, EventStateEnum, CrowdNodeEnum, LimitNodeEnum,
+    DistanceValueEnum, DirectionValueEnum, EmotionNodeEnum, RatingNodeEnum,
+    ConfidenceEnum,
     # P9新增：联合抽取模型
     JointEntity, JointTriple, JointExtractionResult,
     # P9新增：所有Self-Check模型
@@ -29,19 +40,36 @@ from .schemas import (
     SelfCheckFilterResult, SelfCheckNormalizeResult,
     # P10新增：批量LLM调用模型
     BatchCorpusResult, BatchExtractionResult, BatchSelfCheckResult,
+    # P10新增：QA导师模型
+    ApprovalStatusEnum, ApprovalFeedback, NodeApprovalResult, QAApprovalResult,
+    MentorGuidance, QAMentorScaffoldResult,
+    # v3.2新增：常量列表
+    RELATION_TYPES, FUNCTION_NODES, FEATURE_TAGS, COMPARE_DIMENSIONS, EVENT_CATEGORIES,
 )
 from .prompts import (
     NER_PROMPT, RE_PROMPT,
     EVAL_PROMPT_1, EVAL_PROMPT_2, EVAL_PROMPT_SIMPLIFIED, LABEL_PROMPT,
     QA_SCAFFOLD_PROMPT,
+    # P5新增：Filter筛选提示词
+    FILTER_PROMPT,
+    # P6新增：Normalize归一化提示词
+    NORMALIZE_PROMPT,
     SELF_CHECK_NER_PROMPT, SELF_CHECK_RE_PROMPT,
     # P9新增：联合抽取和所有Self-Check提示词
     JOINT_NER_RE_PROMPT,
     SELF_CHECK_JOINT_PROMPT, SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
     # P9新增：Filter/Normalize二次检查提示词（可选）
     SELF_CHECK_FILTER_PROMPT, SELF_CHECK_NORMALIZE_PROMPT,
+    # P10新增：批量LLM调用提示词
+    BATCH_JOINT_PROMPT, BATCH_SELF_CHECK_PROMPT,
+    # P10新增：QA导师模式提示词
+    QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     format_entities, format_triples,
     format_entity_hints, format_relation_hints, format_context_dependencies,
+    # P10新增：批量格式化函数
+    format_batch_corpus, format_batch_results_for_check, format_cross_corpus_aliases,
+    # P10新增：QA导师格式化函数
+    format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
 )
 from .nodes import (
     create_ner_node,
@@ -71,6 +99,10 @@ from .nodes import (
     create_batch_joint_extraction_node,
     create_batch_self_check_node,
     process_corpus_batch_with_llm,
+    # P10新增：QA导师节点
+    create_qa_mentor_node,
+    create_qa_approval_node,
+    create_revision_joint_node,
 )
 from .workflow import (
     build_corpus_workflow,
@@ -80,6 +112,9 @@ from .workflow import (
     process_corpus_streaming,
     process_batch_streaming,
     process_corpus_in_batches,
+    # P10新增：QA导师工作流
+    build_qa_mentor_workflow,
+    process_corpus_with_qa_mentor,
 )
 
 __all__ = [
@@ -88,6 +123,13 @@ __all__ = [
     # 状态
     "KGState", "WorkerResult", "CorpusState",
     "StepEnum", "PhaseEnum", "DEFAULT_MAX_RETRIES", "ENTITY_TYPES", "RELATION_TYPES", "ENTITY_CATEGORIES",
+    # v3.2新增：精简版枚举
+    "RelationTypeEnum", "FunctionEnum", "FeatureTagEnum", "CompareDimensionEnum",
+    "EventCategoryEnum", "EventStateEnum", "CrowdNodeEnum", "LimitNodeEnum",
+    "DistanceValueEnum", "DirectionValueEnum", "EmotionNodeEnum", "RatingNodeEnum",
+    "ConfidenceEnum",
+    # v3.2新增：常量列表
+    "FUNCTION_NODES", "FEATURE_TAGS", "COMPARE_DIMENSIONS", "EVENT_CATEGORIES",
     # Pydantic模型
     "EntityRecognitionResult",
     "RelationExtractionResult",
@@ -96,6 +138,10 @@ __all__ = [
     "Correction", "LabelResult",
     "EntityAttributes", "RelationAttributes",
     "QAPair", "QAScaffoldResult",
+    # P5新增：Filter筛选模型
+    "FilterResult",
+    # P6新增：Normalize归一化模型
+    "NormalizationRecord", "NormalizeResult",
     # P9新增：联合抽取模型
     "JointEntity", "JointTriple", "JointExtractionResult",
     # P9新增：Self-Check模型
@@ -104,10 +150,17 @@ __all__ = [
     "SelfCheckFilterResult", "SelfCheckNormalizeResult",
     # P10新增：批量LLM调用模型
     "BatchCorpusResult", "BatchExtractionResult", "BatchSelfCheckResult",
+    # P10新增：QA导师模型
+    "ApprovalStatusEnum", "ApprovalFeedback", "NodeApprovalResult", "QAApprovalResult",
+    "MentorGuidance", "QAMentorScaffoldResult",
     # 提示词
     "NER_PROMPT", "RE_PROMPT",
     "EVAL_PROMPT_1", "EVAL_PROMPT_2", "EVAL_PROMPT_SIMPLIFIED", "LABEL_PROMPT",
     "QA_SCAFFOLD_PROMPT",
+    # P5新增：Filter筛选提示词
+    "FILTER_PROMPT",
+    # P6新增：Normalize归一化提示词
+    "NORMALIZE_PROMPT",
     "SELF_CHECK_NER_PROMPT", "SELF_CHECK_RE_PROMPT",
     # P9新增：联合抽取和Self-Check提示词
     "JOINT_NER_RE_PROMPT",
@@ -116,10 +169,14 @@ __all__ = [
     "SELF_CHECK_FILTER_PROMPT", "SELF_CHECK_NORMALIZE_PROMPT",
     # P10新增：批量LLM调用提示词
     "BATCH_JOINT_PROMPT", "BATCH_SELF_CHECK_PROMPT",
+    # P10新增：QA导师模式提示词
+    "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
     "format_entities", "format_triples",
     "format_entity_hints", "format_relation_hints", "format_context_dependencies",
     # P10新增：批量格式化函数
     "format_batch_corpus", "format_batch_results_for_check", "format_cross_corpus_aliases",
+    # P10新增：QA导师格式化函数
+    "format_mentor_guidance", "format_feedbacks_for_revision", "format_joint_for_approval",
     # 节点工厂函数
     "create_ner_node",
     "create_re_node",
@@ -130,7 +187,9 @@ __all__ = [
     "create_coordinator_node",
     "create_aggregator_node",
     "create_qa_scaffold_node",
+    # P5新增：Filter筛选节点
     "create_filter_node",
+    # P6新增：Normalize归一化节点
     "create_normalize_node",
     "create_self_check_ner_node",
     "create_self_check_re_node",
@@ -148,6 +207,10 @@ __all__ = [
     "create_batch_joint_extraction_node",
     "create_batch_self_check_node",
     "process_corpus_batch_with_llm",
+    # P10新增：QA导师节点
+    "create_qa_mentor_node",
+    "create_qa_approval_node",
+    "create_revision_joint_node",
     # 工作流
     "build_corpus_workflow",
     "build_distributed_workflow",
@@ -156,4 +219,7 @@ __all__ = [
     "process_corpus_streaming",
     "process_batch_streaming",
     "process_corpus_in_batches",
+    # P10新增：QA导师工作流
+    "build_qa_mentor_workflow",
+    "process_corpus_with_qa_mentor",
 ]

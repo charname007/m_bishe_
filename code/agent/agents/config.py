@@ -121,6 +121,32 @@ class ExtractionConfig:
     enable_self_check_normalize: bool = False
     """是否启用Normalize归一化二次检查（可选，默认False）"""
 
+    # ===== QA导师模式配置（P10新增） =====
+    enable_qa_mentor: bool = False
+    """是否启用QA导师模式（QA作为中心审批节点）"""
+
+    qa_approval_enabled: bool = False
+    """是否启用QA审批流程"""
+
+    max_revision_cycles: int = 3
+    """最大修改循环轮次"""
+
+    # ===== 多LLM模型配置（P10新增） =====
+    qa_llm_model: str = "deepseek-reasoner"
+    """QA节点使用的LLM模型（导师模式用强模型）"""
+
+    worker_llm_model: str = "deepseek-chat"
+    """后续节点（Joint、Eval、Label）使用的LLM模型"""
+
+    qa_llm_temperature: float = 0.7
+    """QA节点LLM温度参数（导师模式需要一定灵活性）"""
+
+    worker_llm_temperature: float = 0.0
+    """工作节点LLM温度参数（确定性输出）"""
+
+    enable_qa_reasoning_trace: bool = True
+    """是否保存QA的推理过程（Reasoner模型输出）"""
+
     @classmethod
     def from_env(cls) -> "ExtractionConfig":
         """
@@ -197,6 +223,15 @@ class ExtractionConfig:
             batch_llm_size=get_int("BATCH_LLM_SIZE", 5),
             enable_batch_llm=get_bool("ENABLE_BATCH_LLM", True),
             batch_llm_fallback=get_bool("BATCH_LLM_FALLBACK", True),
+            # P10新增：QA导师模式参数
+            enable_qa_mentor=get_bool("ENABLE_QA_MENTOR", False),
+            qa_approval_enabled=get_bool("QA_APPROVAL_ENABLED", False),
+            max_revision_cycles=get_int("MAX_REVISION_CYCLES", 3),
+            qa_llm_model=os.getenv("QA_LLM_MODEL", "deepseek-reasoner"),
+            worker_llm_model=os.getenv("WORKER_LLM_MODEL", "deepseek-chat"),
+            qa_llm_temperature=get_float("QA_LLM_TEMPERATURE", 0.7),
+            worker_llm_temperature=get_float("WORKER_LLM_TEMPERATURE", 0.0),
+            enable_qa_reasoning_trace=get_bool("ENABLE_QA_REASONING_TRACE", True),
         )
 
     @classmethod
@@ -236,6 +271,15 @@ class ExtractionConfig:
             batch_llm_size=config_dict.get("batch_llm_size", 5),
             enable_batch_llm=config_dict.get("enable_batch_llm", True),
             batch_llm_fallback=config_dict.get("batch_llm_fallback", True),
+            # P10新增：QA导师模式参数
+            enable_qa_mentor=config_dict.get("enable_qa_mentor", False),
+            qa_approval_enabled=config_dict.get("qa_approval_enabled", False),
+            max_revision_cycles=config_dict.get("max_revision_cycles", 3),
+            qa_llm_model=config_dict.get("qa_llm_model", "deepseek-reasoner"),
+            worker_llm_model=config_dict.get("worker_llm_model", "deepseek-chat"),
+            qa_llm_temperature=config_dict.get("qa_llm_temperature", 0.7),
+            worker_llm_temperature=config_dict.get("worker_llm_temperature", 0.0),
+            enable_qa_reasoning_trace=config_dict.get("enable_qa_reasoning_trace", True),
         )
 
     def to_dict(self) -> dict:
@@ -274,6 +318,15 @@ class ExtractionConfig:
             "batch_llm_size": self.batch_llm_size,
             "enable_batch_llm": self.enable_batch_llm,
             "batch_llm_fallback": self.batch_llm_fallback,
+            # P10新增：QA导师模式参数
+            "enable_qa_mentor": self.enable_qa_mentor,
+            "qa_approval_enabled": self.qa_approval_enabled,
+            "max_revision_cycles": self.max_revision_cycles,
+            "qa_llm_model": self.qa_llm_model,
+            "worker_llm_model": self.worker_llm_model,
+            "qa_llm_temperature": self.qa_llm_temperature,
+            "worker_llm_temperature": self.worker_llm_temperature,
+            "enable_qa_reasoning_trace": self.enable_qa_reasoning_trace,
         }
 
 

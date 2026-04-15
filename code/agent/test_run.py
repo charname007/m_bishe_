@@ -422,6 +422,141 @@ async def test_joint_extraction_with_full_self_check():
         return None
 
 
+async def test_qa_mentor_mode():
+    """
+    P10新增测试：QA导师模式
+
+    测试：
+    1. QA导师节点使用Reasoner模型进行深度分析
+    2. 后续节点（Joint_NER_RE）使用Chat模型抽取
+    3. QA审批节点审批结果，决定是否需要修改
+    4. 修改循环机制
+    """
+    print("\n" + "=" * 60)
+    print("[测试P10] QA导师模式")
+    print("=" * 60)
+
+    from agent.agents.workflow import build_qa_mentor_workflow
+
+    # 创建两个LLM实例
+    qa_llm = create_llm()  # 用于导师节点（实际部署时使用deepseek-reasoner）
+    worker_llm = create_llm()  # 用于工作节点（实际部署时使用deepseek-chat）
+
+    config = ExtractionConfig(
+        enable_qa_mentor=True,
+        enable_qa_scaffold=True,
+        enable_filter=True,
+        enable_normalize=True,
+        max_revision_cycles=3,
+        qa_llm_model="deepseek-reasoner",
+        worker_llm_model="deepseek-chat",
+    )
+
+    workflow = build_qa_mentor_workflow(qa_llm, worker_llm, config)
+
+    # 测试语料
+    corpus_id = "test_p10_mentor"
+    raw_text = "光谷步行街很热闹，有很多人在那里逛街吃饭，旁边就是光谷广场地铁站"
+
+    initial_state = create_initial_state(corpus_id, raw_text)
+
+    # 添加P10导师模式所需的初始字段
+    initial_state.update({
+        "mentor_guidance": {},
+        "qa_approval_result": {},
+        "integrated_semantic_summary": "",
+        "revision_feedbacks": [],
+        "revision_cycle_count": 0,
+        "max_revision_cycles": 3,
+        "pending_approval_nodes": [],
+        "qa_llm_model": "deepseek-reasoner",
+        "worker_llm_model": "deepseek-chat",
+    })
+
+    print(f"\n[输入] 语料ID: {corpus_id}")
+    print(f"[输入] 原文: {raw_text}")
+    print(f"[配置] enable_qa_mentor=True, max_revision_cycles=3")
+
+    thread_config = {"configurable": {"thread_id": f"test_{corpus_id}_{os.getpid()}"}}
+
+    try:
+        result = await workflow.ainvoke(initial_state, thread_config)
+
+        print("\n" + "-" * 40)
+        print("[输出结果]")
+        print("-" * 40)
+
+        # Filter 结果
+        fr = result.get("filter_result", {})
+        print(f"\n[Filter] is_valid: {fr.get('is_valid')}")
+
+        # Normalize 结果
+        nr = result.get("normalize_result", {})
+        print(f"\n[Normalize] normalized_text: {nr.get('normalized_text')}")
+
+        # QA导师脚手架结果
+        mentor_result = result.get("qa_scaffold_result", {})  # 导师模式复用qa_scaffold_result字段
+        print(f"\n[QA_Mentor] semantic_summary: {mentor_result.get('semantic_summary')}")
+        print(f"\n[QA_Mentor] overall_confidence: {mentor_result.get('overall_confidence')}")
+        if mentor_result.get("entity_hints"):
+            print(f"\n[QA_Mentor] entity_hints: {mentor_result.get('entity_hints')}")
+        if mentor_result.get("relation_hints"):
+            print(f"\n[QA_Mentor] relation_hints: {mentor_result.get('relation_hints')}")
+
+        # 导师指导信息
+        mg = result.get("mentor_guidance", {})
+        if mg:
+            print(f"\n[MentorGuidance] semantic_focus: {mg.get('semantic_focus')}")
+            print(f"\n[MentorGuidance] entity_priorities: {mg.get('entity_priorities')}")
+            print(f"\n[MentorGuidance] quality_standards: {mg.get('quality_standards')}")
+
+        # 联合抽取结果
+        jer = result.get("joint_extraction_result", {})
+        print(f"\n[Joint_NER_RE] extraction_strategy: {result.get('extraction_strategy')}")
+        print(f"\n[Joint_NER_RE] entities ({len(jer.get('entities', []))} 个):")
+        for e in jer.get("entities", []):
+            print(f"  - {e.get('name')} [{e.get('type')}]")
+        print(f"\n[Joint_NER_RE] triples ({len(jer.get('triples', []))} 条):")
+        for t in jer.get("triples", []):
+            print(f"  - <{t.get('head')}, {t.get('relation')}, {t.get('tail')}>")
+
+        # QA审批结果
+        qa_approval = result.get("qa_approval_result", {})
+        if qa_approval:
+            print(f"\n[QA_Approval] overall_status: {qa_approval.get('overall_status')}")
+            print(f"\n[QA_Approval] overall_confidence: {qa_approval.get('overall_confidence')}")
+            joint_approval = qa_approval.get("joint_approval", {})
+            if joint_approval:
+                print(f"\n[QA_Approval-Joint] approval_status: {joint_approval.get('approval_status')}")
+                if joint_approval.get("feedbacks"):
+                    print(f"\n[QA_Approval-Joint] feedbacks ({len(joint_approval.get('feedbacks'))} 条)")
+                    for fb in joint_approval.get("feedbacks"):
+                        print(f"  - [{fb.get('severity')}] {fb.get('description')}: {fb.get('suggestion')}")
+
+        # 修改循环计数
+        revision_count = result.get("revision_cycle_count", 0)
+        print(f"\n[Revision] 循环次数: {revision_count}")
+
+        # 验证
+        if result.get("mentor_guidance"):
+            print("\n[测试P10] 导师指导生成成功 [OK]")
+        else:
+            print("\n[测试P10] 导师指导未生成 [WARN]")
+
+        if qa_approval.get("overall_status") in ["approved", "needs_revision", "rejected"]:
+            print("\n[测试P10] QA审批流程正常 [OK]")
+        else:
+            print("\n[测试P10] QA审批结果异常 [WARN]")
+
+        return result
+
+    except Exception as e:
+        print(f"\n[错误] 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 async def main():
     """运行所有测试"""
     print("\n" + "=" * 60)
@@ -448,6 +583,9 @@ async def main():
 
     # 测试 7: P9联合抽取 + Reflexion + 全Self-Check模式
     await test_joint_extraction_with_full_self_check()
+
+    # 测试 8: P10 QA导师模式
+    await test_qa_mentor_mode()
 
     print("\n" + "=" * 60)
     print("所有测试完成")

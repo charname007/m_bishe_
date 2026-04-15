@@ -40,6 +40,10 @@ from .nodes import (
     # P9新增：Filter/Normalize二次检查节点（可选）
     create_self_check_filter_node,
     create_self_check_normalize_node,
+    # P10新增：QA导师节点
+    create_qa_mentor_node,
+    create_qa_approval_node,
+    create_revision_joint_node,
 )
 
 
@@ -2038,3 +2042,256 @@ async def process_corpus_in_batches(
     )
 
     return stats
+
+
+# ===== P10新增：QA导师工作流 =====
+
+def route_after_qa_mentor(state: CorpusState) -> str:
+    """QA导师后路由"""
+    if state.get("error"):
+        return "joint_ner_re"
+
+    qa_result = state.get("qa_scaffold_result", {})
+    should_skip = qa_result.get("should_skip_detailed_extraction", False)
+
+    if should_skip:
+        logger.info(f"[QA_Mentor-Route] 建议跳过详细抽取")
+        return END
+    else:
+        logger.info(f"[QA_Mentor-Route] 继续到联合抽取")
+        return "joint_ner_re"
+
+
+def route_after_qa_approval(state: CorpusState) -> str:
+    """QA审批后路由 - 决定是否进入修改循环"""
+
+    if state.get("error"):
+        return END
+
+    revision_cycle_count = state.get("revision_cycle_count", 0)
+    max_revision_cycles = state.get("max_revision_cycles", 3)
+
+    approval_result = state.get("qa_approval_result", {})
+    overall_status = approval_result.get("overall_status", "approved")
+    retry_suggested = approval_result.get("retry_suggested", False)
+    retry_target_nodes = approval_result.get("retry_target_nodes", [])
+
+    # 达到最大修改轮次，强制结束
+    if revision_cycle_count >= max_revision_cycles:
+        logger.warning(f"[QA_Approval-Route] 达到最大修改轮次 {revision_cycle_count}/{max_revision_cycles}")
+        return END
+
+    # 审批通过，结束
+    if overall_status == "approved" and not retry_suggested:
+        logger.info(f"[QA_Approval-Route] 审批通过")
+        return END
+
+    # 需要修改
+    if retry_suggested and retry_target_nodes:
+        target_node = retry_target_nodes[0]  # 取第一个需要修改的节点
+        logger.info(f"[QA_Approval-Route] 需要修改: {target_node}")
+
+        if target_node == "joint_ner_re":
+            return "revision_joint"
+        elif target_node == "eval":
+            return "eval"  # 重新评估
+        elif target_node == "label":
+            return "label"  # 重新标注
+
+    # 默认结束
+    return END
+
+
+def route_after_revision_joint(state: CorpusState) -> str:
+    """修改联合抽取后路由"""
+    if state.get("error"):
+        return "eval"
+
+    # 修改后需要重新评估
+    logger.info(f"[Revision_Joint-Route] 继续到评估")
+    return "eval"
+
+
+def build_qa_mentor_workflow(
+    qa_llm: Any,
+    worker_llm: Any,
+    config: ExtractionConfig
+) -> CompiledStateGraph:
+    """
+    构建QA导师模式工作流
+
+    流程：
+    START → Filter → Normalize → QA_Mentor → Joint_NER_RE → Eval → Label → QA_Approval
+            ↑                                                    ↓
+            └──────────── Revision Loop (if needed) ─────────────┘
+
+    Args:
+        qa_llm: QA导师使用的LLM（如DeepSeek Reasoner）
+        worker_llm: 后续节点使用的LLM（如DeepSeek Chat）
+        config: 配置实例
+
+    Returns:
+        CompiledStateGraph
+    """
+    builder = StateGraph(CorpusState)
+
+    # 创建节点
+    qa_mentor_node = create_qa_mentor_node(qa_llm, config)
+    qa_approval_node = create_qa_approval_node(qa_llm, config)
+    joint_ner_re_node = create_joint_ner_re_node(worker_llm)
+    eval_node = create_eval_simplified_node(worker_llm)
+    label_node = create_label_node(worker_llm)
+    revision_joint_node = create_revision_joint_node(worker_llm)
+
+    # 添加节点
+    builder.add_node("qa_mentor", qa_mentor_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("joint_ner_re", joint_ner_re_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("label", label_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("qa_approval", qa_approval_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node("revision_joint", revision_joint_node, retry_policy=LLM_RETRY_POLICY)
+
+    # 前置节点（可选）- 支持同时启用Filter和Normalize
+    if config.enable_filter:
+        filter_node = create_filter_node(worker_llm)
+        builder.add_node("filter", filter_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_edge(START, "filter")
+        # 根据是否启用normalize选择路由
+        if config.enable_normalize:
+            builder.add_conditional_edges("filter", route_after_filter_to_normalize)
+        else:
+            builder.add_conditional_edges("filter", route_after_filter_to_joint)
+
+    if config.enable_normalize:
+        normalize_node = create_normalize_node(worker_llm)
+        builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
+        # 如果没有filter，normalize是起点；如果有filter，filter会路由到normalize
+        if not config.enable_filter:
+            builder.add_edge(START, "normalize")
+        builder.add_edge("normalize", "qa_mentor")
+
+    # 如果没有前置节点，直接从START到qa_mentor
+    if not config.enable_filter and not config.enable_normalize:
+        builder.add_edge(START, "qa_mentor")
+
+    # QA导师 → 联合抽取
+    builder.add_conditional_edges(
+        "qa_mentor",
+        route_after_qa_mentor,
+        {"joint_ner_re": "joint_ner_re", END: END}
+    )
+
+    # 联合抽取 → 评估
+    builder.add_edge("joint_ner_re", "eval")
+
+    # 评估 → 标注
+    builder.add_edge("eval", "label")
+
+    # 标注 → QA审批
+    builder.add_edge("label", "qa_approval")
+
+    # QA审批 → 修改循环或结束
+    builder.add_conditional_edges(
+        "qa_approval",
+        route_after_qa_approval,
+        {
+            "revision_joint": "revision_joint",
+            "eval": "eval",
+            "label": "label",
+            END: END,
+        }
+    )
+
+    # 修改联合抽取 → 评估
+    builder.add_conditional_edges(
+        "revision_joint",
+        route_after_revision_joint,
+        {"eval": "eval"}
+    )
+
+    logger.info("[Workflow] QA导师模式工作流构建完成")
+
+    return builder.compile(checkpointer=InMemorySaver())
+
+
+async def process_corpus_with_qa_mentor(
+    qa_llm: Any,
+    worker_llm: Any,
+    corpus: Dict,
+    config: ExtractionConfig
+) -> CorpusState:
+    """
+    使用QA导师模式处理单条语料
+
+    Args:
+        qa_llm: QA导师LLM
+        worker_llm: 工作节点LLM
+        corpus: 语料字典 {"id": "...", "text": "..."}
+        config: 配置实例
+
+    Returns:
+        处理结果
+    """
+    workflow = build_qa_mentor_workflow(qa_llm, worker_llm, config)
+
+    corpus_id = _validate_corpus_id(corpus.get("id"))
+    raw_text = _validate_corpus_text(corpus.get("text", ""), config)
+
+    initial_state: CorpusState = {
+        "corpus_id": corpus_id,
+        "raw_text": raw_text,
+        "_config_enable_normalize": config.enable_normalize,
+        "_config_enable_qa_scaffold": config.enable_qa_scaffold,
+        "filter_result": {},
+        "normalize_result": {},
+        "normalized_text": "",
+        "qa_scaffold_result": {},
+        "semantic_summary": "",
+        "qa_entity_hints": [],
+        "qa_relation_hints": [],
+        "qa_context_dependencies": [],
+        "mentor_guidance": {},
+        "qa_approval_result": {},
+        "integrated_semantic_summary": "",
+        "revision_feedbacks": [],
+        "revision_cycle_count": 0,
+        "max_revision_cycles": config.max_revision_cycles,
+        "pending_approval_nodes": [],
+        "reasoning_trace": "",
+        "joint_extraction_result": {},
+        "extraction_strategy": "",
+        "self_check_filter_result": {},
+        "self_check_normalize_result": {},
+        "self_check_qa_result": {},
+        "self_check_joint_result": {},
+        "self_check_eval_result": {},
+        "self_check_label_result": {},
+        "reflection_text": "",
+        "improvement_strategy": "",
+        "reflection_history": [],
+        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+        "triples": [],
+        "eval_scores": [],
+        "eval_passed": False,
+        "corrected_triples": [],
+        "self_check_ner_result": {},
+        "self_check_re_result": {},
+        "final_entities": [],
+        "final_triples": [],
+        "verification_confidence": "medium",
+        "retry_count": 0,
+        "max_retries": DEFAULT_MAX_RETRIES,
+        "retry_reason": "",
+        "retry_suggested": False,
+        "problem_entities": [],
+        "problem_triples": [],
+        "needs_review": False,
+        "entity_attrs": {},
+        "relation_attrs": {},
+        "current_step": StepEnum.QA_MENTOR,
+        "error": None,
+    }
+
+    thread_config = {"configurable": {"thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+    result = await workflow.ainvoke(initial_state, thread_config)
+    return cast(CorpusState, result)

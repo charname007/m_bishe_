@@ -39,6 +39,10 @@ class Settings:
         # ===== 文件路径配置 =====
         self.SHPFILES_DIR = os.getenv('SHPFILES_DIR', './shpfiles')
 
+        # ===== 高德地图API配置 =====
+        self.AMAP_API_KEY = os.getenv('AMAP_API_KEY', 'ae33c15f97061d54d84b1be0ef8a3893')
+        self.AMAP_REGION_ADCODE = os.getenv('AMAP_REGION_ADCODE', '420111')  # 洪山区默认
+
     def get_embedding_config(self) -> dict:
         """获取嵌入模型配置"""
         return {
@@ -71,6 +75,13 @@ class Settings:
             "api_key": self.DEEPSEEK_API_KEY,
             "base_url": self.DEEPSEEK_API_BASE_URL,
             "model": self.DEEPSEEK_MODEL
+        }
+
+    def get_amap_config(self) -> dict:
+        """获取高德地图API配置"""
+        return {
+            "api_key": self.AMAP_API_KEY,
+            "region": self.AMAP_REGION_ADCODE
         }
 
 

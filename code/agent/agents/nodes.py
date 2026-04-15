@@ -71,6 +71,10 @@ from .prompts import (
     SELF_CHECK_JOINT_PROMPT, SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
     format_joint_entities, format_joint_triples, format_qa_pairs_for_check, format_eval_scores_for_check,
     format_reflection_history,
+    # P10新增：QA导师提示词和格式化函数
+    QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
+    format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
+    format_eval_for_approval, format_label_for_approval, format_revision_feedbacks,
 )
 
 
@@ -2790,3 +2794,338 @@ async def process_corpus_batch_with_llm(
         "fallback_corpus_list": fallback_corpus_list,
         "needs_single_processing": len(fallback_corpus_list) > 0,
     }
+
+
+# ===== P10新增：QA导师节点 =====
+
+def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
+    """
+    创建QA导师节点 - 使用强模型进行深度语义分析
+
+    职责：
+    1. 生成5W1H问答脚手架
+    2. 输出导师指导信息（语义关注点、实体优先级、质量标准）
+    3. 设定预期约束
+    4. 保存推理过程（可选）
+    """
+    from .schemas import QAMentorScaffoldResult
+    parser = PydanticOutputParser(pydantic_object=QAMentorScaffoldResult)
+
+    async def qa_mentor_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """QA导师节点：深度语义分析 + 导师指导"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[QA_Mentor] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "qa_mentor",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始导师深度分析"
+        })
+
+        try:
+            # 使用归一化后的文本
+            text_for_processing = _get_text_for_processing(state)
+
+            # 调用LLM
+            prompt_text = QA_MENTOR_PROMPT.invoke({
+                "normalized_text": text_for_processing,
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: QAMentorScaffoldResult = parser.parse(response.content)
+
+            logger.info(
+                f"[QA_Mentor] 完成: {len(result.qa_pairs)} 个问答对, "
+                f"{len(result.entity_hints)} 个实体提示, "
+                f"置信度={result.overall_confidence}"
+            )
+
+            # 发送完成事件
+            writer({
+                "step": "qa_mentor",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "qa_count": len(result.qa_pairs),
+                "entity_hints": result.entity_hints,
+                "relation_hints": result.relation_hints,
+                "confidence": result.overall_confidence,
+                "has_mentor_guidance": result.mentor_guidance is not None
+            })
+
+            # 根据结果决定下一步
+            if result.should_skip_detailed_extraction:
+                logger.info(f"[QA_Mentor] 建议跳过详细抽取: {corpus_id}")
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                    "reasoning_trace": result.reasoning_trace,
+                    "qa_entity_hints": result.entity_hints,
+                    "qa_relation_hints": result.relation_hints,
+                    "qa_context_dependencies": result.context_dependencies,
+                    "current_step": StepEnum.DONE,
+                }
+            else:
+                return {
+                    "qa_scaffold_result": result.model_dump(),
+                    "semantic_summary": result.semantic_summary,
+                    "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                    "reasoning_trace": result.reasoning_trace,
+                    "qa_entity_hints": result.entity_hints,
+                    "qa_relation_hints": result.relation_hints,
+                    "qa_context_dependencies": result.context_dependencies,
+                    "current_step": StepEnum.JOINT_NER_RE,
+                }
+
+        except Exception as e:
+            logger.error(f"[QA_Mentor] 处理失败: {e}")
+            writer({
+                "step": "qa_mentor",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "qa_scaffold_result": {},
+                "semantic_summary": "",
+                "mentor_guidance": {},
+                "qa_entity_hints": [],
+                "qa_relation_hints": [],
+                "qa_context_dependencies": [],
+                "error": str(e),
+                "current_step": StepEnum.JOINT_NER_RE,  # 失败时继续
+            }
+
+    return qa_mentor_node
+
+
+def create_qa_approval_node(llm: Any, config: ExtractionConfig):
+    """
+    创建QA审批节点 - 审批后续节点的抽取结果
+
+    职责：
+    1. 校验联合抽取结果
+    2. 校验评估结果
+    3. 校验标注结果
+    4. 输出审批状态和改进反馈
+    5. 整合语义脚手架
+    """
+    from .schemas import QAApprovalResult
+    parser = PydanticOutputParser(pydantic_object=QAApprovalResult)
+
+    async def qa_approval_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """QA审批节点：审批后续节点结果"""
+        corpus_id = state['corpus_id']
+        revision_cycle_count = state.get('revision_cycle_count', 0)
+        max_revision_cycles = state.get('max_revision_cycles', config.max_revision_cycles)
+
+        logger.info(f"[QA_Approval] 审批语料: {corpus_id}, 修改轮次: {revision_cycle_count}/{max_revision_cycles}")
+
+        writer({
+            "step": "qa_approval",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "revision_cycle": revision_cycle_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            # 格式化各节点结果用于审批
+            joint_result = state.get("joint_extraction_result", {})
+            eval_result = {
+                "eval_passed": state.get("eval_passed", False),
+                "corrected_triples": state.get("corrected_triples", []),
+            }
+            label_result = {
+                "entity_attrs": state.get("entity_attrs", {}),
+                "relation_attrs": state.get("relation_attrs", {}),
+            }
+
+            # 导师指导
+            mentor_guidance = state.get("mentor_guidance", {})
+            semantic_summary = state.get("semantic_summary", "")
+
+            # 历史反馈
+            revision_feedbacks = state.get("revision_feedbacks", [])
+
+            # 调用LLM进行审批
+            prompt_text = QA_APPROVAL_PROMPT.invoke({
+                "raw_text": text,
+                "mentor_guidance": format_mentor_guidance(mentor_guidance),
+                "semantic_summary": semantic_summary,
+                "joint_result": format_joint_for_approval(joint_result),
+                "eval_result": format_eval_for_approval(eval_result),
+                "label_result": format_label_for_approval(label_result),
+                "previous_feedbacks": format_revision_feedbacks(revision_feedbacks),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: QAApprovalResult = parser.parse(response.content)
+
+            logger.info(
+                f"[QA_Approval] 完成: overall_status={result.overall_status}, "
+                f"retry_suggested={result.retry_suggested}, "
+                f"retry_target_nodes={result.retry_target_nodes}"
+            )
+
+            writer({
+                "step": "qa_approval",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "overall_status": result.overall_status.value,
+                "overall_confidence": result.overall_confidence,
+                "retry_suggested": result.retry_suggested,
+                "revision_cycle": revision_cycle_count + 1
+            })
+
+            # 收集反馈
+            all_feedbacks = state.get("revision_feedbacks", [])
+            for f in result.all_feedbacks:
+                all_feedbacks.append(f.model_dump())
+
+            # 更新语义脚手架
+            integrated_semantic_summary = result.integrated_semantic_summary
+            if integrated_semantic_summary:
+                semantic_summary = integrated_semantic_summary
+
+            return {
+                "qa_approval_result": result.model_dump(),
+                "integrated_semantic_summary": integrated_semantic_summary,
+                "semantic_summary": semantic_summary,
+                "revision_feedbacks": all_feedbacks,
+                "revision_cycle_count": revision_cycle_count + 1,
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "pending_approval_nodes": result.retry_target_nodes,
+                "current_step": StepEnum.DONE,  # 默认结束，路由会决定是否重试
+            }
+
+        except Exception as e:
+            logger.error(f"[QA_Approval] 处理失败: {e}")
+            writer({
+                "step": "qa_approval",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "qa_approval_result": {},
+                "error": str(e),
+                "revision_cycle_count": revision_cycle_count + 1,
+                "current_step": StepEnum.DONE,
+            }
+
+    return qa_approval_node
+
+
+def create_revision_joint_node(llm: Any):
+    """
+    创建修改联合抽取节点 - 根据QA反馈改进抽取结果
+
+    职责：
+    1. 根据反馈补充遗漏实体
+    2. 删除幻觉三元组
+    3. 修正关系错误
+    4. 完善证据
+    """
+    parser = PydanticOutputParser(pydantic_object=JointExtractionResult)
+
+    async def revision_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """修改联合抽取节点"""
+        corpus_id = state['corpus_id']
+        revision_cycle = state.get('revision_cycle_count', 0)
+        logger.info(f"[Revision_Joint] 修改抽取: {corpus_id}, 修改轮次: {revision_cycle}")
+
+        writer({
+            "step": "revision_joint",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "revision_cycle": revision_cycle
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+
+            # 获取QA反馈
+            revision_feedbacks = state.get("revision_feedbacks", [])
+            recent_feedbacks = revision_feedbacks[-3:] if revision_feedbacks else []
+
+            # 获取语义脚手架
+            semantic_summary = state.get("semantic_summary", "")
+            entity_hints = state.get("qa_entity_hints", [])
+            relation_hints = state.get("qa_relation_hints", [])
+
+            # 获取之前的抽取结果
+            previous_entities = state.get("entities", {})
+            previous_triples = state.get("triples", [])
+
+            # 调用LLM改进
+            prompt_text = REVISION_JOINT_PROMPT.invoke({
+                "raw_text": text,
+                "feedbacks": format_feedbacks_for_revision(recent_feedbacks),
+                "semantic_summary": semantic_summary,
+                "previous_entities": format_entities(previous_entities),
+                "previous_triples": format_triples(previous_triples),
+                "entity_hints": format_entity_hints(entity_hints),
+                "relation_hints": format_relation_hints(relation_hints),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: JointExtractionResult = parser.parse(response.content)
+
+            # 转换为现有格式
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            for e in result.entities:
+                if e.type in entities_dict:
+                    entities_dict[e.type].append(e.name)
+
+            triples_list = [
+                {
+                    "head": t.head,
+                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "tail": t.tail,
+                    "evidence": t.evidence,
+                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,
+                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                }
+                for t in result.triples
+            ]
+
+            logger.info(
+                f"[Revision_Joint] 完成: {len(result.entities)}个实体, "
+                f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
+            )
+
+            writer({
+                "step": "revision_joint",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "entity_count": len(result.entities),
+                "triple_count": len(result.triples),
+                "revision_cycle": revision_cycle
+            })
+
+            return {
+                "entities": entities_dict,
+                "triples": triples_list,
+                "joint_extraction_result": result.model_dump(),
+                "extraction_strategy": "joint_revision",
+                "current_step": StepEnum.EVAL,
+            }
+
+        except Exception as e:
+            logger.error(f"[Revision_Joint] 处理失败: {e}")
+            writer({
+                "step": "revision_joint",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "error": str(e),
+                "current_step": StepEnum.EVAL,
+            }
+
+    return revision_joint_node

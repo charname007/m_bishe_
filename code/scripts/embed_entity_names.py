@@ -173,16 +173,18 @@ def update_embeddings(pg_client: PostgresClient, ids: List[int], embeddings: np.
 
     with pg_client.conn.cursor() as cur:
         # 使用 execute_values 批量更新
-        # data 格式: [(id, [float, float, ...]), ...]
+        # 注意：PostgreSQL 不支持在 VALUES 子句中定义列类型
+        # 使用更简洁的SQL语句
         execute_values(
             cur,
             """
-            UPDATE geo_entity_names SET embedding = data.embedding::vector
-            FROM (VALUES %s) AS data (id INT, embedding FLOAT[])
-            WHERE geo_entity_names.id = data.id
+            UPDATE geo_entity_names AS g
+            SET embedding = v.embedding::vector
+            FROM (VALUES %s) AS v(id, embedding)
+            WHERE g.id = v.id
             """,
             data,
-            template="(%s, %s)"
+            template="(%s, %s::float[])"
         )
         pg_client.conn.commit()
 
