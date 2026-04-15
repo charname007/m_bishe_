@@ -362,3 +362,147 @@ class TestLabelNode:
         mock_writer = MagicMock()
         result = await label_node(state, mock_writer)
         assert result["current_step"] == StepEnum.DONE
+
+
+# ===== v3.2重构新增：normalize_relation_type 测试 =====
+
+class TestNormalizeRelationType:
+    """测试 normalize_relation_type 函数"""
+
+    def test_enum_input(self):
+        """直接输入枚举值"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+        result = normalize_relation_type(RelationTypeEnum.LOCATED)
+        assert result == RelationTypeEnum.LOCATED
+
+    def test_standard_string(self):
+        """标准字符串输入"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+        result = normalize_relation_type("位于")
+        assert result == RelationTypeEnum.LOCATED
+
+    def test_variant_string(self):
+        """变体字符串映射"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+        # 空间关系变体
+        assert normalize_relation_type("在") == RelationTypeEnum.LOCATED
+        assert normalize_relation_type("地处") == RelationTypeEnum.LOCATED
+        assert normalize_relation_type("属于") == RelationTypeEnum.LOCATED
+
+        # 方位关系变体
+        assert normalize_relation_type("旁边") == RelationTypeEnum.ORIENTATION
+        assert normalize_relation_type("附近") == RelationTypeEnum.ORIENTATION
+        assert normalize_relation_type("东边") == RelationTypeEnum.ORIENTATION
+
+        # 对比关系变体
+        assert normalize_relation_type("比...好") == RelationTypeEnum.BETTER_THAN
+        assert normalize_relation_type("类似") == RelationTypeEnum.SIMILAR_TO
+        assert normalize_relation_type("不如") == RelationTypeEnum.WORSE_THAN
+
+    def test_null_input(self):
+        """空输入抛出异常"""
+        from agent.agents.schemas import normalize_relation_type
+        with pytest.raises(ValueError, match="relation 不能为空"):
+            normalize_relation_type(None)
+
+    def test_invalid_input(self):
+        """无效输入抛出异常"""
+        from agent.agents.schemas import normalize_relation_type
+        with pytest.raises(ValueError, match="无效的关系类型"):
+            normalize_relation_type("无效关系")
+
+    def test_mapping_consistency(self):
+        """映射表完整性检查"""
+        from agent.agents.schemas import RELATION_VARIANT_MAPPING, RelationTypeEnum
+
+        # 所有映射目标应该是有效的关系类型
+        valid_relations = [e.value for e in RelationTypeEnum]
+        for variant, target in RELATION_VARIANT_MAPPING.items():
+            assert target in valid_relations, f"映射目标 '{target}' 不是有效关系类型"
+
+
+# ===== v3.2重构新增：NodeTemplate 测试 =====
+
+class TestNodeTemplate:
+    """测试 NodeTemplate 基类"""
+
+    def test_get_text_for_processing_normalized(self):
+        """优先使用归一化文本"""
+        from agent.agents.node_template import get_text_for_processing
+
+        state = {
+            "raw_text": "原始文本",
+            "normalized_text": "归一化文本"
+        }
+        result = get_text_for_processing(state)
+        assert result == "归一化文本"
+
+    def test_get_text_for_processing_raw(self):
+        """无归一化文本时使用原始文本"""
+        from agent.agents.node_template import get_text_for_processing
+
+        state = {
+            "raw_text": "原始文本",
+            "normalized_text": ""
+        }
+        result = get_text_for_processing(state)
+        assert result == "原始文本"
+
+    def test_get_text_for_processing_empty_normalized(self):
+        """归一化文本为空字符串时使用原始文本"""
+        from agent.agents.node_template import get_text_for_processing
+
+        state = {
+            "raw_text": "原始文本",
+            "normalized_text": "   "  # 仅空白字符
+        }
+        result = get_text_for_processing(state)
+        assert result == "原始文本"
+
+    def test_type_aliases_exist(self):
+        """类型别名正确导出"""
+        from agent.agents.node_template import StateDict, ResultDict, NodeFunc
+
+        # 类型别名应该是 Dict 或 Callable 的别名
+        # 在 Python typing 中，TypeAlias 可以直接检查其类型
+        import typing
+        assert StateDict is not None
+        assert ResultDict is not None
+        assert NodeFunc is not None
+
+
+# ===== v3.2重构新增：子状态组合测试 =====
+
+class TestSubstatesComposition:
+    """测试 CorpusState 子状态组合"""
+
+    def test_all_substates_importable(self):
+        """所有子状态类可导入"""
+        from agent.agents.state import (
+            InputState, ConfigState, FilterState, NormalizeState,
+            QAScaffoldState, ExtractState, EvalState, SelfCheckState,
+            ReflexionState, RetryState, QAMentorState, AlignmentState,
+            OutputState, ControlState,
+        )
+        # 所有子状态类应该存在
+        assert InputState is not None
+        assert ControlState is not None
+
+    def test_corpus_state_includes_all_fields(self):
+        """CorpusState 包含所有子状态字段"""
+        from agent.agents.state import CorpusState
+
+        # 检查关键字段存在（TypedDict 继承会合并字段）
+        annotations = CorpusState.__annotations__
+
+        # 输入状态字段
+        assert "corpus_id" in annotations
+        assert "raw_text" in annotations
+
+        # 抽取状态字段
+        assert "entities" in annotations
+        assert "triples" in annotations
+
+        # 控制状态字段
+        assert "current_step" in annotations
+        assert "error" in annotations

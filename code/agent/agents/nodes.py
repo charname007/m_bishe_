@@ -693,7 +693,8 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
     2. 关系类型有效性：关系必须在预定义类型中
     3. 基本逻辑检查：某些关系类型有约束（如"连接"需要两个道路实体）
     """
-    # v2.2改进：使用完整的18个关系类型列表
+    # v3.2精简版：使用完整的7个关系类型列表
+    # 关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件
     VALID_RELATIONS = RELATION_TYPES  # 从 state.py 导入
 
     all_entities = []
@@ -965,14 +966,25 @@ def create_label_node(llm: Any):
                 }
 
             # v3.2精简版：仅提取schema定义的属性
+            # 方位关系属性：距离值、方向值、联动推荐
+            # 功能关系属性：时段、适合人群、具有限制、情感倾向
+            # 对比关系属性：维度
             relation_attrs = {}
             for key, attrs in result.relations.items():
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
                     relation_attrs[normalized_key] = {
-                        "空间精度": attrs.空间精度,
-                        "对比可靠性": attrs.对比可靠性,
-                        "事件影响度": attrs.事件影响度,
+                        # 方位关系属性（Schema v3.2）
+                        "距离值": attrs.距离值,
+                        "方向值": attrs.方向值,
+                        "联动推荐": attrs.联动推荐,
+                        # 功能关系属性（Schema v3.2）
+                        "时段": attrs.时段,
+                        "适合人群": attrs.适合人群,
+                        "具有限制": attrs.具有限制 or [],
+                        "情感倾向": attrs.情感倾向,
+                        # 对比关系属性（Schema v3.2）
+                        "维度": attrs.维度 or [],
                     }
                 else:
                     # 无法解析时保留原始 key
@@ -1157,20 +1169,26 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 relation_attrs = corpus_state.get("relation_attrs", {})
                 corrected_triples = corpus_state.get("corrected_triples", [])
 
-                # v3.2精简版：关系类型到细分属性的映射（8个关系）
-                RELATION_SUBTYPE_MAP = {
-                    # 空间基础关系（3个）
-                    "位于": "空间精度",
-                    "包含": "空间精度",
-                    "方位": "空间精度",       # 合并了相邻/距离/方向
-                    # 社交语义关系（1个）
-                    "具有功能": "功能类型",   # 原承载活动
-                    # 对比评价关系（3个）
-                    "优于": "维度",
-                    "相似": "维度",
-                    "劣于": "维度",
-                    # 事件关系（1个）
-                    "发生事件": "事件类别",
+                # v3.2精简版：关系类型属性映射（7个关系类型）
+                # Schema v3.2定义：
+                # - 位于、包含：无关系属性
+                # - 方位：距离值、方向值、联动推荐
+                # - 具有功能：时段、适合人群、具有限制、情感倾向
+                # - 优于/相似/劣于：维度
+                # - 发生事件：无关系属性（属性在事件节点上）
+                RELATION_ATTRS_MAP = {
+                    # 方位关系属性（3个属性）
+                    "方位": ["距离值", "方向值", "联动推荐"],
+                    # 功能关系属性（4个属性）
+                    "具有功能": ["时段", "适合人群", "具有限制", "情感倾向"],
+                    # 对比关系属性（1个属性）
+                    "优于": ["维度"],
+                    "相似": ["维度"],
+                    "劣于": ["维度"],
+                    # 无属性的关系
+                    "位于": [],
+                    "包含": [],
+                    "发生事件": [],  # 属性在事件节点上，非关系属性
                 }
 
                 for triple in corrected_triples:
@@ -1186,14 +1204,17 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     )
 
                     if attrs:
-                        # v2.2改进：relation_type 直接使用18种标准关系类型
+                        # v3.2精简版：relation_type 直接使用7种标准关系类型
                         triple["relation_type"] = triple.get("relation", "")
-                        # 根据关系类型选择对应的细分属性
+                        # 根据关系类型选择对应的属性集（Schema v3.2）
                         relation = triple.get("relation", "")
-                        subtype_field = RELATION_SUBTYPE_MAP.get(relation, "")
-                        triple["relation_subtype"] = attrs.get(subtype_field, "") if subtype_field else ""
-                        # 保留完整属性供下游使用
-                        triple["relation_attrs"] = attrs
+                        attr_fields = RELATION_ATTRS_MAP.get(relation, [])
+                        # 提取该关系类型的有效属性
+                        triple["relation_attrs"] = {
+                            field: attrs.get(field)
+                            for field in attr_fields
+                            if attrs.get(field) is not None
+                        }
                     all_triples.append(triple)
 
         # 实体去重

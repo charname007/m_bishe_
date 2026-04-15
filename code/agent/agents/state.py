@@ -69,29 +69,38 @@ class PhaseEnum(str, Enum):
 DEFAULT_MAX_RETRIES = 3  # 默认最大重试次数
 
 
-class CorpusState(TypedDict):
-    """单条语料处理状态 - 用于单条语料的四步骤工作流"""
-    # 输入
+# ===== 子状态定义（拆分 CorpusState） =====
+
+class InputState(TypedDict):
+    """输入状态 - 语料基本信息"""
     corpus_id: str
     raw_text: str
 
-    # P9新增：配置标记字段（用于路由函数判断后续节点是否启用）
+
+class ConfigState(TypedDict):
+    """配置状态 - 路由函数使用的标记字段"""
     _config_enable_normalize: Annotated[bool, replace_value]
     """标记：是否启用了 Normalize 节点"""
     _config_enable_qa_scaffold: Annotated[bool, replace_value]
     """标记：是否启用了 QA Scaffold 节点"""
 
-    # Step 0: Filter筛选结果（P5新增）
+
+class FilterState(TypedDict):
+    """筛选状态 - Filter 节点结果"""
     filter_result: Annotated[Dict, replace_value]
     """文本筛选结果：is_valid, skip_reason, confidence"""
 
-    # Step 0.5: Normalize归一化结果（P6新增）
+
+class NormalizeState(TypedDict):
+    """归一化状态 - Normalize 节点结果"""
     normalize_result: Annotated[Dict, replace_value]
     """文本归一化结果：normalized_text, normalizations, confidence"""
     normalized_text: Annotated[str, replace_value]
     """归一化后的文本（供后续节点使用）"""
 
-    # Step 0.7: QA Scaffold结果（P8新增）
+
+class QAScaffoldState(TypedDict):
+    """QA脚手架状态 - QA Scaffold 节点结果"""
     qa_scaffold_result: Annotated[Dict, replace_value]
     """QA脚手架结果：qa_pairs, semantic_summary, entity_hints, relation_hints"""
     semantic_summary: Annotated[str, replace_value]
@@ -103,30 +112,39 @@ class CorpusState(TypedDict):
     qa_context_dependencies: Annotated[List[str], replace_value]
     """上下文依赖：需要注意的依赖关系"""
 
-    # Step 1: NER结果
+
+class ExtractState(TypedDict):
+    """抽取状态 - NER/RE/联合抽取节点结果"""
     entities: Annotated[Dict[str, List[str]], replace_value]
-
-    # Step 2: RE结果
+    """实体识别结果"""
     triples: Annotated[List[Dict], replace_value]
-
-    # Step 3: 评估结果
-    eval_scores: Annotated[List[Dict], replace_value]
-    eval_passed: Annotated[bool, replace_value]
-    corrected_triples: Annotated[List[Dict], replace_value]
-
-    # Step 3.5: Self-Check 结果（新增）
-    self_check_ner_result: Annotated[Dict, replace_value]
-    """Self-Check-NER 校验结果"""
-    self_check_re_result: Annotated[Dict, replace_value]
-    """Self-Check-RE 校验结果"""
-
-    # P9新增：联合抽取结果
+    """关系抽取结果"""
     joint_extraction_result: Annotated[Dict, replace_value]
     """联合抽取结果（Joint NER+RE）"""
     extraction_strategy: Annotated[str, replace_value]
     """抽取策略标识：joint/pipeline"""
+    entity_attrs: Annotated[Dict[str, Dict], replace_value]
+    """实体属性"""
+    relation_attrs: Annotated[Dict[str, Dict], replace_value]
+    """关系属性"""
 
-    # P9新增：所有Self-Check结果
+
+class EvalState(TypedDict):
+    """评估状态 - Eval 节点结果"""
+    eval_scores: Annotated[List[Dict], replace_value]
+    """评分列表"""
+    eval_passed: Annotated[bool, replace_value]
+    """是否通过评估"""
+    corrected_triples: Annotated[List[Dict], replace_value]
+    """修正后的三元组"""
+
+
+class SelfCheckState(TypedDict):
+    """校验状态 - 所有 Self-Check 节点结果"""
+    self_check_ner_result: Annotated[Dict, replace_value]
+    """Self-Check-NER 校验结果"""
+    self_check_re_result: Annotated[Dict, replace_value]
+    """Self-Check-RE 校验结果"""
     self_check_filter_result: Annotated[Dict, replace_value]
     """Self-Check-Filter 校验结果（可选）"""
     self_check_normalize_result: Annotated[Dict, replace_value]
@@ -140,7 +158,9 @@ class CorpusState(TypedDict):
     self_check_label_result: Annotated[Dict, replace_value]
     """Self-Check-Label 校验结果"""
 
-    # P9新增：Reflexion反思字段
+
+class ReflexionState(TypedDict):
+    """反思状态 - Reflexion 反思机制"""
     reflection_text: Annotated[str, replace_value]
     """自然语言反思建议"""
     improvement_strategy: Annotated[str, replace_value]
@@ -148,15 +168,9 @@ class CorpusState(TypedDict):
     reflection_history: Annotated[List[str], merge_list]
     """多轮反思历史（用于迭代改进追踪）"""
 
-    # 最终输出（校验/归一化后）
-    final_entities: Annotated[List[Dict], replace_value]
-    """最终实体列表（包含别名信息）"""
-    final_triples: Annotated[List[Dict], replace_value]
-    """最终三元组列表（校验后）"""
-    verification_confidence: Annotated[str, replace_value]
-    """整体置信度: high/medium/low"""
 
-    # 反思循环控制（新增）
+class RetryState(TypedDict):
+    """重试状态 - 反思循环控制"""
     retry_count: Annotated[int, replace_value]
     """当前重试次数"""
     max_retries: Annotated[int, replace_value]
@@ -172,32 +186,29 @@ class CorpusState(TypedDict):
     needs_review: Annotated[bool, replace_value]
     """是否需要人工复核"""
 
-    # ===== QA导师模式字段（P10新增） =====
+
+class QAMentorState(TypedDict):
+    """QA导师状态 - QA导师模式（P10新增）"""
     mentor_guidance: Annotated[Dict, replace_value]
     """导师指导信息：后续节点应遵循的指导"""
-
     qa_approval_result: Annotated[Dict, replace_value]
     """QA审批结果：对各节点结果的审批"""
-
     integrated_semantic_summary: Annotated[str, replace_value]
     """整合后的语义摘要：QA审批后更新的语义理解"""
-
     revision_feedbacks: Annotated[List[Dict], merge_list]
     """修改反馈列表：QA给出的改进建议"""
-
     revision_cycle_count: Annotated[int, replace_value]
     """修改循环计数：当前修改轮次"""
-
     max_revision_cycles: Annotated[int, replace_value]
     """最大修改轮次：默认3"""
-
     pending_approval_nodes: Annotated[List[str], merge_list]
     """待审批节点列表：哪些节点需要QA审批"""
-
     reasoning_trace: Annotated[str, replace_value]
     """推理过程：Reasoner模型的输出（可选保存）"""
 
-    # P11新增：实体对齐结果
+
+class AlignmentState(TypedDict):
+    """实体对齐状态 - Entity Alignment 节点结果（P11新增）"""
     entity_alignment_result: Annotated[Dict, replace_value]
     """实体对齐结果：与数据库已有实体的匹配情况"""
     aligned_entity_ids: Annotated[Dict[str, str], replace_value]
@@ -205,13 +216,68 @@ class CorpusState(TypedDict):
     new_entity_names: Annotated[List[str], replace_value]
     """新实体名称列表：未找到匹配的实体"""
 
-    # Step 4: 属性标注
-    entity_attrs: Annotated[Dict[str, Dict], replace_value]
-    relation_attrs: Annotated[Dict[str, Dict], replace_value]
 
-    # 状态控制
+class OutputState(TypedDict):
+    """最终输出状态 - 校验/归一化后的结果"""
+    final_entities: Annotated[List[Dict], replace_value]
+    """最终实体列表（包含别名信息）"""
+    final_triples: Annotated[List[Dict], replace_value]
+    """最终三元组列表（校验后）"""
+    verification_confidence: Annotated[str, replace_value]
+    """整体置信度: high/medium/low"""
+
+
+class ControlState(TypedDict):
+    """流程控制状态 - 步骤和错误信息"""
     current_step: Annotated[StepEnum, replace_value]
+    """当前步骤"""
     error: Annotated[Optional[str], replace_value]
+    """错误信息"""
+
+
+# ===== CorpusState 组合（通过多重继承） =====
+
+class CorpusState(
+    InputState,
+    ConfigState,
+    FilterState,
+    NormalizeState,
+    QAScaffoldState,
+    ExtractState,
+    EvalState,
+    SelfCheckState,
+    ReflexionState,
+    RetryState,
+    QAMentorState,
+    AlignmentState,
+    OutputState,
+    ControlState,
+):
+    """
+    单条语料处理状态 - 通过多重 TypedDict 继承组合
+    
+    LangGraph 兼容性说明：
+    - TypedDict 多重继承会合并所有父类的字段
+    - Annotated reducer 保持不变，LangGraph 正常识别
+    - 向下兼容现有节点代码，无需修改
+    
+    子状态分组（共14个）：
+    - InputState: corpus_id, raw_text
+    - ConfigState: 配置标记字段
+    - FilterState: filter_result
+    - NormalizeState: normalize_result, normalized_text
+    - QAScaffoldState: QA脚手架相关字段
+    - ExtractState: entities, triples, joint_extraction_result, entity_attrs, relation_attrs
+    - EvalState: eval_scores, eval_passed, corrected_triples
+    - SelfCheckState: 8个 self_check_xxx_result 字段
+    - ReflexionState: reflection_text, improvement_strategy, reflection_history
+    - RetryState: retry_count, max_retries, problem_entities, problem_triples 等
+    - QAMentorState: mentor_guidance, qa_approval_result 等（P10新增）
+    - AlignmentState: entity_alignment_result, aligned_entity_ids, new_entity_names（P11新增）
+    - OutputState: final_entities, final_triples, verification_confidence
+    - ControlState: current_step, error
+    """
+    pass
 
 
 # ===== Worker处理结果 =====
@@ -274,13 +340,14 @@ ENTITY_TYPES = {
     "街区": "具有边界感的生活区域（如：街道口、华农校区）"
 }
 
-# v3.2精简版：6个关系类型
+# v3.2精简版：8个关系类型（空间基础3 + 社交语义1 + 对比评价3 + 事件1）
+# 参考：docs/semantic_schema_v3.2.md
 RELATION_TYPES = [
-    # 空间基础关系（3个）
+    # 空间基础关系（3个）—— 图谱骨架
     "位于", "包含", "方位",
-    # 社交语义关系（1个）
+    # 社交语义关系（1个）—— 图谱血肉
     "具有功能",
-    # 对比评价关系（3个）
+    # 对比评价关系（3个）—— 特色
     "优于", "相似", "劣于",
     # 事件关系（1个）
     "发生事件"

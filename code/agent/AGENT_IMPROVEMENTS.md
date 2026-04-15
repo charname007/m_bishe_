@@ -22,7 +22,7 @@
 | **P8** | QA Scaffold | 5W1H问答脚手架 + Self-Check二次对话 | ✅ 已实现 |
 | **P9** | 联合抽取 | Joint NER+RE + Reflexion + 全节点二次检查 | ✅ 已实现 |
 | **P10** | QA导师模式 | 多LLM协作 + 审批修改循环 | ✅ 已实现 |
-| **v3.2** | 精简版体系 | 6关系枚举 + 功能节点体系 | ✅ 已实现 |
+| **v3.2** | 精简版体系 | 8关系枚举 + 9功能节点体系 | ✅ 已实现 |
 
 ---
 
@@ -122,23 +122,21 @@ START → Coordinator(分片) → Workers(并行) → Aggregator(去重合并) �
 
 ```python
 class RelationTypeEnum(str, Enum):
-    # 空间基础关系（8个）
-    LOCATED = "位于"
-    ADJACENT = "相邻"
-    BELONGS_TO = "属于"
-    CONNECTS = "连接"
-    DISTANCE = "距离"
-    DIRECTION = "方向"
-    CROSS = "穿过"
-    CHANGED_TO = "变化为"
+    """关系类型枚举（v3.2精简版：8个关系）
+    
+    关系体系：
+    - 空间基础关系（3个）：位于、包含、方位
+    - 社交语义关系（1个）：具有功能
+    - 对比评价关系（3个）：优于、相似、劣于
+    - 事件关系（1个）：发生事件
+    """
+    # 空间基础关系（3个）
+    LOCATED = "位于"           # 空间定位/归属（合并原"属于"）
+    CONTAINS = "包含"          # 空间包含（位于的反向）
+    ORIENTATION = "方位"       # 空间邻近+方位（合并原"相邻+距离+方向"）
 
-    # 社交语义关系（6个）
-    RECOMMEND_INDEX = "推荐指数"
-    HOSTS_ACTIVITY = "承载活动"
-    ACCESSIBLE_BY = "可达方式"
-    CONSUMPTION_LEVEL = "消费档次"
-    CATEGORY_FEATURE = "品类特征"
-    TRIGGERS_EMOTION = "引发情感"
+    # 社交语义关系（1个）
+    HAS_FUNCTION = "具有功能"  # 场所的功能用途
 
     # 对比评价关系（3个）
     BETTER_THAN = "优于"
@@ -153,16 +151,16 @@ class RelationTypeEnum(str, Enum):
 
 ```python
 class FunctionEnum(str, Enum):
-    """9大功能类别"""
-    DINING = "餐饮"
-    SHOPPING = "购物"
-    ENTERTAINMENT = "娱乐"
-    TRANSPORTATION = "交通"
-    EDUCATION = "教育"
-    MEDICAL = "医疗"
-    RESIDENCE = "居住"
-    OFFICE = "办公"
-    TOURISM = "旅游"
+    """功能节点枚举（v3.2精简版：9大类）"""
+    DINING = "餐饮"       # 高频：吃饭、探店、下午茶
+    SHOPPING = "购物"     # 高频：逛街、买东西
+    LEISURE = "休闲"      # 高频：游玩、散步、放松
+    SOCIAL = "社交"       # 高频：聚会、打卡、约会
+    VIEWING = "观景"      # 高频：赏花、观展、拍照
+    ACCOMMODATION = "住宿"  # 中频：住酒店、民宿体验
+    CULTURE = "文化"      # 中频：学习、体验、参观
+    WORK = "工作"         # 低频：办公、产业
+    OTHER = "其他"        # 兜底
 ```
 
 ### 5.3 实体属性体系

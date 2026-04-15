@@ -1,6 +1,6 @@
 """
 Pydantic模型定义 - 用于LangChain with_structured_output
-v3.2改进：精简版6关系体系 + 5实体属性 + 9功能大类
+v3.2改进：精简版8关系体系 + 5实体属性 + 9功能大类
 核心原则：所有属性和关系必须有原文依据（明确出现/暗示表达/语义推断），禁止幻觉
 """
 from typing import List, Dict, Optional, Any, Union
@@ -8,17 +8,24 @@ from pydantic import BaseModel, Field, field_validator, model_validator, ConfigD
 from enum import Enum
 
 
-# ===== 关系类型枚举（v3.2精简版：6个） =====
+# ===== 关系类型枚举（v3.2精简版：8个） =====
 
 class RelationTypeEnum(str, Enum):
-    """关系类型枚举（v3.2精简版：6个关系）"""
+    """关系类型枚举（v3.2精简版：8个关系）
+
+    关系体系：
+    - 空间基础关系（3个）：位于、包含、方位
+    - 社交语义关系（1个）：具有功能
+    - 对比评价关系（3个）：优于、相似、劣于
+    - 事件关系（1个）：发生事件
+    """
     # 空间基础关系（3个）—— 图谱骨架
-    LOCATED = "位于"           # 空间定位/归属（合并原"属于"）
+    LOCATED = "位于"           # 空间定位/归属（合并原"属于")
     CONTAINS = "包含"          # 空间包含（位于的反向）
     ORIENTATION = "方位"       # 空间邻近+方位（合并原"相邻+距离+方向"，原名"空间方位")
 
     # 社交语义关系（1个）—— 图谱血肉
-    HAS_FUNCTION = "具有功能"  # 场所的功能用途（原"承载活动"）
+    HAS_FUNCTION = "具有功能"  # 场所的功能用途（原"承载活动")
 
     # 对比评价关系（3个）—— 特色
     BETTER_THAN = "优于"
@@ -27,6 +34,58 @@ class RelationTypeEnum(str, Enum):
 
     # 事件关系（1个）
     HAS_EVENT = "发生事件"
+
+
+# ===== 关系类型变体映射常量（提取为模块级常量，消除重复） =====
+
+RELATION_VARIANT_MAPPING: Dict[str, str] = {
+    # 空间基础关系（3个）
+    '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
+    '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
+    '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
+    '方位': '方位', '空间方位': '方位',
+    '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
+    '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
+    '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
+
+    # 社交语义关系（1个）
+    '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
+    '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
+
+    # 对比评价关系（3个）
+    '优于': '优于', '比...好': '优于', '比...便宜': '优于',
+    '相似': '相似', '和...差不多': '相似', '类似': '相似',
+    '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
+
+    # 事件关系（1个）
+    '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
+}
+
+
+def normalize_relation_type(v: Any) -> RelationTypeEnum:
+    """
+    将关系类型变体映射到标准枚举值
+
+    Args:
+        v: 输入的关系类型（可以是枚举值、字符串或变体）
+
+    Returns:
+        RelationTypeEnum: 标准化的关系类型枚举
+
+    Raises:
+        ValueError: 输入为空或无法映射到有效关系类型
+    """
+    if v is None:
+        raise ValueError("relation 不能为空")
+    if isinstance(v, RelationTypeEnum):
+        return v
+    normalized = RELATION_VARIANT_MAPPING.get(str(v))
+    if normalized:
+        return RelationTypeEnum(normalized)
+    raise ValueError(
+        f"无效的关系类型: {v}，有效值为8个预定义关系类型："
+        f"位于/包含/方位/具有功能/优于/相似/劣于/发生事件"
+    )
 
 
 # =====人群节点枚举 =====
@@ -476,7 +535,7 @@ class TripleAttributes(BaseModel):
 
 
 class Triple(BaseModel):
-    """单个三元组（v3.2精简版：6个关系，强类型属性，全部可选）"""
+    """单个三元组（v3.2精简版：8个关系，强类型属性，全部可选）"""
     head: str = Field(description="头实体名称")
     relation: RelationTypeEnum = Field(description="关系类型（6种之一，硬校验）")
     tail: str = Field(description="尾实体名称或预定义节点")
@@ -489,38 +548,8 @@ class Triple(BaseModel):
     @field_validator('relation', mode='before')
     @classmethod
     def normalize_relation(cls, v):
-        """将关系类型变体映射到标准枚举值（v3.2精简版：6个关系）"""
-        if v is None:
-            raise ValueError("relation 不能为空")
-        if isinstance(v, RelationTypeEnum):
-            return v
-        # 关系类型映射（v3.2精简版）
-        relation_mapping = {
-            # 空间基础关系（3个）
-            '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
-            '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
-            '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
-            '方位': '方位', '空间方位': '方位',
-            '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
-            '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
-            '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
-
-            # 社交语义关系（1个）
-            '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
-            '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
-
-            # 对比评价关系（3个）
-            '优于': '优于', '比...好': '优于', '比...便宜': '优于',
-            '相似': '相似', '和...差不多': '相似', '类似': '相似',
-            '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
-
-            # 事件关系（1个）
-            '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
-        }
-        normalized = relation_mapping.get(str(v))
-        if normalized:
-            return RelationTypeEnum(normalized)
-        raise ValueError(f"无效的关系类型: {v}，有效值为6个预定义关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件")
+        """将关系类型变体映射到标准枚举值（使用模块级常量）"""
+        return normalize_relation_type(v)
 
 
 class RelationExtractionResult(BaseModel):
@@ -785,7 +814,7 @@ ENTITY_CATEGORY_DETAIL = {
     "道路": ["主干道", "次干道", "支路", "小巷", "地铁线路"]
 }
 
-# ===== 关系类型列表（v3.2精简版：6个） =====
+# ===== 关系类型列表（v3.2精简版：8个） =====
 
 RELATION_TYPES = [
     # 空间基础关系（3个）
@@ -856,7 +885,7 @@ class JointEntity(BaseModel):
 
 
 class JointTriple(BaseModel):
-    """联合抽取的单个三元组（v3.2精简版：6个关系，强类型属性）"""
+    """联合抽取的单个三元组（v3.2精简版：8个关系，强类型属性）"""
     head: str = Field(description="头实体")
     relation: RelationTypeEnum = Field(description="关系类型（6种之一）")
     tail: str = Field(description="尾实体")
@@ -870,38 +899,8 @@ class JointTriple(BaseModel):
     @field_validator('relation', mode='before')
     @classmethod
     def normalize_relation(cls, v):
-        """将关系类型变体映射到标准枚举值（v3.2精简版：6个关系）"""
-        if v is None:
-            raise ValueError("relation 不能为空")
-        if isinstance(v, RelationTypeEnum):
-            return v
-        # 关系类型映射（v3.2精简版）
-        relation_mapping = {
-            # 空间基础关系（3个）
-            '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
-            '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
-            '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
-            '方位': '方位', '空间方位': '方位',
-            '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
-            '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
-            '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
-
-            # 社交语义关系（1个）
-            '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
-            '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
-
-            # 对比评价关系（3个）
-            '优于': '优于', '比...好': '优于', '比...便宜': '优于',
-            '相似': '相似', '和...差不多': '相似', '类似': '相似',
-            '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
-
-            # 事件关系（1个）
-            '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
-        }
-        normalized = relation_mapping.get(str(v))
-        if normalized:
-            return RelationTypeEnum(normalized)
-        raise ValueError(f"无效的关系类型: {v}，有效值为6个预定义关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件")
+        """将关系类型变体映射到标准枚举值（使用模块级常量）"""
+        return normalize_relation_type(v)
 
 
 class JointExtractionResult(BaseModel):
