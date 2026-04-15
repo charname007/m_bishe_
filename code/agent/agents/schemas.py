@@ -14,7 +14,7 @@ class RelationTypeEnum(str, Enum):
     """关系类型枚举（v3.2精简版：8个关系）
 
     关系体系：
-    - 空间基础关系（3个）：位于、包含、方位
+    - 空间基础关系（3个）：位于、包含、相对方位
     - 社交语义关系（1个）：具有功能
     - 对比评价关系（3个）：优于、相似、劣于
     - 事件关系（1个）：发生事件
@@ -22,7 +22,7 @@ class RelationTypeEnum(str, Enum):
     # 空间基础关系（3个）—— 图谱骨架
     LOCATED = "位于"           # 空间定位/归属（合并原"属于")
     CONTAINS = "包含"          # 空间包含（位于的反向）
-    ORIENTATION = "方位"       # 空间邻近+方位（合并原"相邻+距离+方向"，原名"空间方位")
+    RELATIVE_ORIENTATION = "相对方位"  # 空间邻近+相对方位（合并原"相邻+距离+方向")
 
     # 社交语义关系（1个）—— 图谱血肉
     HAS_FUNCTION = "具有功能"  # 场所的功能用途（原"承载活动")
@@ -43,10 +43,10 @@ RELATION_VARIANT_MAPPING: Dict[str, str] = {
     '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
     '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
     '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
-    '方位': '方位', '空间方位': '方位',
-    '相邻': '方位', '旁边': '方位', '旁边是': '方位', '隔壁': '方位',  # 合并入"方位"
-    '距离': '方位', '离': '方位', '附近': '方位',  # 合并入"方位"
-    '方向': '方位', '东边': '方位', '南边': '方位', '西边': '方位', '北边': '方位',  # 合并入"方位"
+    '相对方位': '相对方位', '方位': '相对方位', '空间方位': '相对方位',
+    '相邻': '相对方位', '旁边': '相对方位', '旁边是': '相对方位', '隔壁': '相对方位',  # 合并入"相对方位"
+    '距离': '相对方位', '离': '相对方位', '附近': '相对方位',  # 合并入"相对方位"
+    '方向': '相对方位', '东边': '相对方位', '南边': '相对方位', '西边': '相对方位', '北边': '相对方位',  # 合并入"相对方位"
 
     # 社交语义关系（1个）
     '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
@@ -84,7 +84,7 @@ def normalize_relation_type(v: Any) -> RelationTypeEnum:
         return RelationTypeEnum(normalized)
     raise ValueError(
         f"无效的关系类型: {v}，有效值为8个预定义关系类型："
-        f"位于/包含/方位/具有功能/优于/相似/劣于/发生事件"
+        f"位于/包含/相对方位/具有功能/优于/相似/劣于/发生事件"
     )
 
 
@@ -134,29 +134,42 @@ class FunctionEnum(str, Enum):
     OTHER = "其他"        # 兜底
 
 
-# ===== 特征标签枚举（v3.2新增：约16个核心词汇） =====
+# ===== 特征标签参考枚举（仅供内部参考，不用于校验LLM输出） =====
+# Schema v3.3 说明：特征标签采用开放文本设计，实际抽取时可使用任意自然语言表达
+# 此枚举仅作为高频词汇参考列表，帮助开发者理解常见特征表达
 
 class FeatureTagEnum(str, Enum):
-    """特征标签枚举（v3.2精简版：约16个高频核心词汇）"""
-    # 氛围/风格类
+    """特征标签参考枚举（仅供参考，不应用于校验）
+
+    Schema v3.3 开放文本设计说明：
+    - 特征标签不再使用强枚举约束
+    - LLM可输出任意自然语言表达的特征描述
+    - 此枚举仅记录高频词汇，供开发参考
+
+    实际使用：EntityAttributes.特征标签 为 List[str] 类型，可接受任意文本
+    """
+    # 氛围/风格类（高频）
     ATMOSPHERE = "氛围感"
     VIRAL = "网红"
     ARTISTIC = "文艺"
     RETRO = "复古"
     NICHE = "小众"
+    WARM = "温馨"
+    QUIET = "安静"
+    LIVELY = "热闹"
 
-    # 定位/特征类
+    # 定位/特征类（中频）
     OLD_BRAND = "老字号"
     CHAIN = "连锁"
     CREATIVE = "文创"
     HIGH_END = "高端"
 
-    # 知名度类
+    # 知名度类（高频）
     POPULAR = "热门"
     HIDDEN_GEM = "宝藏"
     MUST_VISIT = "打卡圣地"
 
-    # 体验正面类
+    # 体验正面类（高频）
     GOOD_SERVICE = "服务好"
     GOOD_ENVIRONMENT = "环境好"
     GOOD_VALUE = "性价比高"
@@ -166,7 +179,7 @@ class FeatureTagEnum(str, Enum):
 # ===== 对比维度枚举（v3.2新增：7个） =====
 
 class CompareDimensionEnum(str, Enum):
-    """对比维度枚举（v3.2精简版：7个）"""
+    """对比维度枚举（v3.3：8个，新增"其他"作为兜底）"""
     PRICE = "价格"
     ENVIRONMENT = "环境"
     SERVICE = "服务"
@@ -174,6 +187,7 @@ class CompareDimensionEnum(str, Enum):
     QUALITY = "品质"
     TRANSPORT = "交通"
     TASTE = "口味"
+    OTHER = "其他"  # v3.3新增：无法归纳时的兜底选项
 
 
 # ===== 距离值枚举 =====
@@ -389,18 +403,18 @@ class TripleAttributes(BaseModel):
     """
     model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
 
-    # ===== 方位关系属性（合并原距离+方向+相邻） =====
+    # ===== 相对方位关系属性（合并原距离+方向+相邻） =====
     距离值: Optional[DistanceValueEnum] = Field(
         default=None,
-        description="方位关系的距离值：近/中等/远（必须有原文依据，如'附近'→近）"
+        description="相对方位关系的距离值：近/中等/远（必须有原文依据，如'附近'→近）"
     )
     方向值: Optional[DirectionValueEnum] = Field(
         default=None,
-        description="方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（必须有原文依据）"
+        description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（必须有原文依据）"
     )
     联动推荐: Optional[bool] = Field(
         default=None,
-        description="方位关系的联动推荐属性（必须有原文依据，如'一起逛'→联动推荐=true）"
+        description="相对方位关系的联动推荐属性（必须有原文依据，如'一起逛'→联动推荐=true）"
     )
 
     # ===== 功能关系属性（原承载活动关系） =====
@@ -424,7 +438,11 @@ class TripleAttributes(BaseModel):
     # ===== 对比关系属性 =====
     维度: Optional[List[CompareDimensionEnum]] = Field(
         default=None,
-        description="优于/相似/劣于关系的维度列表（必须有原文依据）"
+        description="优于/相似/劣于关系的维度列表（必须有原文依据，v3.3新增\"其他\"作为兜底）"
+    )
+    维度描述: Optional[str] = Field(
+        default=None,
+        description="当维度包含\"其他\"时，具体描述对比内容（必须有原文依据）"
     )
 
     # ===== 值映射校验器（处理LLM输出的变体值） =====
@@ -533,6 +551,15 @@ class TripleAttributes(BaseModel):
             return [LimitNodeEnum(mapped)]
         raise ValueError(f"无效的限制值: {v}")
 
+    @model_validator(mode='after')
+    def validate_other_dimension(self):
+        """校验：当维度包含"其他"时，必须提供维度描述"""
+        if self.维度:
+            dimension_values = [d.value for d in self.维度]
+            if "其他" in dimension_values and not self.维度描述:
+                raise ValueError("当维度包含'其他'时，必须提供维度描述")
+        return self
+
 
 class Triple(BaseModel):
     """单个三元组（v3.2精简版：8个关系，强类型属性，全部可选）"""
@@ -600,13 +627,20 @@ class EvalResultSimplified(BaseModel):
     corrections: List[Correction] = Field(default_factory=list, description="修正列表（仅当need_correction=True时有效）")
 
 
-# ===== Label阶段输出模型（v3.2精简版：5个可选属性） =====
+# ===== Label阶段输出模型（v3.3：特征标签改为开放文本） =====
 
 class EntityAttributes(BaseModel):
-    """实体属性（v3.2精简版：5个属性，全部可选，必须有原文依据）
+    """实体属性（v3.3：特征标签改为开放文本）
+
+    v3.3改进：
+    - 特征标签从强枚举改为开放文本列表
+    - 设计原因：社交媒体特征表达多样且新词涌现
+    - 展示优先场景：保留原文真实表达更具价值
 
     原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
     """
+    model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
+
     # 基础分类属性（可选）
     类别: Optional[str] = Field(
         default=None,
@@ -618,9 +652,10 @@ class EntityAttributes(BaseModel):
     )
 
     # 文本属性（从语料提取，全部可选）
-    特征标签: Optional[List[FeatureTagEnum]] = Field(
+    # v3.3改进：特征标签改为开放文本，不再使用枚举约束
+    特征标签: Optional[List[str]] = Field(
         default=None,
-        description="特征标签：氛围感/网红/热门/服务好/性价比高等（必须有原文依据：明确出现或暗示表达）"
+        description="特征描述（开放文本）：保留原文表达，如氛围超好、随手拍好看、遛娃神器等（必须有原文依据）"
     )
     推荐指数: Optional[RatingNodeEnum] = Field(
         default=None,
@@ -636,24 +671,24 @@ class RelationAttributes(BaseModel):
     """关系属性（v3.2精简版：与TripleAttributes保持一致）
 
     根据 Schema v3.2，关系属性包括：
-    - 方位关系属性：距离值、方向值、联动推荐
+    - 相对方位关系属性：距离值、方向值、联动推荐
     - 功能关系属性：时段、适合人群、具有限制、情感倾向
     - 对比关系属性：维度
 
     所有属性可选，语料中出现才标注。
     """
-    # ===== 方位关系属性（合并原相邻+距离+方向） =====
+    # ===== 相对方位关系属性（合并原相邻+距离+方向） =====
     距离值: Optional[DistanceValueEnum] = Field(
         default=None,
-        description="方位关系的距离值：近/中等/远（语料中出现才标注）"
+        description="相对方位关系的距离值：近/中等/远（语料中出现才标注）"
     )
     方向值: Optional[DirectionValueEnum] = Field(
         default=None,
-        description="方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（语料中出现才标注）"
+        description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（语料中出现才标注）"
     )
     联动推荐: Optional[bool] = Field(
         default=None,
-        description="方位关系的联动推荐属性（语料中出现才标注）"
+        description="相对方位关系的联动推荐属性（语料中出现才标注）"
     )
 
     # ===== 功能关系属性（原承载活动关系） =====
@@ -677,8 +712,21 @@ class RelationAttributes(BaseModel):
     # ===== 对比关系属性 =====
     维度: Optional[List[CompareDimensionEnum]] = Field(
         default=None,
-        description="优于/相似/劣于关系的维度列表（语料中出现才标注）"
+        description="优于/相似/劣于关系的维度列表（语料中出现才标注，v3.3新增\"其他\"作为兜底）"
     )
+    维度描述: Optional[str] = Field(
+        default=None,
+        description="当维度包含\"其他\"时，具体描述对比内容（语料中出现才标注）"
+    )
+
+    @model_validator(mode='after')
+    def validate_other_dimension(self):
+        """校验：当维度包含"其他"时，必须提供维度描述"""
+        if self.维度:
+            dimension_values = [d.value for d in self.维度]
+            if "其他" in dimension_values and not self.维度描述:
+                raise ValueError("当维度包含'其他'时，必须提供维度描述")
+        return self
 
 
 class LabelResult(BaseModel):
@@ -818,7 +866,7 @@ ENTITY_CATEGORY_DETAIL = {
 
 RELATION_TYPES = [
     # 空间基础关系（3个）
-    "位于", "包含", "方位",
+    "位于", "包含", "相对方位",
     # 社交语义关系（1个）
     "具有功能",
     # 对比评价关系（3个）
@@ -857,20 +905,35 @@ EVENT_STATES = ["正在进行", "已结束", "计划中", "周期性"]
 
 # ===== 对比维度枚举（v3.2精简版：7个） =====
 
-COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味"]
+COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味", "其他"]
 
-# ===== 特征标签枚举（v3.2精简版：约16个） =====
+# ===== 特征标签参考列表（v3.3：仅供参考，非强制约束） =====
+# v3.3改进：特征标签改为开放文本，此列表仅供参考
+# 实际抽取时可使用任意自然语言表达，不受此列表限制
 
-FEATURE_TAGS = [
-    # 氛围/风格类
-    "氛围感", "网红", "文艺", "复古", "小众",
+FEATURE_TAGS_REFERENCE = [
+    # 氛围/情绪类
+    "氛围感", "氛围好", "松弛感", "治愈感", "安静", "私密", "解压",
+    # 拍照体验类
+    "出片", "拍照好看", "随手拍好看", "适合拍照", "出片率高",
+    # 风格/审美类
+    "网红", "文艺", "复古", "小众", "ins风", "日系", "韩风",
     # 定位/特征类
     "老字号", "连锁", "文创", "高端",
     # 知名度类
     "热门", "宝藏", "打卡圣地",
-    # 体验正面类
-    "服务好", "环境好", "性价比高", "交通便利"
+    # 服务/环境类
+    "服务好", "环境好",
+    # 价格类
+    "性价比高", "不贵", "平价",
+    # 便利类
+    "交通便利", "好停车",
+    # 人群适配类
+    "亲子友好", "遛娃神器",
 ]
+
+# 保持原有常量名兼容性（指向参考列表）
+FEATURE_TAGS = FEATURE_TAGS_REFERENCE
 
 
 # ===== 联合抽取模型（P9新增） =====
@@ -938,6 +1001,64 @@ class SelfCheckJointResult(BaseModel):
     overall_confidence: str = Field(description="整体置信度")
     retry_suggested: bool = Field(description="是否建议重试")
     retry_reason: str = Field(description="重试原因")
+
+# ===== P12新增：Self-Check增强版模型（四维度评分） =====
+
+class DimensionScore(BaseModel):
+    """单维度评分"""
+    rating: str = Field(description="评分等级: high/medium/low")
+    issues: int = Field(default=0, description="问题数量")
+    details: Optional[List[str]] = Field(default=None, description="问题描述列表")
+
+
+class ImprovementAction(BaseModel):
+    """改进动作项"""
+    action_type: str = Field(description="动作类型: add_entity/delete_triple/fix_type/fix_direction")
+    target: str = Field(description="目标实体或三元组")
+    details: str = Field(description="具体说明")
+    evidence: Optional[str] = Field(default=None, description="原文依据位置")
+
+
+class SelfCheckJointResultV2(BaseModel):
+    """联合抽取校验结果（P12增强版）- 四维度评分 + 结构化反思
+    
+    改进点：
+    1. dimension_scores: 四维度量化评分（完整性/准确性/真实性/证据性）
+    2. improvement_actions: 可执行的改进动作列表
+    3. 保持原有的 reflection_text/improvement_strategy 兼容性
+    """
+    # 校验结果（继承原有字段）
+    verified_entities: List[JointEntity] = Field(default_factory=list, description="校验通过的实体")
+    verified_triples: List[JointTriple] = Field(default_factory=list, description="校验通过的三元组")
+    rejected_entities: List[str] = Field(default_factory=list, description="拒绝的实体（非地理实体）")
+    rejected_triples: List[Dict] = Field(default_factory=list, description="拒绝的三元组（幻觉/错误）")
+
+    # P12新增：四维度量化评分
+    dimension_scores: Dict[str, DimensionScore] = Field(
+        default_factory=dict,
+        description="四维度评分: {完整性: DimensionScore, 准确性: DimensionScore, 真实性: DimensionScore, 证据性: DimensionScore}"
+    )
+
+    # Reflexion核心：自然语言反思（保持兼容）
+    reflection_text: str = Field(
+        default="",
+        description="结构化反思：遗漏原因分析 + 幻觉原因分析 + 错误分类"
+    )
+    improvement_strategy: str = Field(
+        default="",
+        description="改进策略摘要"
+    )
+
+    # P12新增：可执行的改进动作列表
+    improvement_actions: List[ImprovementAction] = Field(
+        default_factory=list,
+        description="可执行的改进动作列表"
+    )
+
+    # 整体评估
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重试")
+    retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== Self-Check-QA模型（P9新增） =====

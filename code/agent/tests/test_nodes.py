@@ -389,10 +389,10 @@ class TestNormalizeRelationType:
         assert normalize_relation_type("地处") == RelationTypeEnum.LOCATED
         assert normalize_relation_type("属于") == RelationTypeEnum.LOCATED
 
-        # 方位关系变体
-        assert normalize_relation_type("旁边") == RelationTypeEnum.ORIENTATION
-        assert normalize_relation_type("附近") == RelationTypeEnum.ORIENTATION
-        assert normalize_relation_type("东边") == RelationTypeEnum.ORIENTATION
+        # 相对方位关系变体
+        assert normalize_relation_type("旁边") == RelationTypeEnum.RELATIVE_ORIENTATION
+        assert normalize_relation_type("附近") == RelationTypeEnum.RELATIVE_ORIENTATION
+        assert normalize_relation_type("东边") == RelationTypeEnum.RELATIVE_ORIENTATION
 
         # 对比关系变体
         assert normalize_relation_type("比...好") == RelationTypeEnum.BETTER_THAN
@@ -506,3 +506,298 @@ class TestSubstatesComposition:
         # 控制状态字段
         assert "current_step" in annotations
         assert "error" in annotations
+
+
+# ===== P12新增：多数据源实体对齐测试 =====
+
+class TestEntityAlignmentMultiSource:
+    """测试多数据源实体对齐功能"""
+
+    def test_candidate_source_field(self):
+        """候选实体包含source字段"""
+        from agent.agents.schemas import EntityCandidate
+
+        # 测试source字段存在
+        candidate = EntityCandidate(
+            db_entity_id="poi_001",
+            db_name="测试POI",
+            db_type="poi",
+            similarity=0.85,
+            source="geo_entity_names"
+        )
+        assert candidate.source == "geo_entity_names"
+
+    def test_candidate_amap_source(self):
+        """amap候选实体的source字段"""
+        from agent.agents.schemas import EntityCandidate
+
+        candidate = EntityCandidate(
+            db_entity_id="poi_836",
+            db_name="高德POI",
+            db_type="poi",
+            similarity=0.90,
+            longitude=114.0,
+            latitude=30.0,
+            source="amap_poi_wgs84"
+        )
+        assert candidate.source == "amap_poi_wgs84"
+
+    def test_format_alignment_candidates_with_source(self):
+        """格式化候选列表显示来源"""
+        from agent.agents.prompts import format_alignment_candidates
+
+        candidates = [
+            {
+                "db_name": "武汉大学",
+                "db_type": "poi",
+                "similarity": 0.92,
+                "longitude": 114.36,
+                "latitude": 30.54,
+                "source": "geo_entity_names"
+            },
+            {
+                "db_name": "群光广场",
+                "db_type": "poi",
+                "similarity": 0.88,
+                "longitude": 114.35,
+                "latitude": 30.52,
+                "source": "amap_poi_wgs84",
+                "address": "珞喻路158号"
+            }
+        ]
+
+        result = format_alignment_candidates(candidates)
+
+        # 检查来源标识
+        assert "已有实体" in result
+        assert "高德POI" in result
+        assert "武汉大学" in result
+        assert "群光广场" in result
+
+
+class TestSelfCheckJointResultV2:
+    """测试P12新增的四维度评分模型"""
+
+    def test_dimension_score_model(self):
+        """维度评分模型"""
+        from agent.agents.schemas import DimensionScore
+
+        score = DimensionScore(
+            rating="high",
+            issues=0,
+            details=["无遗漏实体"]
+        )
+        assert score.rating == "high"
+        assert score.issues == 0
+
+    def test_improvement_action_model(self):
+        """改进动作模型"""
+        from agent.agents.schemas import ImprovementAction
+
+        action = ImprovementAction(
+            action_type="add_entity",
+            target="武汉大学",
+            details="遗漏的重要实体",
+            evidence="原文第5行"
+        )
+        assert action.action_type == "add_entity"
+        assert action.target == "武汉大学"
+
+    def test_self_check_v2_model(self):
+        """完整Self-Check V2模型"""
+        from agent.agents.schemas import SelfCheckJointResultV2, DimensionScore, ImprovementAction
+
+        result = SelfCheckJointResultV2(
+            dimension_scores={
+                "完整性": DimensionScore(rating="high", issues=0),
+                "准确性": DimensionScore(rating="medium", issues=1),
+                "真实性": DimensionScore(rating="high", issues=0),
+                "证据性": DimensionScore(rating="high", issues=0)
+            },
+            reflection_text="实体抽取基本完整，但有一个类型判定错误",
+            improvement_strategy="修正实体类型",
+            improvement_actions=[
+                ImprovementAction(action_type="fix_type", target="群光广场", details="poi → 建筑物")
+            ],
+            overall_confidence="medium",
+            retry_suggested=False
+        )
+
+        assert result.dimension_scores["完整性"].rating == "high"
+        assert len(result.improvement_actions) == 1
+
+    def test_format_dimension_scores(self):
+        """格式化四维度评分"""
+        from agent.agents.prompts import format_dimension_scores
+
+        scores = {
+            "完整性": {"rating": "high", "issues": 0},
+            "准确性": {"rating": "medium", "issues": 2}
+        }
+
+        result = format_dimension_scores(scores)
+
+        assert "完整性" in result
+        assert "准确性" in result
+        assert "high" in result
+        assert "medium" in result
+
+    def test_format_improvement_strategy(self):
+        """格式化改进策略"""
+        from agent.agents.prompts import format_improvement_strategy
+
+        strategy = {
+            "missing_entities": [{"name": "武汉大学", "type": "poi", "evidence": "原文第3行"}],
+            "rejected_triples": [{"head": "A", "relation": "位于", "tail": "B"}],
+            "type_corrections": [{"name": "群光广场", "wrong_type": "poi", "correct_type": "建筑物"}]
+        }
+
+        result = format_improvement_strategy(strategy)
+
+        assert "遗漏实体补充" in result
+        assert "幻觉三元组删除" in result
+        assert "类型修正" in result
+
+
+# ===== P12新增：关系类型向后兼容测试 =====
+
+class TestRelationTypeBackwardCompatibility:
+    """测试关系类型重命名的向后兼容"""
+
+    def test_legacy_name_orientation(self):
+        """旧名称'方位'映射到'相对方位'"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+
+        # 旧名称"方位"应该映射到新的RELATIVE_ORIENTATION
+        result = normalize_relation_type("方位")
+        assert result == RelationTypeEnum.RELATIVE_ORIENTATION
+        assert result.value == "相对方位"
+
+    def test_new_name_relative_orientation(self):
+        """新名称'相对方位'直接识别"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+
+        result = normalize_relation_type("相对方位")
+        assert result == RelationTypeEnum.RELATIVE_ORIENTATION
+
+    def test_all_variants_map_correctly(self):
+        """所有变体正确映射"""
+        from agent.agents.schemas import normalize_relation_type, RelationTypeEnum
+
+        # 相邻、距离、方向相关变体都应映射到RELATIVE_ORIENTATION
+        variants = ["相邻", "旁边", "隔壁", "附近", "离", "东边", "南边", "西边", "北边"]
+        for variant in variants:
+            result = normalize_relation_type(variant)
+            assert result == RelationTypeEnum.RELATIVE_ORIENTATION, f"{variant} 映射失败"
+
+
+# ===== v3.3新增：对比维度"其他"校验测试 =====
+
+class TestCompareDimensionOtherValidator:
+    """测试对比维度'其他'的校验规则"""
+
+    def test_triple_attributes_other_without_description_fails(self):
+        """维度含'其他'但无描述时应抛出异常"""
+        from agent.agents.schemas import TripleAttributes, CompareDimensionEnum
+        import pytest
+
+        with pytest.raises(ValueError, match="维度包含'其他'时，必须提供维度描述"):
+            TripleAttributes(
+                维度=[CompareDimensionEnum.OTHER]
+            )
+
+    def test_triple_attributes_other_with_description_passes(self):
+        """维度含'其他'且有描述时应通过"""
+        from agent.agents.schemas import TripleAttributes, CompareDimensionEnum
+
+        attrs = TripleAttributes(
+            维度=[CompareDimensionEnum.OTHER],
+            维度描述="店铺规模对比"
+        )
+        assert attrs.维度描述 == "店铺规模对比"
+
+    def test_triple_attributes_other_with_multiple_dimensions(self):
+        """维度含多个值包括'其他'时需描述"""
+        from agent.agents.schemas import TripleAttributes, CompareDimensionEnum
+
+        attrs = TripleAttributes(
+            维度=[CompareDimensionEnum.PRICE, CompareDimensionEnum.OTHER],
+            维度描述="价格和装修风格对比"
+        )
+        assert len(attrs.维度) == 2
+        assert attrs.维度描述 == "价格和装修风格对比"
+
+    def test_triple_attributes_no_other_no_description_ok(self):
+        """维度不含'其他'时无需描述"""
+        from agent.agents.schemas import TripleAttributes, CompareDimensionEnum
+
+        attrs = TripleAttributes(
+            维度=[CompareDimensionEnum.PRICE, CompareDimensionEnum.ENVIRONMENT]
+        )
+        assert attrs.维度描述 is None
+
+    def test_relation_attributes_other_validator(self):
+        """RelationAttributes也有相同的校验"""
+        from agent.agents.schemas import RelationAttributes, CompareDimensionEnum
+        import pytest
+
+        with pytest.raises(ValueError, match="维度包含'其他'时，必须提供维度描述"):
+            RelationAttributes(
+                维度=[CompareDimensionEnum.OTHER]
+            )
+
+        attrs = RelationAttributes(
+            维度=[CompareDimensionEnum.OTHER],
+            维度描述="地理位置便利性"
+        )
+        assert attrs.维度描述 == "地理位置便利性"
+
+
+# ===== v3.3新增：特征标签开放文本测试 =====
+
+class TestFeatureTagsOpenText:
+    """测试v3.3特征标签开放文本设计"""
+
+    def test_entity_attributes_open_feature_tags(self):
+        """特征标签接受任意自然语言表达"""
+        from agent.agents.schemas import EntityAttributes
+
+        attrs = EntityAttributes(
+            特征标签=["氛围超好", "随手拍好看", "遛娃神器", "松弛感满满"]
+        )
+        assert len(attrs.特征标签) == 4
+        assert "氛围超好" in attrs.特征标签
+
+    def test_entity_attributes_empty_feature_tags(self):
+        """特征标签可为空列表"""
+        from agent.agents.schemas import EntityAttributes
+
+        attrs = EntityAttributes(
+            特征标签=[]
+        )
+        assert attrs.特征标签 == []
+
+    def test_entity_attributes_none_feature_tags(self):
+        """特征标签可为None（未标注）"""
+        from agent.agents.schemas import EntityAttributes
+
+        attrs = EntityAttributes()
+        assert attrs.特征标签 is None
+
+    def test_entity_attributes_new_expressions_allowed(self):
+        """接受未在参考列表中的新表达"""
+        from agent.agents.schemas import EntityAttributes
+
+        # 这些都是未在FEATURE_TAGS_REFERENCE中的表达
+        new_tags = ["治愈感十足", "ins风拍照", "宝藏小店", "氛围满分"]
+        attrs = EntityAttributes(
+            特征标签=new_tags
+        )
+        assert attrs.特征标签 == new_tags
+
+    def test_compare_dimension_enum_other_exists(self):
+        """CompareDimensionEnum包含'其他'枚举"""
+        from agent.agents.schemas import CompareDimensionEnum
+
+        assert CompareDimensionEnum.OTHER.value == "其他"
+        assert "其他" in [e.value for e in CompareDimensionEnum]

@@ -9,6 +9,7 @@ P6改进：添加 Normalize 归一化节点，NER/RE/Eval 节点优先使用归�
 import asyncio
 import json
 import math
+import os
 import re
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -67,8 +68,9 @@ from .prompts import (
     format_entities, format_triples, format_verified_entities, format_retry_hint,
     format_entity_hints, format_relation_hints, format_context_dependencies,  # P8新增
     # P9新增：联合抽取和所有Self-Check提示词
-    JOINT_NER_RE_PROMPT,
-    SELF_CHECK_JOINT_PROMPT, SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
+    JOINT_NER_RE_PROMPT, JOINT_NER_RE_PROMPT_V2,  # P12新增：改进版提示词
+    SELF_CHECK_JOINT_PROMPT, SELF_CHECK_JOINT_PROMPT_V2,  # P12新增：改进版提示词
+    SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
     format_joint_entities, format_joint_triples, format_qa_pairs_for_check, format_eval_scores_for_check,
     format_reflection_history,
     # P10新增：QA导师提示词和格式化函数
@@ -77,6 +79,8 @@ from .prompts import (
     format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
     # P11新增：实体对齐提示词和格式化函数
     ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
+    # P12新增：四维度评分格式化函数
+    format_dimension_scores, format_improvement_strategy,
 )
 
 
@@ -694,7 +698,7 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
     3. 基本逻辑检查：某些关系类型有约束（如"连接"需要两个道路实体）
     """
     # v3.2精简版：使用完整的7个关系类型列表
-    # 关系类型：位于/包含/方位/具有功能/优于/相似/劣于/发生事件
+    # 关系类型：位于/包含/相对方位/具有功能/优于/相似/劣于/发生事件
     VALID_RELATIONS = RELATION_TYPES  # 从 state.py 导入
 
     all_entities = []
@@ -966,7 +970,7 @@ def create_label_node(llm: Any):
                 }
 
             # v3.2精简版：仅提取schema定义的属性
-            # 方位关系属性：距离值、方向值、联动推荐
+            # 相对方位关系属性：距离值、方向值、联动推荐
             # 功能关系属性：时段、适合人群、具有限制、情感倾向
             # 对比关系属性：维度
             relation_attrs = {}
@@ -974,7 +978,7 @@ def create_label_node(llm: Any):
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
                     relation_attrs[normalized_key] = {
-                        # 方位关系属性（Schema v3.2）
+                        # 相对方位关系属性（Schema v3.2）
                         "距离值": attrs.距离值,
                         "方向值": attrs.方向值,
                         "联动推荐": attrs.联动推荐,
@@ -1172,13 +1176,13 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 # v3.2精简版：关系类型属性映射（7个关系类型）
                 # Schema v3.2定义：
                 # - 位于、包含：无关系属性
-                # - 方位：距离值、方向值、联动推荐
+                # - 相对方位：距离值、方向值、联动推荐
                 # - 具有功能：时段、适合人群、具有限制、情感倾向
                 # - 优于/相似/劣于：维度
                 # - 发生事件：无关系属性（属性在事件节点上）
                 RELATION_ATTRS_MAP = {
-                    # 方位关系属性（3个属性）
-                    "方位": ["距离值", "方向值", "联动推荐"],
+                    # 相对方位关系属性（3个属性）
+                    "相对方位": ["距离值", "方向值", "联动推荐"],
                     # 功能关系属性（4个属性）
                     "具有功能": ["时段", "适合人群", "具有限制", "情感倾向"],
                     # 对比关系属性（1个属性）
@@ -1815,7 +1819,8 @@ def create_joint_ner_re_node(llm: Any):
             mentor_guidance = state.get("mentor_guidance", {})
 
             # 调用 LLM
-            prompt_text = JOINT_NER_RE_PROMPT.invoke({
+            # P12改进：使用改进版提示词（含反向验证+反面示例）
+            prompt_text = JOINT_NER_RE_PROMPT_V2.invoke({
                 "raw_text": text_for_processing,
                 "entity_hints": format_entity_hints(qa_entity_hints),
                 "relation_hints": format_relation_hints(qa_relation_hints),
@@ -1916,7 +1921,8 @@ def create_self_check_joint_node(llm: Any):
             reflection_history = state.get("reflection_history", [])
             previous_reflection = format_reflection_history(reflection_history)
 
-            prompt_text = SELF_CHECK_JOINT_PROMPT.invoke({
+            # P12改进：使用增强版提示词（四维度校验+结构化反思）
+            prompt_text = SELF_CHECK_JOINT_PROMPT_V2.invoke({
                 "raw_text": text,
                 "entities": format_joint_entities(
                     state.get("joint_extraction_result", {}).get("entities", [])
@@ -3138,31 +3144,687 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
     流程：
     1. 从state获取抽取的实体名称
     2. 对每个实体name进行向量嵌入
-    3. 在数据库geo_entity_names表中检索相似实体
-    4. 相似度判断：
+    3. 查询策略（P12优化）：
+       - geo_entity_names（小表）：预加载全部embedding到内存，批量计算
+       - amap_poi_wgs84（大表）：利用pgvector HNSW索引批量查询
+    4. 合并候选结果，按相似度排序
+    5. 相似度判断：
        - >= high_threshold: 直接确认匹配
        - >= threshold && < high_threshold: 交给LLM判断
        - < threshold: 直接跳过（新实体）
+
+    ID映射说明：
+    - geo_entity_names：entity_id字段直接作为db_entity_id，neo4j中匹配entity_id属性
+    - amap_poi_wgs84：entity_id字段存储原始高德ID(如amap_B0FFLCH14H)，
+      直接作为db_entity_id，neo4j中匹配original_id属性
+
+    性能优化策略（P12改进）：
+    - geo_entity_names（~1000条）：预加载全部embedding (~3MB)，内存批量计算
+    - amap_poi_wgs84（~37000条）：利用pgvector HNSW索引批量查询，避免加载全部到内存
     """
     from .schemas import EntityAlignmentResult, EntityAlignmentItem, EntityCandidate
     parser = PydanticOutputParser(pydantic_object=EntityAlignmentItem)
 
+    # ===== 函数级缓存（P12性能优化） =====
     # 嵌入模型缓存（避免重复加载）
-    _embedding_model = None
+    _embedding_model_cache = None
+    # geo_entity_names embedding缓存（小表，预加载全部）
+    _geo_cache = None
 
     def _get_embedding_model():
         """懒加载嵌入模型"""
-        if _embedding_model is None:
+        nonlocal _embedding_model_cache
+        if _embedding_model_cache is None:
             import os
             os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像加速
             from sentence_transformers import SentenceTransformer
             model_name = config.alignment_embedding_model
             logger.info(f"[Entity_Alignment] 加载嵌入模型: {model_name}")
-            _embedding_model = SentenceTransformer(model_name)
-        return _embedding_model
+            _embedding_model_cache = SentenceTransformer(model_name)
+        return _embedding_model_cache
+
+    def _load_geo_embeddings(conn):
+        """
+        预加载geo_entity_names全部embedding到内存（小表策略）
+
+        内存占用估算：~1000条 × 768维 × 4字节 ≈ 3MB
+
+        参数：
+        - conn: psycopg2原生连接对象
+
+        返回：
+        - geo_entities: List[Dict]
+        - geo_embeddings_np: numpy数组 (N_geo, dim)
+        """
+        import numpy as np
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT entity_id, name, type, longitude, latitude, embedding
+                FROM geo_entity_names
+                WHERE embedding IS NOT NULL
+            """)
+            geo_rows = cur.fetchall()
+        
+        geo_entities = []
+        geo_embeddings = []
+        for row in geo_rows:
+            entity_id, name, type_, lon, lat, emb_str = row
+            if emb_str:
+                import json
+                # 解析embedding向量（pgvector返回字符串格式，使用json.loads替代eval）
+                emb_list = json.loads(emb_str) if isinstance(emb_str, str) else emb_str
+                geo_entities.append({
+                    "entity_id": entity_id,
+                    "name": name,
+                    "type": type_ or "",
+                    "longitude": lon,
+                    "latitude": lat,
+                    "source": "geo_entity_names"
+                })
+                geo_embeddings.append(emb_list)
+        
+        geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
+        logger.info(f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条 (~{len(geo_entities)*768*4/1024/1024:.1f}MB)")
+        
+        return geo_entities, geo_embeddings_np
+
+    def _batch_similarity_search_geo(query_embeddings_np, geo_embeddings_np, geo_entities, top_k):
+        """
+        geo实体批量相似度搜索（内存计算）
+        
+        参数：
+        - query_embeddings_np: (N_query, dim) numpy数组
+        - geo_embeddings_np: (N_geo, dim) numpy数组
+        - geo_entities: List[Dict] 
+        - top_k: 每个查询返回的候选数量
+        
+        返回：
+        - candidates_per_query: List[List[Dict]] 每个查询的top_k候选列表
+        """
+        import numpy as np
+        
+        if len(geo_embeddings_np) == 0 or len(query_embeddings_np) == 0:
+            return [[] for _ in range(len(query_embeddings_np))]
+        
+        # 归一化向量
+        query_norms = np.linalg.norm(query_embeddings_np, axis=1, keepdims=True)
+        db_norms = np.linalg.norm(geo_embeddings_np, axis=1, keepdims=True)
+        
+        query_normalized = query_embeddings_np / (query_norms + 1e-10)
+        db_normalized = geo_embeddings_np / (db_norms + 1e-10)
+        
+        # 计算相似度矩阵 (N_query, N_geo)
+        similarity_matrix = np.dot(query_normalized, db_normalized.T)
+        
+        # 为每个查询选取top_k
+        candidates_per_query = []
+        for i in range(len(query_embeddings_np)):
+            similarities = similarity_matrix[i]
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            
+            candidates = []
+            for idx in top_indices:
+                sim = float(similarities[idx])
+                entity = geo_entities[idx].copy()
+                entity["similarity"] = sim
+                entity["db_entity_id"] = entity.pop("entity_id")
+                candidates.append(entity)
+            
+            candidates_per_query.append(candidates)
+        
+        return candidates_per_query
+
+    def _batch_similarity_search_amap(conn, query_embeddings_list, top_k):
+        """
+        amap实体批量相似度搜索（数据库查询，利用pgvector HNSW索引）
+
+        策略：单次批量查询，传入所有query embedding，返回每个query的top_k候选
+
+        ID映射说明：
+        - amap_poi_wgs84表的entity_id字段存储原始高德ID（如amap_B0FFLCH14H）
+        - neo4j中amap节点的original_id属性存储这个原始高德ID
+        - 对齐结果中db_entity_id直接使用原始高德ID
+
+        参数：
+        - conn: psycopg2原生连接对象
+        - query_embeddings_list: List[List[float]] 每个实体的embedding
+        - top_k: 每个查询返回的候选数量
+
+        返回：
+        - candidates_per_query: List[List[Dict]]
+        """
+        candidates_per_query = []
+
+        for query_emb in query_embeddings_list:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, entity_id, name, type, longitude, latitude, address,
+                           1 - (embedding <=> %s::vector) as similarity
+                    FROM amap_poi_wgs84
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                """, (query_emb, query_emb, top_k))
+                amap_rows = cur.fetchall()
+            
+            candidates = []
+            for row in amap_rows:
+                # row: (id, entity_id, name, type, longitude, latitude, address, similarity)
+                # entity_id字段存储原始高德ID（如amap_B0FFLCH14H）
+                # neo4j中amap节点的original_id属性存储这个原始高德ID
+                amap_table_id, amap_original_id, name, type_, lon, lat, address, sim = row
+                candidates.append({
+                    "db_entity_id": amap_original_id,  # 直接使用原始高德ID，在neo4j中对应original_id属性
+                    "name": name,
+                    "type": type_ or "",
+                    "similarity": sim,
+                    "longitude": lon,
+                    "latitude": lat,
+                    "address": address,
+                    "source": "amap_poi_wgs84"
+                })
+            
+            candidates_per_query.append(candidates)
+        
+        return candidates_per_query
 
     async def entity_alignment_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        """实体对齐节点"""
+        """实体对齐节点（混合策略优化版）"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Entity_Alignment] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "entity_alignment",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "message": "开始实体对齐"
+        })
+
+        try:
+            # 确保环境变量已加载
+            from dotenv import load_dotenv
+            from pathlib import Path
+            project_root = Path(__file__).parent.parent.parent
+            load_dotenv(project_root / ".env")
+
+            # 连接数据库 - 使用DSN字符串格式避免编码问题
+            import psycopg2
+
+            dsn = "host=localhost port=5432 dbname=bishe user=cznb6666 password=cznb6666"
+            conn = psycopg2.connect(dsn)
+
+            # 使用连接执行查询（不通过PostgresClient类）
+            logger.info("[Entity_Alignment] PostgreSQL连接已建立（DSN模式）")
+
+            # 预加载geo_entity_names embedding（小表，首次调用时加载）
+            nonlocal _geo_cache
+            if _geo_cache is None:
+                _geo_cache = _load_geo_embeddings(conn)
+            geo_entities, geo_embeddings_np = _geo_cache
+
+            # 获取抽取的实体
+            joint_result = state.get("joint_extraction_result", {})
+            entities_dict = state.get("entities", {})
+
+            entity_names = []
+            entity_types = {}
+            if joint_result and "entities" in joint_result:
+                for e in joint_result["entities"]:
+                    name = e.get("name", "")
+                    type_ = e.get("type", "")
+                    if name and name not in entity_names:
+                        entity_names.append(name)
+                        entity_types[name] = type_
+            else:
+                for type_, names in entities_dict.items():
+                    for name in names:
+                        if name and name not in entity_names:
+                            entity_names.append(name)
+                            entity_types[name] = type_
+
+            if not entity_names:
+                logger.info(f"[Entity_Alignment] 无实体需要对齐")
+                pg_client.close()
+                return {
+                    "entity_alignment_result": {
+                        "alignment_items": [],
+                        "aligned_entities": [],
+                        "new_entities": [],
+                        "skipped_entities": [],
+                        "overall_alignment_rate": 0.0,
+                        "alignment_confidence": "high"
+                    },
+                    "aligned_entity_ids": {},
+                    "new_entity_names": [],
+                    "current_step": StepEnum.DONE,
+                }
+
+            # 加载嵌入模型
+            model = _get_embedding_model()
+
+            # 生成实体嵌入向量（批量）
+            entity_embeddings = model.encode(entity_names, show_progress_bar=False, convert_to_numpy=True)
+
+            # 对齐配置
+            high_threshold = config.alignment_high_confidence_threshold
+            low_threshold = config.alignment_similarity_threshold
+            top_k = config.alignment_top_k
+            use_llm = config.alignment_use_llm_decision
+
+            # 批量相似度搜索（混合策略）
+            # geo: 内存批量计算（预加载）
+            geo_candidates_per_query = _batch_similarity_search_geo(
+                entity_embeddings, geo_embeddings_np, geo_entities, top_k
+            )
+            
+            # amap: 数据库批量查询（利用HNSW索引）
+            query_embeddings_list = [emb.tolist() for emb in entity_embeddings]
+            amap_candidates_per_query = _batch_similarity_search_amap(
+                pg_client, query_embeddings_list, top_k
+            )
+
+            alignment_items = []
+            aligned_entities = []
+            new_entities = []
+            skipped_entities = []
+            aligned_ids = {}
+
+            # 处理每个实体
+            for i, name in enumerate(entity_names):
+                logger.debug(f"[Entity_Alignment] 对齐实体: {name}")
+
+                # 合并geo和amap候选
+                candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
+
+                # 按相似度排序，取top_k
+                candidates.sort(key=lambda x: x["similarity"], reverse=True)
+                candidates = candidates[:top_k]
+
+                best_candidate = candidates[0] if candidates else None
+                best_similarity = best_candidate.get("similarity", 0.0) if best_candidate else 0.0
+
+                alignment_item = {
+                    "extracted_name": name,
+                    "extracted_type": entity_types.get(name, ""),
+                    "candidates": candidates,
+                    "best_match": None,
+                    "alignment_status": "pending",
+                    "llm_decision": None
+                }
+
+                # 高置信度：直接匹配
+                if best_similarity >= high_threshold:
+                    alignment_item["alignment_status"] = "aligned"
+                    alignment_item["best_match"] = best_candidate
+                    alignment_item["llm_decision"] = f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
+
+                    aligned_entities.append({
+                        "name": name,
+                        "db_id": best_candidate["db_entity_id"],
+                        "db_name": best_candidate["name"],
+                        "similarity": best_similarity,
+                        "source": best_candidate["source"]
+                    })
+                    aligned_ids[name] = best_candidate["db_entity_id"]
+
+                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})")
+
+                elif best_similarity < low_threshold:
+                    alignment_item["alignment_status"] = "new_entity"
+                    alignment_item["llm_decision"] = f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
+                    new_entities.append(name)
+                    logger.debug(f"[Entity_Alignment] {name} -> 新实体 (低置信度)")
+
+                elif use_llm and candidates:
+                    candidates_for_format = []
+                    for c in candidates:
+                        c_formatted = c.copy()
+                        c_formatted["db_name"] = c_formatted.get("name", "")
+                        c_formatted["db_type"] = c_formatted.get("type", "")
+                        candidates_for_format.append(c_formatted)
+                    
+                    candidates_text = format_alignment_candidates(candidates_for_format)
+
+                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke({
+                        "extracted_name": name,
+                        "extracted_type": entity_types.get(name, ""),
+                        "raw_text": state.get("raw_text", ""),
+                        "candidates": candidates_text,
+                    })
+
+                    try:
+                        response = await llm.ainvoke(prompt_text.messages[1].content)
+
+                        import re
+                        status_match = re.search(r'alignment_status[=:]\s*"?(\w+)"?', response.content, re.IGNORECASE)
+                        index_match = re.search(r'best_match_index[=:]\s*(\d+)', response.content, re.IGNORECASE)
+                        decision_match = re.search(r'llm_decision[=:]\s*"([^"]+)"', response.content, re.IGNORECASE)
+
+                        llm_status = status_match.group(1) if status_match else "new_entity"
+                        best_index = int(index_match.group(1)) if index_match else -1
+                        llm_decision = decision_match.group(1) if decision_match else "LLM判断"
+                        
+                        VALID_STATUSES = {"aligned", "new_entity", "skip"}
+                        if llm_status not in VALID_STATUSES:
+                            llm_status = "new_entity"
+
+                        alignment_item["alignment_status"] = llm_status
+                        alignment_item["llm_decision"] = llm_decision
+
+                        if llm_status == "aligned" and best_index >= 0 and best_index < len(candidates):
+                            best_match = candidates[best_index]
+                            alignment_item["best_match"] = best_match
+
+                            aligned_entities.append({
+                                "name": name,
+                                "db_id": best_match["db_entity_id"],
+                                "db_name": best_match["name"],
+                                "similarity": best_match["similarity"],
+                                "source": best_match["source"]
+                            })
+                            aligned_ids[name] = best_match["db_entity_id"]
+
+                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})")
+                        else:
+                            new_entities.append(name)
+                            logger.debug(f"[Entity_Alignment] {name} -> 新实体 (LLM判断)")
+
+                    except Exception as e:
+                        logger.warning(f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体")
+                        alignment_item["alignment_status"] = "new_entity"
+                        alignment_item["llm_decision"] = f"LLM判断异常，默认为新实体"
+                        new_entities.append(name)
+
+                else:
+                    alignment_item["alignment_status"] = "new_entity"
+                    alignment_item["llm_decision"] = f"中置信度({best_similarity:.3f})，未启用LLM判断"
+                    new_entities.append(name)
+
+                alignment_items.append(alignment_item)
+
+            # ===== 新实体创建逻辑（P12新增） =====
+            # 将未对齐的新实体写入数据库和neo4j
+            # 注意：延迟关闭pg_client，避免重复连接
+            created_entity_ids = {}
+            if new_entities:
+                logger.info(f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体...")
+
+                try:
+                    # 使用已有的pg_client连接（避免重新连接）
+                    neo4j_config = settings.get_neo4j_config()
+                    from kg.neo4j_client import Neo4jClient
+                    neo4j_client = Neo4jClient(**neo4j_config)
+
+                    # 批量生成新实体的embedding
+                    new_embeddings = model.encode(new_entities, show_progress_bar=False, convert_to_numpy=True)
+
+                    # 准备新实体数据
+                    for i, name in enumerate(new_entities):
+                        entity_type = entity_types.get(name, "poi")
+                        entity_data = {
+                            "name": name,
+                            "type": entity_type,
+                            "aliases": [],
+                            "source": "xiaohongshu"
+                        }
+
+                        # 写入Postgres geo_entity_names表（使用已有连接）
+                        pg_entity_id = pg_client.insert_new_geo_entity(
+                            entity_data,
+                            new_embeddings[i].tolist()
+                        )
+
+                        if pg_entity_id:
+                            # 写入Neo4j
+                            neo4j_entity_id = neo4j_client.create_new_geo_entity(entity_data)
+                            if neo4j_entity_id:
+                                created_entity_ids[name] = neo4j_entity_id
+                                logger.info(f"[Entity_Alignment] 新实体已创建: {name} -> {neo4j_entity_id}")
+                            else:
+                                # neo4j创建失败，使用postgres的entity_id
+                                created_entity_ids[name] = pg_entity_id
+                                logger.warning(f"[Entity_Alignment] Neo4j创建失败，使用PG ID: {name} -> {pg_entity_id}")
+                        else:
+                            logger.warning(f"[Entity_Alignment] 新实体创建失败: {name}")
+
+                    neo4j_client.close()
+                    logger.success(f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}")
+
+                except Exception as create_error:
+                    logger.error(f"[Entity_Alignment] 新实体创建异常: {create_error}")
+                    import traceback
+                    traceback.print_exc()
+
+            # 关闭数据库连接（延迟关闭，新实体创建完成后）
+            pg_client.close()
+
+            # 统计
+            total_entities = len(entity_names)
+            aligned_count = len(aligned_entities)
+            alignment_rate = aligned_count / total_entities if total_entities > 0 else 0.0
+            geo_aligned = sum(1 for e in aligned_entities if e.get("source") == "geo_entity_names")
+            amap_aligned = sum(1 for e in aligned_entities if e.get("source") == "amap_poi_wgs84")
+
+            if alignment_rate >= 0.8:
+                overall_confidence = "high"
+            elif alignment_rate >= 0.5:
+                overall_confidence = "medium"
+            else:
+                overall_confidence = "low"
+
+            logger.info(
+                f"[Entity_Alignment] 完成: {aligned_count}/{total_entities} 已对齐, "
+                f"{len(new_entities)} 新实体(创建{len(created_entity_ids)}个), 对齐率={alignment_rate:.1%}"
+                f"(geo:{geo_aligned}, amap:{amap_aligned})"
+            )
+
+            writer({
+                "step": "entity_alignment",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "aligned_count": aligned_count,
+                "new_count": len(new_entities),
+                "created_count": len(created_entity_ids),
+                "alignment_rate": alignment_rate,
+                "geo_aligned": geo_aligned,
+                "amap_aligned": amap_aligned,
+                "confidence": overall_confidence
+            })
+
+            # 合并aligned_ids和created_entity_ids
+            all_entity_ids = {**aligned_ids, **created_entity_ids}
+
+            return {
+                "entity_alignment_result": {
+                    "alignment_items": alignment_items,
+                    "aligned_entities": aligned_entities,
+                    "new_entities": new_entities,
+                    "created_entities": [{"name": k, "entity_id": v} for k, v in created_entity_ids.items()],
+                    "skipped_entities": skipped_entities,
+                    "overall_alignment_rate": alignment_rate,
+                    "alignment_confidence": overall_confidence,
+                    "geo_aligned_count": geo_aligned,
+                    "amap_aligned_count": amap_aligned,
+                    "created_count": len(created_entity_ids)
+                },
+                "aligned_entity_ids": all_entity_ids,  # 包含已对齐和新创建的实体ID
+                "new_entity_names": [n for n in new_entities if n not in created_entity_ids],  # 仅保留创建失败的
+                "current_step": StepEnum.DONE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Entity_Alignment] 处理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            writer({
+                "step": "entity_alignment",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "error": str(e)
+            })
+            return {
+                "entity_alignment_result": {},
+                "aligned_entity_ids": {},
+                "new_entity_names": [],
+                "error": str(e),
+                "current_step": StepEnum.DONE,
+            }
+
+    return entity_alignment_node
+
+    # ===== 模块级缓存（P12性能优化） =====
+# ===== 函数级缓存（P12性能优化） =====
+    # 嵌入模型缓存（避免重复加载）
+    _embedding_model_cache = None
+    # 数据库embedding缓存（避免重复查询）
+    _db_cache = None
+    # amap entity_id基数缓存
+    _amap_id_base_cache = None
+
+    def _get_embedding_model():
+        """懒加载嵌入模型"""
+        nonlocal _embedding_model_cache
+        if _embedding_model_cache is None:
+            import os
+            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像加速
+            from sentence_transformers import SentenceTransformer
+            model_name = config.alignment_embedding_model
+            logger.info(f"[Entity_Alignment] 加载嵌入模型: {model_name}")
+            _embedding_model_cache = SentenceTransformer(model_name)
+        return _embedding_model_cache
+
+    def _load_db_embeddings(pg_client):
+        """
+        预加载数据库中所有实体embedding到内存
+        
+        返回：
+        - geo_entities: List[Dict] 每个包含 entity_id, name, type, longitude, latitude, embedding
+        - amap_entities: List[Dict] 每个包含 id, entity_id(原始), name, type, longitude, latitude, address, embedding
+        - geo_embeddings_np: numpy数组 (N_geo, dim)
+        - amap_embeddings_np: numpy数组 (N_amap, dim)
+        """
+        import numpy as np
+        
+        # 查询geo_entity_names
+        with pg_client.conn.cursor() as cur:
+            cur.execute("""
+                SELECT entity_id, name, type, longitude, latitude, embedding
+                FROM geo_entity_names
+                WHERE embedding IS NOT NULL
+            """)
+            geo_rows = cur.fetchall()
+        
+        geo_entities = []
+        geo_embeddings = []
+        for row in geo_rows:
+            entity_id, name, type_, lon, lat, emb_str = row
+            if emb_str:
+                import json
+                # 解析embedding向量（pgvector返回字符串格式，使用json.loads替代eval）
+                emb_list = json.loads(emb_str) if isinstance(emb_str, str) else emb_str
+                geo_entities.append({
+                    "entity_id": entity_id,
+                    "name": name,
+                    "type": type_ or "",
+                    "longitude": lon,
+                    "latitude": lat,
+                    "source": "geo_entity_names"
+                })
+                geo_embeddings.append(emb_list)
+        
+        # 查询amap_poi_wgs84
+        with pg_client.conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, entity_id, name, type, longitude, latitude, address, embedding
+                FROM amap_poi_wgs84
+                WHERE embedding IS NOT NULL
+            """)
+            amap_rows = cur.fetchall()
+        
+        amap_entities = []
+        amap_embeddings = []
+        for row in amap_rows:
+            amap_id, original_id, name, type_, lon, lat, address, emb_str = row
+            if emb_str:
+                emb_list = eval(emb_str) if isinstance(emb_str, str) else emb_str
+                amap_entities.append({
+                    "id": amap_id,
+                    "original_id": original_id,
+                    "name": name,
+                    "type": type_ or "",
+                    "longitude": lon,
+                    "latitude": lat,
+                    "address": address,
+                    "source": "amap_poi_wgs84"
+                })
+                amap_embeddings.append(emb_list)
+        
+        # 转换为numpy数组
+        geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
+        amap_embeddings_np = np.array(amap_embeddings) if amap_embeddings else np.array([])
+        
+        logger.info(f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条, amap_poi_wgs84: {len(amap_entities)}条")
+        
+        return geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np
+
+    def _batch_similarity_search(query_embeddings_np, db_embeddings_np, db_entities, top_k):
+        """
+        批量相似度搜索（内存计算）
+        
+        使用cosine similarity: similarity = 1 - cosine_distance
+        
+        参数：
+        - query_embeddings_np: (N_query, dim) numpy数组
+        - db_embeddings_np: (N_db, dim) numpy数组
+        - db_entities: List[Dict] 数据库实体列表
+        - top_k: 每个查询返回的候选数量
+        
+        返回：
+        - candidates_per_query: List[List[Dict]] 每个查询的top_k候选列表
+        """
+        import numpy as np
+        
+        if len(db_embeddings_np) == 0 or len(query_embeddings_np) == 0:
+            return [[] for _ in range(len(query_embeddings_np))]
+        
+        # 计算cosine similarity矩阵 (N_query, N_db)
+        # cosine_sim = dot(A, B) / (norm(A) * norm(B))
+        # 由于embedding通常已归一化，可以直接用 dot 计算相似度
+        
+        # 归一化query和db向量
+        query_norms = np.linalg.norm(query_embeddings_np, axis=1, keepdims=True)
+        db_norms = np.linalg.norm(db_embeddings_np, axis=1, keepdims=True)
+        
+        query_normalized = query_embeddings_np / (query_norms + 1e-10)
+        db_normalized = db_embeddings_np / (db_norms + 1e-10)
+        
+        # 计算相似度矩阵
+        similarity_matrix = np.dot(query_normalized, db_normalized.T)  # (N_query, N_db)
+        
+        # 为每个查询选取top_k
+        candidates_per_query = []
+        for i in range(len(query_embeddings_np)):
+            similarities = similarity_matrix[i]
+            # 获取top_k索引
+            if len(similarities) >= top_k:
+                top_indices = np.argsort(similarities)[-top_k:][::-1]  # 降序
+            else:
+                top_indices = np.argsort(similarities)[::-1]
+            
+            candidates = []
+            for idx in top_indices:
+                sim = float(similarities[idx])
+                entity = db_entities[idx].copy()
+                entity["similarity"] = sim
+                candidates.append(entity)
+            
+            candidates_per_query.append(candidates)
+        
+        return candidates_per_query
+
+    async def entity_alignment_node(state: CorpusState, writer: StreamWriter) -> Dict:
+        """实体对齐节点（批量优化版）"""
         corpus_id = state['corpus_id']
         logger.info(f"[Entity_Alignment] 处理语料: {corpus_id}")
 
@@ -3180,6 +3842,21 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
             pg_config = settings.get_postgres_config()
             pg_client = PostgresClient(**pg_config)
+
+            # 获取geo_poi_count并缓存（用于计算amap在neo4j的entity_id）
+            nonlocal _amap_id_base_cache, _db_cache
+            if _amap_id_base_cache is None:
+                with pg_client.conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'")
+                    geo_poi_count = cur.fetchone()[0]
+                    _amap_id_base_cache = geo_poi_count
+                    logger.info(f"[Entity_Alignment] geo_entity_names poi数量: {geo_poi_count}, amap neo4j ID起始: poi_{_amap_id_base_cache + 1}")
+            amap_entity_id_base = _amap_id_base_cache
+
+            # 预加载数据库embedding（首次调用时加载，后续使用缓存）
+            if _db_cache is None:
+                _db_cache = _load_db_embeddings(pg_client)
+            geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = _db_cache
 
             # 获取抽取的实体（从joint_extraction_result或entities）
             joint_result = state.get("joint_extraction_result", {})
@@ -3206,6 +3883,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
             if not entity_names:
                 logger.info(f"[Entity_Alignment] 无实体需要对齐")
+                pg_client.close()
                 return {
                     "entity_alignment_result": {
                         "alignment_items": [],
@@ -3223,7 +3901,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             # 加载嵌入模型
             model = _get_embedding_model()
 
-            # 生成实体嵌入向量
+            # 生成实体嵌入向量（批量）
             entity_embeddings = model.encode(entity_names, show_progress_bar=False, convert_to_numpy=True)
 
             # 对齐配置
@@ -3232,42 +3910,43 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             top_k = config.alignment_top_k
             use_llm = config.alignment_use_llm_decision
 
+            # 批量相似度搜索
+            geo_candidates_per_query = _batch_similarity_search(
+                entity_embeddings, geo_embeddings_np, geo_entities, top_k
+            )
+            amap_candidates_per_query = _batch_similarity_search(
+                entity_embeddings, amap_embeddings_np, amap_entities, top_k
+            )
+
             alignment_items = []
             aligned_entities = []
             new_entities = []
             skipped_entities = []
             aligned_ids = {}
 
-            # 对每个实体进行相似度搜索和对齐
-            for i, (name, embedding) in enumerate(zip(entity_names, entity_embeddings)):
+            # 处理每个实体的候选结果
+            for i, name in enumerate(entity_names):
                 logger.debug(f"[Entity_Alignment] 对齐实体: {name}")
 
-                # 在数据库中检索相似实体
-                with pg_client.conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT entity_id, name, type, longitude, latitude,
-                               1 - (embedding <=> %s::vector) as similarity
-                        FROM geo_entity_names
-                        WHERE embedding IS NOT NULL
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s
-                    """, (embedding.tolist(), embedding.tolist(), top_k))
+                # 合并geo和amap候选
+                candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
+                
+                # 为amap候选计算正确的neo4j entity_id
+                for c in candidates:
+                    if c.get("source") == "amap_poi_wgs84":
+                        amap_id = c.get("id")
+                        c["db_entity_id"] = f"poi_{amap_entity_id_base + amap_id}"
+                        c["db_original_id"] = c.get("original_id")
+                        # 清理不需要的字段
+                        c.pop("id", None)
+                        c.pop("original_id", None)
+                    elif c.get("source") == "geo_entity_names":
+                        c["db_entity_id"] = c.get("entity_id")
+                        c.pop("entity_id", None)
 
-                    candidates_raw = cur.fetchall()
-
-                # 转换候选实体
-                candidates = []
-                for row in candidates_raw:
-                    db_id, db_name, db_type, lon, lat, sim = row
-                    candidates.append({
-                        "db_entity_id": db_id,
-                        "db_name": db_name,
-                        "db_type": db_type or "",
-                        "similarity": sim,
-                        "longitude": lon,
-                        "latitude": lat,
-                        "source": "geo_entity_names"
-                    })
+                # 按相似度排序，取top_k
+                candidates.sort(key=lambda x: x["similarity"], reverse=True)
+                candidates = candidates[:top_k]
 
                 # 判断对齐状态
                 best_candidate = candidates[0] if candidates else None
@@ -3291,12 +3970,13 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                     aligned_entities.append({
                         "name": name,
                         "db_id": best_candidate["db_entity_id"],
-                        "db_name": best_candidate["db_name"],
-                        "similarity": best_similarity
+                        "db_name": best_candidate["name"],
+                        "similarity": best_similarity,
+                        "source": best_candidate["source"]
                     })
                     aligned_ids[name] = best_candidate["db_entity_id"]
 
-                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['db_name']} (高置信度)")
+                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})")
 
                 # 低置信度：直接跳过（新实体）
                 elif best_similarity < low_threshold:
@@ -3309,8 +3989,16 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                 # 中置信度：交给LLM判断
                 elif use_llm and candidates:
-                    # 格式化候选信息
-                    candidates_text = format_alignment_candidates(candidates)
+                    # 格式化候选信息（包含来源标识）
+                    # 需要将name字段改为db_name以兼容format_alignment_candidates
+                    candidates_for_format = []
+                    for c in candidates:
+                        c_formatted = c.copy()
+                        c_formatted["db_name"] = c_formatted.get("name", "")
+                        c_formatted["db_type"] = c_formatted.get("type", "")
+                        candidates_for_format.append(c_formatted)
+                    
+                    candidates_text = format_alignment_candidates(candidates_for_format)
 
                     # 调用LLM判断
                     prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke({
@@ -3332,6 +4020,11 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         llm_status = status_match.group(1) if status_match else "new_entity"
                         best_index = int(index_match.group(1)) if index_match else -1
                         llm_decision = decision_match.group(1) if decision_match else "LLM判断"
+                        
+                        # 验证输出状态
+                        VALID_STATUSES = {"aligned", "new_entity", "skip"}
+                        if llm_status not in VALID_STATUSES:
+                            llm_status = "new_entity"
 
                         alignment_item["alignment_status"] = llm_status
                         alignment_item["llm_decision"] = llm_decision
@@ -3343,12 +4036,13 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                             aligned_entities.append({
                                 "name": name,
                                 "db_id": best_match["db_entity_id"],
-                                "db_name": best_match["db_name"],
-                                "similarity": best_match["similarity"]
+                                "db_name": best_match["name"],
+                                "similarity": best_match["similarity"],
+                                "source": best_match["source"]
                             })
                             aligned_ids[name] = best_match["db_entity_id"]
 
-                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['db_name']} (LLM判断匹配)")
+                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})")
                         else:
                             new_entities.append(name)
                             logger.debug(f"[Entity_Alignment] {name} -> 新实体 (LLM判断)")
@@ -3370,10 +4064,71 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             # 关闭数据库连接
             pg_client.close()
 
+            # ===== 新实体创建逻辑（P12新增） =====
+            # 将未对齐的新实体写入数据库和neo4j
+            created_entity_ids = {}
+            if new_entities:
+                logger.info(f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体...")
+
+                try:
+                    # 重新连接数据库
+                    pg_config = settings.get_postgres_config()
+                    pg_client = PostgresClient(**pg_config)
+
+                    neo4j_config = settings.get_neo4j_config()
+                    from kg.neo4j_client import Neo4jClient
+                    neo4j_client = Neo4jClient(**neo4j_config)
+
+                    # 批量生成新实体的embedding
+                    new_embeddings = model.encode(new_entities, show_progress_bar=False, convert_to_numpy=True)
+
+                    # 准备新实体数据
+                    for i, name in enumerate(new_entities):
+                        entity_type = entity_types.get(name, "poi")
+                        entity_data = {
+                            "name": name,
+                            "type": entity_type,
+                            "aliases": [],
+                            "source": "xiaohongshu"
+                        }
+
+                        # 写入Postgres geo_entity_names表
+                        pg_entity_id = pg_client.insert_new_geo_entity(
+                            entity_data,
+                            new_embeddings[i].tolist()
+                        )
+
+                        if pg_entity_id:
+                            # 写入Neo4j
+                            neo4j_entity_id = neo4j_client.create_new_geo_entity(entity_data)
+                            if neo4j_entity_id:
+                                created_entity_ids[name] = neo4j_entity_id
+                                logger.info(f"[Entity_Alignment] 新实体已创建: {name} -> {neo4j_entity_id}")
+                            else:
+                                # neo4j创建失败，使用postgres的entity_id
+                                created_entity_ids[name] = pg_entity_id
+                                logger.warning(f"[Entity_Alignment] Neo4j创建失败，使用PG ID: {name} -> {pg_entity_id}")
+                        else:
+                            logger.warning(f"[Entity_Alignment] 新实体创建失败: {name}")
+
+                    pg_client.close()
+                    neo4j_client.close()
+
+                    logger.success(f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}")
+
+                except Exception as create_error:
+                    logger.error(f"[Entity_Alignment] 新实体创建异常: {create_error}")
+                    import traceback
+                    traceback.print_exc()
+
             # 计算整体对齐率
             total_entities = len(entity_names)
             aligned_count = len(aligned_entities)
             alignment_rate = aligned_count / total_entities if total_entities > 0 else 0.0
+
+            # 统计各来源对齐数量
+            geo_aligned = sum(1 for e in aligned_entities if e.get("source") == "geo_entity_names")
+            amap_aligned = sum(1 for e in aligned_entities if e.get("source") == "amap_poi_wgs84")
 
             # 整体置信度判断
             if alignment_rate >= 0.8:
@@ -3385,7 +4140,8 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
             logger.info(
                 f"[Entity_Alignment] 完成: {aligned_count}/{total_entities} 已对齐, "
-                f"{len(new_entities)} 新实体, 对齐率={alignment_rate:.1%}"
+                f"{len(new_entities)} 新实体(创建{len(created_entity_ids)}个), 对齐率={alignment_rate:.1%}"
+                f"(geo:{geo_aligned}, amap:{amap_aligned})"
             )
 
             writer({
@@ -3394,21 +4150,31 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 "status": "completed",
                 "aligned_count": aligned_count,
                 "new_count": len(new_entities),
+                "created_count": len(created_entity_ids),
                 "alignment_rate": alignment_rate,
+                "geo_aligned": geo_aligned,
+                "amap_aligned": amap_aligned,
                 "confidence": overall_confidence
             })
+
+            # 合并aligned_ids和created_entity_ids
+            all_entity_ids = {**aligned_ids, **created_entity_ids}
 
             return {
                 "entity_alignment_result": {
                     "alignment_items": alignment_items,
                     "aligned_entities": aligned_entities,
                     "new_entities": new_entities,
+                    "created_entities": [{"name": k, "entity_id": v} for k, v in created_entity_ids.items()],
                     "skipped_entities": skipped_entities,
                     "overall_alignment_rate": alignment_rate,
-                    "alignment_confidence": overall_confidence
+                    "alignment_confidence": overall_confidence,
+                    "geo_aligned_count": geo_aligned,
+                    "amap_aligned_count": amap_aligned,
+                    "created_count": len(created_entity_ids)
                 },
-                "aligned_entity_ids": aligned_ids,
-                "new_entity_names": new_entities,
+                "aligned_entity_ids": all_entity_ids,  # 包含已对齐和新创建的实体ID
+                "new_entity_names": [n for n in new_entities if n not in created_entity_ids],  # 仅保留创建失败的
                 "current_step": StepEnum.DONE,
             }
 

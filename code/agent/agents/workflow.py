@@ -1589,6 +1589,7 @@ def build_distributed_workflow(
         """FINALIZE阶段 - 输出到数据库"""
         neo4j_stats = {"merged_entities": 0, "merged_relations": 0}
         postgres_stats = {"inserted": 0}
+        error_message = None  # 错误标记
 
         try:
             # 尝试导入数据库客户端（支持直接运行和模块运行）
@@ -1606,6 +1607,7 @@ def build_distributed_workflow(
                     return {
                         "neo4j_stats": neo4j_stats,
                         "postgres_stats": postgres_stats,
+                        "error": "数据库模块未找到",
                         "current_phase": PhaseEnum.FINALIZE,
                         "end_time": time.time(),
                     }
@@ -1646,6 +1648,9 @@ def build_distributed_workflow(
                 # 插入批次记录
                 pg.insert_batch(state["batch_id"], state["total_count"], state["worker_count"])
 
+                # 记录 Neo4j 同步状态
+                pg.update_neo4j_sync_status(state["batch_id"], neo4j_stats["merged_entities"] > 0 or neo4j_stats["merged_relations"] > 0)
+
                 # 插入实体
                 if state["aggregated_entities"]:
                     entity_count = pg.insert_entities(state["batch_id"], state["aggregated_entities"])
@@ -1667,18 +1672,37 @@ def build_distributed_workflow(
                     corpus_count = pg.insert_corpus_sources(state["batch_id"], all_corpus_states)
                     postgres_stats["corpus_sources"] = corpus_count
 
-                # 更新批次状态
+                # 更新批次状态为成功
                 pg.update_batch_status(state["batch_id"], "completed")
 
-            logger.info(f"[Finalizer] Neo4j: {neo4j_stats}, PostgreSQL: {postgres_stats}")
+            logger.info(f"[Finalizer] 数据库写入成功 - Neo4j: {neo4j_stats}, PostgreSQL: {postgres_stats}")
 
         except Exception as e:
+            error_message = str(e)
             logger.error(f"[Finalizer] 数据库写入失败: {e}")
-            # 即使失败也继续，返回已处理的结果
+            # 尝试更新批次状态为失败并记录错误信息
+            try:
+                db_config = _get_database_config()
+                with PostgresClient(
+                    db_config["pg_host"],
+                    db_config["pg_port"],
+                    db_config["pg_database"],
+                    db_config["pg_user"],
+                    db_config["pg_password"]
+                ) as pg:
+                    pg.update_batch_status_with_error(state["batch_id"], "failed", error_message)
+                    # 检查 Neo4j 是否已同步但 PostgreSQL 失败（需要补偿）
+                    batch_status = pg.get_batch_status(state["batch_id"])
+                    if batch_status and batch_status.get("neo4j_sync"):
+                        logger.warning(f"[Finalizer] Neo4j已同步但PostgreSQL失败，需要人工检查数据一致性")
+                    logger.info(f"[Finalizer] 批次状态已更新为 failed，错误: {error_message[:100]}")
+            except Exception as inner_e:
+                logger.error(f"[Finalizer] 无法更新批次失败状态: {inner_e}")
 
         return {
             "neo4j_stats": neo4j_stats,
             "postgres_stats": postgres_stats,
+            "error": error_message,  # 返回错误信息（None表示成功）
             "current_phase": PhaseEnum.FINALIZE,
             "end_time": time.time(),
         }
@@ -1931,6 +1955,7 @@ async def process_batch(
         "entity_aliases": {},
         "neo4j_stats": {},
         "postgres_stats": {},
+        "error": None,  # 初始无错误
         "current_phase": PhaseEnum.INIT,
         "active_workers": [],
         "failed_workers": [],

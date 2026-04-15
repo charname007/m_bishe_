@@ -320,6 +320,7 @@ class KGState(TypedDict):
     # ===== FINALIZE阶段：结果输出 =====
     neo4j_stats: Annotated[Dict, replace_value]
     postgres_stats: Annotated[Dict, replace_value]
+    error: Annotated[Optional[str], replace_value]  # 错误标记（None表示成功）
 
     # ===== 状态控制 =====
     current_phase: Annotated[PhaseEnum, replace_value]
@@ -340,11 +341,11 @@ ENTITY_TYPES = {
     "街区": "具有边界感的生活区域（如：街道口、华农校区）"
 }
 
-# v3.2精简版：8个关系类型（空间基础3 + 社交语义1 + 对比评价3 + 事件1）
-# 参考：docs/semantic_schema_v3.2.md
+# v3.3精简版：8个关系类型（空间基础3 + 社交语义1 + 对比评价3 + 事件1）
+# 参考：docs/semantic_schema_v3.3.md
 RELATION_TYPES = [
     # 空间基础关系（3个）—— 图谱骨架
-    "位于", "包含", "方位",
+    "位于", "包含", "相对方位",
     # 社交语义关系（1个）—— 图谱血肉
     "具有功能",
     # 对比评价关系（3个）—— 特色
@@ -388,8 +389,8 @@ EVENT_CATEGORIES = ["自然事件", "人文事件", "商业活动", "社会事�
 # v2.2改进：事件状态枚举
 EVENT_STATES = ["正在进行", "已结束", "计划中", "周期性"]
 
-# v3.2精简版：对比维度枚举（7个）
-COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味"]
+# v3.2精简版：对比维度枚举（8个，v3.3新增"其他"）
+COMPARE_DIMENSIONS = ["价格", "环境", "服务", "人流量", "品质", "交通", "口味", "其他"]
 
 # v3.2精简版：情感标签已合并入特征标签，此枚举已删除
 # 原 EMOTION_TAGS 内容已归入 FeatureTagEnum

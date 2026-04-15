@@ -1,6 +1,6 @@
 # Agent Workflow 修改建议（参考稿）
 
-更新时间：2026-04-15
+更新时间：2026-04-16
 适用模块：`agent/agents/`
 
 **目标**
@@ -8,7 +8,7 @@
 
 ---
 
-# 已实现架构总结（2026-04-15更新）
+# 已实现架构总结（2026-04-16更新）
 
 ## 一、架构版本演进
 
@@ -23,6 +23,7 @@
 | **P9** | 联合抽取 | Joint NER+RE + Reflexion + 全节点二次检查 | ✅ 已实现 |
 | **P10** | QA导师模式 | 多LLM协作 + 审批修改循环 | ✅ 已实现 |
 | **v3.2** | 精简版体系 | 8关系枚举 + 9功能节点体系 | ✅ 已实现 |
+| **P12** | 提示词工程优化 | 模块化Schema + RISEN/RCoT框架 + Self-Check增强 | ✅ 已实现 |
 
 ---
 
@@ -125,7 +126,7 @@ class RelationTypeEnum(str, Enum):
     """关系类型枚举（v3.2精简版：8个关系）
     
     关系体系：
-    - 空间基础关系（3个）：位于、包含、方位
+    - 空间基础关系（3个）：位于、包含、相对方位
     - 社交语义关系（1个）：具有功能
     - 对比评价关系（3个）：优于、相似、劣于
     - 事件关系（1个）：发生事件
@@ -133,7 +134,7 @@ class RelationTypeEnum(str, Enum):
     # 空间基础关系（3个）
     LOCATED = "位于"           # 空间定位/归属（合并原"属于"）
     CONTAINS = "包含"          # 空间包含（位于的反向）
-    ORIENTATION = "方位"       # 空间邻近+方位（合并原"相邻+距离+方向"）
+    RELATIVE_ORIENTATION = "相对方位"  # 空间邻近+相对方位（合并原"相邻+距离+方向"）
 
     # 社交语义关系（1个）
     HAS_FUNCTION = "具有功能"  # 场所的功能用途
@@ -449,4 +450,223 @@ __all__ = [
 
 ---
 
-**文档维护**: 本文档随架构迭代持续更新，记录已实现的改进和待实施的优化方向。
+## 十四、P12提示词工程优化（2026-04-16新增）
+
+### 14.1 改进背景
+
+基于Prompt Architect框架分析，发现原有提示词存在以下问题：
+- **提示词冗长**：JOINT_NER_RE_USER约800+行，Token效率低
+- **内容重复严重**：关系定义在多处完整重复
+- **角色定义宽泛**："地理语义专家"缺乏精准定义
+- **CoT过于笼统**：缺少反向验证步骤
+- **示例设计失衡**：缺少反面示例
+- **Self-Check反思薄弱**：反思维度单一
+
+### 14.2 模块化Schema组件
+
+新增可复用的Schema模块，解决内容重复问题：
+
+```python
+# 核心Schema模块（prompts.py新增）
+ENTITY_SCHEMA_CORE       # 实体类型定义（GIS标准）
+RELATION_SCHEMA_CORE     # 关系类型定义（8种）
+ENTITY_ATTRIBUTE_SCHEMA  # 实体属性定义
+RELATION_ATTRIBUTE_SCHEMA # 关系属性定义
+VALIDATION_COT           # 带反向验证的思维链
+NEGATIVE_EXAMPLES        # 反面示例（禁止产生）
+EXPERT_ROLE_TEMPLATE     # 精准角色定义模板
+```
+
+**使用方式**：
+```python
+from agent.agents import assemble_joint_extraction_prompt
+
+# 模块化组装提示词（按需组装）
+prompt = assemble_joint_extraction_prompt(
+    raw_text="武汉大学在珞喻路上",
+    entity_hints=format_entity_hints(["武汉大学", "珞喻路"]),
+    relation_hints=format_relation_hints(["位于"]),
+    include_negative_examples=True  # 可选是否包含反面示例
+)
+```
+
+### 14.3 RISEN + RCoT框架重构
+
+应用RISEN框架重构核心提示词：
+
+| RISEN组件 | 改进内容 |
+|-----------|----------|
+| **R**ole | 精准定义：GIS背景 + 武汉本地知识 + 社交媒体语料分析能力 |
+| **I**nstructions | 结构化指令：优先级 + 执行顺序 + 验证要求 |
+| **S**teps | 正向抽取5步 + 反向验证4步（RCoT） |
+| **E**nd goal | 明确质量标准 + 验收条件 |
+| **N**arrowing | 整合边界约束 + 幻觉禁止 + 格式要求 |
+
+**反向验证步骤（RCoT）**：
+```
+6. 幻觉检查：每个三元组能否在原文找到依据？
+7. 实体检查：是否存在泛化词被误识别？
+8. 方向检查：头尾实体顺序是否正确？
+9. 属性检查：属性值是否有原文依据？
+```
+
+### 14.4 反面示例设计
+
+新增反面示例模块，明确禁止产生的内容：
+
+```python
+NEGATIVE_EXAMPLES = """
+### ❌ 幻觉三元组
+输入: "武汉大学樱花很美"
+错误: <武汉大学, 发生事件, 樱花节>  ← 原文无"樱花节"
+正确: 实体属性: 特征标签=["樱花景观"]
+
+### ❌ 关系方向错误
+输入: "群光广场在珞喻路上"
+错误: <珞喻路, 位于, 群光广场>  ← 方向颠倒
+正确: <群光广场, 位于, 珞喻路>
+
+### ❌ 泛化词误识别
+输入: "这边风景不错"
+错误: 实体: "这边" [POI]  ← 模糊指代
+正确: (无实体) confidence=low
+"""
+```
+
+### 14.5 Self-Check增强
+
+新增四维度校验结构：
+
+| 维度 | 检查项 | 评分标准 |
+|------|--------|----------|
+| 完整性 | 遗漏实体数量 | 0=high, 1-2=medium, 3+=low |
+| 准确性 | 类型判定错误数 | 0=high, 1-2=medium, 3+=low |
+| 真实性 | 幻觉三元组数 | 0=high, 1-2=medium, 3+=low |
+| 证据性 | 证据缺失数 | 0=high, 1-2=medium, 3+=low |
+
+**改进策略格式化函数**：
+```python
+format_dimension_scores(scores)      # 格式化四维度评分
+format_improvement_strategy(strategy) # 格式化可执行改进动作列表
+```
+
+### 14.6 新增提示词模板
+
+| 提示词 | 用途 | 特点 |
+|--------|------|------|
+| `JOINT_NER_RE_PROMPT_V2` | 联合抽取（重构版） | RISEN框架 + RCoT验证 + 模块化组装 |
+| `SELF_CHECK_JOINT_PROMPT_V2` | 联合校验（增强版） | 四维度校验 + 结构化反思 |
+
+### 14.7 预期效果
+
+| 指标 | 原版 | P12改进版 | 提升 |
+|------|------|-----------|------|
+| Token效率 | ~800行 | ~300行（模块化） | 降低40-50% |
+| 幻觉检测 | 单维度 | 四维度量化 | 提升精确度 |
+| 反面警示 | 无 | 4个典型示例 | 边界理解提升 |
+| 反思质量 | 文本描述 | 结构化列表 | 可执行性提升 |
+
+### 14.8 使用指南
+
+**启用新版提示词**：
+```python
+from agent.agents import (
+    JOINT_NER_RE_PROMPT_V2,    # 重构版联合抽取
+    SELF_CHECK_JOINT_PROMPT_V2, # 增强版校验
+    assemble_joint_extraction_prompt,  # 模块化组装函数
+    ENTITY_SCHEMA_CORE, RELATION_SCHEMA_CORE,  # Schema组件
+    NEGATIVE_EXAMPLES, VALIDATION_COT,  # 验证组件
+)
+```
+
+**自定义组装**：
+```python
+# 仅包含核心Schema（不含反面示例）
+prompt = assemble_joint_extraction_prompt(
+    raw_text=text,
+    include_negative_examples=False
+)
+
+# 包含完整验证步骤
+prompt = assemble_joint_extraction_prompt(
+    raw_text=text,
+    entity_hints=hints,
+    relation_hints=relation_hints,
+    include_negative_examples=True
+)
+```
+
+---
+
+# ===== P12.1改进：提示词实际启用（2026-04-16新增） =====
+
+## 改进背景
+
+P12版本定义了改进版提示词（JOINT_NER_RE_PROMPT_V2、SELF_CHECK_JOINT_PROMPT_V2），
+但未在nodes.py中实际使用。本次改进将新版提示词正式启用。
+
+---
+
+## 已完成改进清单
+
+### 1. 节点提示词启用（nodes.py）
+
+| 节点 | 原版提示词 | 改进版提示词 | 改进点 |
+|------|-----------|-------------|--------|
+| **create_joint_ner_re_node** | JOINT_NER_RE_PROMPT | JOINT_NER_RE_PROMPT_V2 | RCoT反向验证 + 反面示例 + 精准角色定义 |
+| **create_self_check_joint_node** | SELF_CHECK_JOINT_PROMPT | SELF_CHECK_JOINT_PROMPT_V2 | 四维度校验 + 结构化反思 + 可执行改进动作 |
+
+### 2. 新增数据模型（schemas.py）
+
+| 模型 | 用途 | 字段数 |
+|------|------|--------|
+| **DimensionScore** | 单维度评分 | rating, issues, details |
+| **ImprovementAction** | 改进动作项 | action_type, target, details, evidence |
+| **SelfCheckJointResultV2** | 增强版校验结果 | 继承SelfCheckJointResult + dimension_scores + improvement_actions |
+
+### 3. 导出更新（__init__.py）
+
+新增导出项：
+- `DimensionScore`, `ImprovementAction`, `SelfCheckJointResultV2`
+- `format_dimension_scores`, `format_improvement_strategy`
+
+---
+
+## 改进效果对比
+
+| 维度 | 原版 | P12.1改进版 |
+|------|------|-------------|
+| **反向验证** | 无 | 4步RCoT验证（幻觉/实体/方向/属性检查） |
+| **反面示例** | 0个 | 4个典型错误示例 |
+| **角色定义** | 宽泛"专家" | GIS背景 + 武汉本地知识 + 审慎原则 |
+| **反思维度** | 单一文本 | 四维度量化评分 |
+| **改进策略** | 文本描述 | 可执行动作列表 |
+
+---
+
+## 验证结果
+
+**导入测试**：✅ 通过
+```
+from agent.agents import (
+    JOINT_NER_RE_PROMPT_V2, SELF_CHECK_JOINT_PROMPT_V2,
+    SelfCheckJointResultV2, DimensionScore, ImprovementAction,
+    VALIDATION_COT, NEGATIVE_EXAMPLES, EXPERT_ROLE_TEMPLATE,
+)
+```
+
+**参数兼容性**：✅ 通过
+- JOINT_NER_RE_PROMPT_V2 参数: context_dependencies, entity_hints, mentor_guidance, raw_text, relation_hints
+- SELF_CHECK_JOINT_PROMPT_V2 参数: context_dependencies, entities, improvement_attempts, previous_reflection, raw_text, semantic_summary, triples
+
+---
+
+## 后续优化方向
+
+1. **P13**: 添加配置开关，允许用户选择使用新版或旧版提示词
+2. **P14**: 完整测试对比新版与旧版的抽取质量差异
+3. **P15**: 根据实际效果调整四维度评分阈值
+
+---
+
+**维护说明**: 本次改进于2026-04-16实施，已验证通过。

@@ -10,6 +10,7 @@ P9改进：添加联合抽取 + Reflexion机制 + 全节点二次检查 + Filter
 P10改进：添加批量LLM调用 + QA导师模式
 v3.2改进：精简版8关系体系 + 5实体属性 + 9功能大类 + 可选属性原则
 v3.2重构：提取RELATION_VARIANT_MAPPING常量 + CorpusState子状态拆分 + NodeTemplate基类
+P12改进：模块化Schema组件 + RISEN/RCoT框架提示词重构 + Self-Check增强
 """
 from .config import ExtractionConfig, DEFAULT_CONFIG
 from .state import (
@@ -46,6 +47,8 @@ from .schemas import (
     JointEntity, JointTriple, JointExtractionResult,
     # P9新增：所有Self-Check模型
     SelfCheckJointResult, SelfCheckQAResult, SelfCheckEvalResult, SelfCheckLabelResult,
+    # P12新增：Self-Check增强版模型（四维度评分）
+    DimensionScore, ImprovementAction, SelfCheckJointResultV2,
     # P9新增：Filter/Normalize二次检查模型（可选）
     SelfCheckFilterResult, SelfCheckNormalizeResult,
     # P10新增：批量LLM调用模型
@@ -80,6 +83,12 @@ from .prompts import (
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     # P11新增：实体对齐提示词
     ENTITY_ALIGNMENT_PROMPT,
+    # P12新增：模块化Schema组件
+    ENTITY_SCHEMA_CORE, RELATION_SCHEMA_CORE, ENTITY_ATTRIBUTE_SCHEMA, RELATION_ATTRIBUTE_SCHEMA,
+    VALIDATION_COT, NEGATIVE_EXAMPLES, EXPERT_ROLE_TEMPLATE,
+    # P12新增：重构版提示词
+    JOINT_NER_RE_PROMPT_V2, SELF_CHECK_JOINT_PROMPT_V2,
+    assemble_joint_extraction_prompt,
     format_entities, format_triples,
     format_entity_hints, format_relation_hints, format_context_dependencies,
     # P10新增：批量格式化函数
@@ -89,6 +98,8 @@ from .prompts import (
     format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
     # P11新增：实体对齐格式化函数
     format_alignment_candidates, format_alignment_result_for_output,
+    # P12新增：反思结果格式化函数
+    format_dimension_scores, format_improvement_strategy,
 )
 from .nodes import (
     create_ner_node,
@@ -179,6 +190,8 @@ __all__ = [
     "FilterResult", "NormalizationRecord", "NormalizeResult",
     "JointEntity", "JointTriple", "JointExtractionResult",
     "SelfCheckJointResult", "SelfCheckQAResult", "SelfCheckEvalResult", "SelfCheckLabelResult",
+    # P12新增
+    "DimensionScore", "ImprovementAction", "SelfCheckJointResultV2",
     "SelfCheckFilterResult", "SelfCheckNormalizeResult",
     "BatchCorpusResult", "BatchExtractionResult", "BatchSelfCheckResult",
     "ApprovalStatusEnum", "ApprovalFeedback", "NodeApprovalResult", "QAApprovalResult",
@@ -197,7 +210,16 @@ __all__ = [
     "BATCH_JOINT_PROMPT", "BATCH_SELF_CHECK_PROMPT",
     "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
     "ENTITY_ALIGNMENT_PROMPT",
-    
+
+    # ===== P12新增：模块化Schema组件 =====
+    "ENTITY_SCHEMA_CORE", "RELATION_SCHEMA_CORE",
+    "ENTITY_ATTRIBUTE_SCHEMA", "RELATION_ATTRIBUTE_SCHEMA",
+    "VALIDATION_COT", "NEGATIVE_EXAMPLES", "EXPERT_ROLE_TEMPLATE",
+
+    # ===== P12新增：重构版提示词 =====
+    "JOINT_NER_RE_PROMPT_V2", "SELF_CHECK_JOINT_PROMPT_V2",
+    "assemble_joint_extraction_prompt",
+
     # ===== 格式化函数 =====
     "format_entities", "format_triples",
     "format_entity_hints", "format_relation_hints", "format_context_dependencies",
@@ -205,7 +227,8 @@ __all__ = [
     "format_mentor_guidance", "format_feedbacks_for_revision", "format_feedback_summary", "format_joint_for_approval",
     "format_eval_for_approval", "format_label_for_approval", "format_revision_feedbacks", "format_reflection_for_approval",
     "format_alignment_candidates", "format_alignment_result_for_output",
-    
+    "format_dimension_scores", "format_improvement_strategy",
+
     # ===== 节点工厂函数 =====
     "create_ner_node", "create_re_node",
     "create_eval_1_node", "create_eval_2_node", "create_eval_simplified_node",
