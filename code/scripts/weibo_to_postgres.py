@@ -187,10 +187,16 @@ def load_excel_files(dir_path: str, test_file: str = None) -> list:
     return records
 
 
-def import_weibo_data(dir_path: str = None):
+def import_weibo_data(dir_path: str = None, table_name: str = None):
     """主导入函数"""
+    global TABLE_NAME
     conn = None
     cur = None
+
+    # 使用传入的表名或默认表名
+    if table_name:
+        TABLE_NAME = table_name
+        print(f"使用表名: {TABLE_NAME}")
 
     # 使用传入的目录或默认目录
     excel_dir = dir_path or EXCEL_DIR
@@ -354,5 +360,6 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='微博Excel导入PostgreSQL')
     parser.add_argument('--dir', default=None, help='Excel文件目录（默认使用 EXCEL_DIR）')
+    parser.add_argument('--table', default=None, help='目标表名（默认使用 social_media_notes，指定新表名可重新导入对比）')
     args = parser.parse_args()
-    import_weibo_data(args.dir)
+    import_weibo_data(args.dir, args.table)

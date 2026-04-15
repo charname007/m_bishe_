@@ -73,8 +73,8 @@ from .prompts import (
     format_reflection_history,
     # P10新增：QA导师提示词和格式化函数
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
-    format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
-    format_eval_for_approval, format_label_for_approval, format_revision_feedbacks,
+    format_mentor_guidance, format_feedbacks_for_revision, format_feedback_summary, format_joint_for_approval,
+    format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
     # P11新增：实体对齐提示词和格式化函数
     ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
 )
@@ -1811,12 +1811,16 @@ def create_joint_ner_re_node(llm: Any):
             qa_relation_hints = state.get("qa_relation_hints", [])
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
+            # 获取导师指导（QA Mentor模式）
+            mentor_guidance = state.get("mentor_guidance", {})
+
             # 调用 LLM
             prompt_text = JOINT_NER_RE_PROMPT.invoke({
                 "raw_text": text_for_processing,
                 "entity_hints": format_entity_hints(qa_entity_hints),
                 "relation_hints": format_relation_hints(qa_relation_hints),
                 "context_dependencies": format_context_dependencies(qa_context_dependencies),
+                "mentor_guidance": format_mentor_guidance(mentor_guidance),
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -2935,6 +2939,9 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
             # 历史反馈
             revision_feedbacks = state.get("revision_feedbacks", [])
 
+            # Self-Check反思结果（用于审批一致性检查）
+            reflection_summary = format_reflection_for_approval(state)
+
             # 调用LLM进行审批
             prompt_text = QA_APPROVAL_PROMPT.invoke({
                 "raw_text": text,
@@ -2944,6 +2951,7 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
                 "eval_result": format_eval_for_approval(eval_result),
                 "label_result": format_label_for_approval(label_result),
                 "previous_feedbacks": format_revision_feedbacks(revision_feedbacks),
+                "reflection_summary": reflection_summary,
             })
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -3042,6 +3050,9 @@ def create_revision_joint_node(llm: Any):
             entity_hints = state.get("qa_entity_hints", [])
             relation_hints = state.get("qa_relation_hints", [])
 
+            # 获取导师指导（QA Mentor模式）
+            mentor_guidance = state.get("mentor_guidance", {})
+
             # 获取之前的抽取结果
             previous_entities = state.get("entities", {})
             previous_triples = state.get("triples", [])
@@ -3049,8 +3060,10 @@ def create_revision_joint_node(llm: Any):
             # 调用LLM改进
             prompt_text = REVISION_JOINT_PROMPT.invoke({
                 "raw_text": text,
+                "feedback_summary": format_feedback_summary(revision_feedbacks, revision_cycle),
                 "feedbacks": format_feedbacks_for_revision(recent_feedbacks),
                 "semantic_summary": semantic_summary,
+                "mentor_guidance": format_mentor_guidance(mentor_guidance),
                 "previous_entities": format_entities(previous_entities),
                 "previous_triples": format_triples(previous_triples),
                 "entity_hints": format_entity_hints(entity_hints),

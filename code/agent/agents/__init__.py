@@ -85,7 +85,8 @@ from .prompts import (
     # P10新增：批量格式化函数
     format_batch_corpus, format_batch_results_for_check, format_cross_corpus_aliases,
     # P10新增：QA导师格式化函数
-    format_mentor_guidance, format_feedbacks_for_revision, format_joint_for_approval,
+    format_mentor_guidance, format_feedbacks_for_revision, format_feedback_summary, format_joint_for_approval,
+    format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
     # P11新增：实体对齐格式化函数
     format_alignment_candidates, format_alignment_result_for_output,
 )
@@ -201,7 +202,8 @@ __all__ = [
     "format_entities", "format_triples",
     "format_entity_hints", "format_relation_hints", "format_context_dependencies",
     "format_batch_corpus", "format_batch_results_for_check", "format_cross_corpus_aliases",
-    "format_mentor_guidance", "format_feedbacks_for_revision", "format_joint_for_approval",
+    "format_mentor_guidance", "format_feedbacks_for_revision", "format_feedback_summary", "format_joint_for_approval",
+    "format_eval_for_approval", "format_label_for_approval", "format_revision_feedbacks", "format_reflection_for_approval",
     "format_alignment_candidates", "format_alignment_result_for_output",
     
     # ===== 节点工厂函数 =====

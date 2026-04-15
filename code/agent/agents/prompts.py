@@ -1175,6 +1175,9 @@ JOINT_NER_RE_USER = """## 任务描述
 {relation_hints}
 {context_dependencies}
 
+## 导师指导（如有）
+{mentor_guidance}
+
 ## 联合抽取策略（CoT）
 1. **第一步**：扫描文本，识别所有可能的地名、道路、建筑等
 2. **第二步**：对识别的实体，判断其类型和类别
@@ -1904,6 +1907,12 @@ QA_APPROVAL_USER = """## 审批任务
 - 属性完整性：关键属性是否标注？
 - 属性准确性：属性值是否合理？
 
+### 4. Self-Check反思审批（如有）
+**检查项**：
+- 反思一致性：Self-Check反思与导师指导是否一致？
+- 问题识别准确性：Self-Check识别的问题是否真实存在？
+- 改进策略合理性：改进建议是否可执行？
+
 ---
 
 ## 原始文本
@@ -1927,6 +1936,9 @@ QA_APPROVAL_USER = """## 审批任务
 ## 历史反馈（如有）
 {previous_feedbacks}
 
+## Self-Check反思结果（如有）
+{reflection_summary}
+
 ---
 
 请输出审批结果（JSON格式）。"""
@@ -1944,11 +1956,17 @@ REVISION_JOINT_USER = """## 修改任务
 
 你之前的抽取结果存在以下问题，请根据反馈改进：
 
-### 导师反馈
+### 反馈历史总结
+{feedback_summary}
+
+### 当前轮次具体反馈
 {feedbacks}
 
 ### 语义摘要（导师理解）
 {semantic_summary}
+
+### 导师指导（原定标准）
+{mentor_guidance}
 
 ### 原始抽取结果
 实体: {previous_entities}
@@ -2065,6 +2083,98 @@ def format_revision_feedbacks(feedbacks: List[Dict]) -> str:
         target = f.get("target_node", "unknown")
         desc = f.get("description", "")[:100]
         lines.append(f"反馈{i}: [{target}] {desc}")
+    return "\n".join(lines)
+
+
+def format_feedback_summary(feedbacks: List[Dict], revision_cycle: int) -> str:
+    """
+    总结反馈历史：区分已尝试解决的问题和当前待解决问题
+
+    用于帮助模型理解修改进展，避免重复相同的错误
+    """
+    if not feedbacks:
+        return "(无历史反馈)"
+
+    lines = []
+    lines.append(f"=== 修改轮次 {revision_cycle} ===")
+
+    # 按轮次分组反馈
+    current_feedbacks = feedbacks[-3:] if len(feedbacks) >= 3 else feedbacks
+    previous_feedbacks = feedbacks[:-3] if len(feedbacks) > 3 else []
+
+    # 之前轮次的反馈（已尝试解决）
+    if previous_feedbacks:
+        lines.append("\n### 已尝试解决的问题（前几轮反馈）:")
+        problem_types = set()
+        for f in previous_feedbacks:
+            severity = f.get("severity", "medium")
+            desc = f.get("description", "")
+            # 提取问题类型关键词
+            if "遗漏" in desc or "缺失" in desc:
+                problem_types.add("实体遗漏")
+            elif "幻觉" in desc:
+                problem_types.add("三元组幻觉")
+            elif "关系" in desc or "方向" in desc:
+                problem_types.add("关系错误")
+        if problem_types:
+            lines.append(f"  - {', '.join(problem_types)}")
+        lines.append("  注意：请确认这些问题是否已在本轮解决")
+
+    # 当前轮次的反馈（待解决）
+    if current_feedbacks:
+        lines.append("\n### 本轮需要解决的问题:")
+        for f in current_feedbacks:
+            severity = f.get("severity", "medium")
+            desc = f.get("description", "")
+            suggestion = f.get("suggestion", "")
+            entities = f.get("specific_entities", [])
+            lines.append(f"  - [{severity}] {desc}")
+            if suggestion:
+                lines.append(f"    建议: {suggestion}")
+            if entities:
+                lines.append(f"    涉及实体: {', '.join(entities)}")
+
+    return "\n".join(lines)
+
+
+def format_reflection_for_approval(state: Dict) -> str:
+    """
+    格式化 Self-Check 反思结果用于 QA Approval
+
+    整合各 Self-Check 节点的反思文本和改进策略
+    """
+    lines = []
+
+    # Self-Check-Joint 反思（最重要）
+    joint_result = state.get("self_check_joint_result", {})
+    if joint_result:
+        reflection = joint_result.get("reflection_text", "")
+        strategy = joint_result.get("improvement_strategy", "")
+        if reflection:
+            lines.append("### Self-Check-Joint 反思:")
+            lines.append(f"反思内容: {reflection[:200]}...")
+        if strategy:
+            lines.append(f"改进策略: {strategy[:200]}...")
+
+    # Self-Check-Eval 反思
+    eval_result = state.get("self_check_eval_result", {})
+    if eval_result:
+        reflection = eval_result.get("reflection_text", "")
+        if reflection:
+            lines.append("\n### Self-Check-Eval 反思:")
+            lines.append(f"反思内容: {reflection[:150]}...")
+
+    # Self-Check-Label 反思
+    label_result = state.get("self_check_label_result", {})
+    if label_result:
+        reflection = label_result.get("reflection_text", "")
+        if reflection:
+            lines.append("\n### Self-Check-Label 反思:")
+            lines.append(f"反思内容: {reflection[:150]}...")
+
+    if not lines:
+        return "(无Self-Check反思结果)"
+
     return "\n".join(lines)
 
 

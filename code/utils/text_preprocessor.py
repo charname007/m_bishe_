@@ -342,6 +342,12 @@ class WeiboTextPreprocessor(SocialMediaTextPreprocessor):
         # 重复情绪词正则: 哈哈哈+
         self.repeat_emoji_pattern = re.compile(r'(哈){2,}|(好){2,}')
 
+        # 私有区Unicode字符 (PUA): \ue000-\uf8ff，微博常见如 \ue627
+        self.pua_char_pattern = re.compile(r'[\ue000-\uf8ff]')
+
+        # 秒拍视频链接: Lxxx的秒拍视频、Lxxx的微博视频 等
+        self.miaopai_pattern = re.compile(r'L[^\s]*的(?:秒拍视频|微博视频)')
+
     def split_forwards(self, text: str) -> dict:
         """
         拆分微博转发链条
@@ -439,6 +445,24 @@ class WeiboTextPreprocessor(SocialMediaTextPreprocessor):
         if not text:
             return text
         return self.noise_pattern.sub('', text).strip()
+
+    def remove_pua_chars(self, text: str) -> str:
+        """
+        移除私有区Unicode字符 (PUA: Private Use Area)
+        微博常见如 \ue627 等图标字符
+        """
+        if not text:
+            return text
+        return self.pua_char_pattern.sub('', text)
+
+    def remove_miaopai_links(self, text: str) -> str:
+        """
+        移除秒拍视频链接
+        格式: Lxxx的秒拍视频、Lxxx的微博视频
+        """
+        if not text:
+            return text
+        return self.miaopai_pattern.sub('', text).strip()
 
     def normalize_repeat_emoji(self, text: str) -> str:
         """
@@ -541,25 +565,31 @@ class WeiboTextPreprocessor(SocialMediaTextPreprocessor):
         # 5. 清洗微博系统噪音
         text = self.clean_weibo_noise(text)
 
-        # 6. 提取并清洗话题标签
+        # 6. 移除私有区Unicode字符 (微博图标等)
+        text = self.remove_pua_chars(text)
+
+        # 7. 移除秒拍视频链接
+        text = self.remove_miaopai_links(text)
+
+        # 8. 提取并清洗话题标签
         text, topics = self.extract_topics(text)
 
-        # 7. 提取@用户
+        # 9. 提取@用户
         text, mentions = self.extract_mentions(text)
 
-        # 8. 提取地理位置
+        # 10. 提取地理位置
         text, locations = self.extract_locations(text)
 
-        # 9. 移除微博表情
+        # 11. 移除微博表情
         text = self.remove_weibo_emoji(text)
 
-        # 10. 提取金额信息
+        # 12. 提取金额信息
         text, amounts = self.extract_amounts(text)
 
-        # 11. 移除微博短链
+        # 13. 移除微博短链
         text = self.remove_weibo_urls(text)
 
-        # 12. 统一空白字符
+        # 14. 统一空白字符
         text = self.normalize_whitespace(text)
 
         result = {
@@ -573,7 +603,7 @@ class WeiboTextPreprocessor(SocialMediaTextPreprocessor):
             'original': original,
         }
 
-        # 13. 判断是否过滤
+        # 15. 判断是否过滤
         result['should_filter'] = self.should_filter_short_text(result)
 
         return result
