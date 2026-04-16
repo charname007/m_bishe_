@@ -3050,7 +3050,7 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                     "mentor_response": query_result.model_dump(),
                     "mentor_guidance": updated_guidance,
                     "qa_entity_hints": query_result.updated_entity_hints or state.get("qa_entity_hints", []),
-                    "qa_relation_hints": query_result.updated_relation_hint or state.get("qa_relation_hints", []),
+                    "qa_relation_hints": query_result.updated_relation_hints or state.get("qa_relation_hints", []),
                     "needs_mentor_help": False,  # 已回答，继续处理
                     "query_count": state.get("query_count", 0) + 1,  # 增加查询计数
                     "return_to_node": return_to,

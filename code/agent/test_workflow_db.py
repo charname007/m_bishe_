@@ -256,7 +256,7 @@ async def run_workflow_test(
     total_new_entities = 0
     alignment_success_count = 0
 
-    # 统计功能实体和事件实体（v3.4新增）
+    # 统计功能实体和事件实体（v3.4新增）- 从entities字典读取
     total_function_entities = 0
     total_event_entities = 0
 
@@ -278,6 +278,11 @@ async def run_workflow_test(
                 count = len(names)
                 total_entities += count
                 entity_types_count[entity_type] = entity_types_count.get(entity_type, 0) + count
+                # v3.4: 从entities字典统计功能/事件实体
+                if entity_type == "功能":
+                    total_function_entities += count
+                elif entity_type == "事件":
+                    total_event_entities += count
 
         # 统计三元组
         triples = result.get("triples", [])
@@ -285,12 +290,6 @@ async def run_workflow_test(
         for t in triples:
             relation = t.get("relation", "unknown")
             relation_types_count[relation] = relation_types_count.get(relation, 0) + 1
-
-        # 统计功能实体和事件实体
-        function_entities = result.get("function_entities", [])
-        event_entities = result.get("event_entities", [])
-        total_function_entities += len(function_entities)
-        total_event_entities += len(event_entities)
 
         # 统计实体对齐结果
         aligned_entity_ids = result.get("aligned_entity_ids", {})
@@ -446,9 +445,9 @@ async def main():
         enable_filter=True,  # P5：Filter筛选无效文本
         enable_normalize=True,  # P6：Normalize归一化文本
         enable_qa_scaffold=True,  # P8：QA Scaffold语义脚手架
-        enable_self_check=True,  # P9：Self-Check校验节点
+        enable_self_check=True,  # P9：流水线模式Self-Check
         use_joint_extraction=True,  # P9：联合抽取模式
-        enable_full_self_check=False,  # 不启用所有二次检查（可选）
+        enable_full_self_check=True,  # P9：联合抽取模式Self-Check（QA、Joint、Eval、Label）
         enable_entity_alignment=False,  # P11：暂时禁用实体对齐（embedding加载耗时较长）
         max_concurrent_corpus=3,  # 最大并发数（降低以避免API限流）
         prompt_version="v2",  # 使用原版提示词（稳定）
