@@ -795,6 +795,25 @@ class RelationAttributes(BaseModel):
         return self
 
 
+# ===== 关系属性映射常量（v3.4新增） =====
+# 用途：label_node根据关系类型动态过滤属性，避免无关属性污染输出
+# Schema v3.4属性分配：
+# - 相对方位：距离值、方向值（删除联动推荐）
+# - 具有功能：时段、适合人群、具有限制、情感倾向、功能描述
+# - 优于/相似/劣于：维度、维度描述
+# - 位于/包含/发生事件：无属性（隐式定义，不在映射中）
+RELATION_ATTRS_MAP: Dict[str, List[str]] = {
+    # 空间基础关系
+    "相对方位": ["距离值", "方向值"],
+    # 社交语义关系
+    "具有功能": ["时段", "适合人群", "具有限制", "情感倾向", "功能描述"],
+    # 对比评价关系（3个共用同一属性集）
+    "优于": ["维度", "维度描述"],
+    "相似": ["维度", "维度描述"],
+    "劣于": ["维度", "维度描述"],
+}
+
+
 class LabelResult(BaseModel):
     """属性标注结果（v3.2精简版）"""
     entities: Dict[str, EntityAttributes] = Field(
@@ -1666,4 +1685,107 @@ class EntityAlignmentResult(BaseModel):
     alignment_confidence: str = Field(
         default="medium",
         description="整体对齐置信度: high/medium/low"
+    )
+
+
+# ===== 导师查询响应模型（P14新增：双向交流机制） =====
+
+class QueryTypeEnum(str, Enum):
+    """查询类型枚举"""
+    ENTITY_AMBIGUITY = "entity_ambiguity"
+    """实体歧义：实体类型或名称不确定"""
+    RELATION_CONFUSION = "relation_confusion"
+    """关系困惑：关系类型或证据不确定"""
+    EVIDENCE_MISSING = "evidence_missing"
+    """证据缺失：三元组缺乏文本支持"""
+    OVERALL_UNCERTAINTY = "overall_uncertainty"
+    """整体不确定：整体抽取置信度过低"""
+    EVAL_DISAGREEMENT = "eval_disagreement"
+    """评估分歧：评估结果与抽取结果不一致"""
+    LABEL_CONFUSION = "label_confusion"
+    """标注困惑：属性标注不确定"""
+
+
+class MentorQueryResponse(BaseModel):
+    """导师对后续节点查询的响应 - P14新增
+
+    当后续节点（Joint_NER_RE、Eval、Label）遇到困惑时，
+    可以向 QA_Mentor 发起查询，导师给出针对性的解答。
+    """
+    # 响应内容
+    answer: str = Field(
+        default="",
+        description="导师的回答：对问题的直接解答"
+    )
+    clarification: str = Field(
+        default="",
+        description="澄清说明：对困惑点的详细解释"
+    )
+    recommendation: str = Field(
+        default="",
+        description="推荐方案：导师建议的处理方式"
+    )
+
+    # 更新的指导信息
+    updated_guidance: Optional[MentorGuidance] = Field(
+        default=None,
+        description="更新的导师指导信息"
+    )
+    updated_entity_hints: Optional[List[str]] = Field(
+        default=None,
+        description="更新的实体提示列表"
+    )
+    updated_relation_hints: Optional[List[str]] = Field(
+        default=None,
+        description="更新的关系提示列表"
+    )
+
+    # 状态信息
+    response_confidence: str = Field(
+        default="medium",
+        description="响应置信度: high/medium/low"
+    )
+    suggests_revision: bool = Field(
+        default=False,
+        description="是否建议修改已抽取的结果"
+    )
+    revision_suggestion: str = Field(
+        default="",
+        description="修改建议的具体内容"
+    )
+
+    # 返回路径
+    return_to_node: str = Field(
+        default="",
+        description="返回的目标节点：joint_ner_re / eval / label"
+    )
+
+
+class MentorQuery(BaseModel):
+    """后续节点向导师发起的查询 - P14新增"""
+    query_type: QueryTypeEnum = Field(
+        description="查询类型"
+    )
+    query_content: str = Field(
+        description="查询内容：问题描述"
+    )
+    involved_entities: List[str] = Field(
+        default_factory=list,
+        description="涉及的实体列表"
+    )
+    involved_relations: List[str] = Field(
+        default_factory=list,
+        description="涉及的关系列表"
+    )
+    current_confidence: str = Field(
+        default="medium",
+        description="当前置信度"
+    )
+    source_node: str = Field(
+        default="",
+        description="发起查询的节点名称"
+    )
+    context: str = Field(
+        default="",
+        description="查询上下文：当前的抽取/评估/标注结果摘要"
     )

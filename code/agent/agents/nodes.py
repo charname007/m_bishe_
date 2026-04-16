@@ -59,6 +59,8 @@ from .schemas import (
     SelfCheckJointResult, SelfCheckQAResult, SelfCheckEvalResult, SelfCheckLabelResult,
     # P12新增：Self-Check增强版模型
     SelfCheckJointResultV2,
+    # v3.4新增：关系属性映射常量
+    RELATION_ATTRS_MAP,
 )
 from .prompts import (
     FILTER_PROMPT,  # P5新增
@@ -79,6 +81,8 @@ from .prompts import (
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     format_mentor_guidance, format_feedbacks_for_revision, format_feedback_summary, format_joint_for_approval,
     format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
+    # P14新增：导师查询提示词
+    MENTOR_QUERY_PROMPT,
     # P11新增：实体对齐提示词和格式化函数
     ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
     # P12新增：四维度评分格式化函数
@@ -743,10 +747,11 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
     return validated_triples
 
 
-def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
+def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_query: bool = False):
     """
     P2改进：创建简化的单次评估节点
     P3改进：支持 StreamWriter 流式输出
+    P14改进：支持向导师发起查询（enable_query=True时）
 
     合原来两轮评估为单次评估 + 规则校验，减少 LLM 调用成本
     """
@@ -777,6 +782,7 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
                 "eval_scores": [],
                 "corrected_triples": [],
                 "eval_passed": True,
+                "needs_mentor_help": False,  # P14新增
                 "current_step": StepEnum.LABEL,
             }
 
@@ -787,6 +793,14 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
             # P8改进：获取 QA Scaffold 上下文
             semantic_summary = state.get("semantic_summary", "")
             qa_context_dependencies = state.get("qa_context_dependencies", [])
+
+            # P14新增：如果有导师回答，更新语义摘要
+            mentor_response = state.get("mentor_response")
+            if mentor_response:
+                integrated_summary = mentor_response.get("clarification", "")
+                if integrated_summary:
+                    semantic_summary = f"{semantic_summary}\n导师澄清: {integrated_summary}"
+                logger.info(f"[Eval] 使用导师更新的语义理解")
 
             # 格式化三元组用于提示词
             triples_text = format_triples(state["triples"])
@@ -860,10 +874,44 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
                 "eval_passed": overall_passed
             })
 
+            # P14新增：困惑检测（如果启用了查询功能）
+            if enable_query:
+                from .prompts import detect_eval_confusion
+                query_count = state.get("query_count", 0)
+                max_queries = state.get("max_queries", 2)
+
+                if query_count < max_queries:
+                    eval_result = {
+                        "eval_passed": overall_passed,
+                        "corrected_triples": corrected_triples,
+                    }
+                    confusion = detect_eval_confusion(eval_result, dict(state))
+                    if confusion:
+                        logger.info(f"[Eval] 检测到困惑，请求导师帮助: {confusion['query_type']}")
+                        writer({
+                            "step": "eval",
+                            "corpus_id": corpus_id,
+                            "status": "needs_mentor_help",
+                            "query_type": confusion["query_type"],
+                            "query_content": confusion["query_content"],
+                        })
+
+                        return {
+                            "eval_scores": scores,
+                            "corrected_triples": corrected_triples,
+                            "eval_passed": overall_passed,
+                            "mentor_query": confusion,
+                            "query_source_node": "eval",
+                            "needs_mentor_help": True,
+                            "query_count": query_count,
+                            "current_step": StepEnum.QA_MENTOR,  # 回退到导师
+                        }
+
             return {
                 "eval_scores": scores,
                 "corrected_triples": corrected_triples,
                 "eval_passed": overall_passed,
+                "needs_mentor_help": False,  # P14新增
                 "current_step": StepEnum.LABEL,
             }
 
@@ -883,6 +931,7 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5):
                 "corrected_triples": fallback_triples,
                 "eval_passed": False,
                 "error": str(e),
+                "needs_mentor_help": False,
                 "current_step": StepEnum.LABEL,
             }
 
@@ -910,8 +959,11 @@ def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) 
     return corrected
 
 
-def create_label_node(llm: Any):
-    """创建属性标注节点（v2.2改进：扩展实体属性）"""
+def create_label_node(llm: Any, enable_query: bool = False):
+    """创建属性标注节点（v2.2改进：扩展实体属性）
+
+    P14改进：支持向导师发起查询（enable_query=True时）
+    """
     parser = PydanticOutputParser(pydantic_object=LabelResult)
 
     async def label_node(state: CorpusState, writer: StreamWriter) -> Dict:
@@ -940,7 +992,10 @@ def create_label_node(llm: Any):
                 "status": "skipped",
                 "reason": "无实体"
             })
-            return {"current_step": StepEnum.DONE}
+            return {
+                "needs_mentor_help": False,  # P14新增
+                "current_step": StepEnum.DONE
+            }
 
         try:
             # v2.2改进：获取原始文本用于提取情感标签、体验评价
@@ -950,6 +1005,18 @@ def create_label_node(llm: Any):
             semantic_summary = state.get("semantic_summary", "")
             qa_entity_hints = state.get("qa_entity_hints", [])
             qa_relation_hints = state.get("qa_relation_hints", [])
+
+            # P14新增：如果有导师回答，更新提示
+            mentor_response = state.get("mentor_response")
+            if mentor_response:
+                # 使用导师更新的提示
+                updated_entity_hints = mentor_response.get("updated_entity_hints")
+                if updated_entity_hints:
+                    qa_entity_hints = updated_entity_hints
+                clarification = mentor_response.get("clarification", "")
+                if clarification:
+                    semantic_summary = f"{semantic_summary}\n导师澄清: {clarification}"
+                logger.info(f"[Label] 使用导师更新的提示")
 
             # 使用 OutputParser 进行结构化输出
             prompt_text = LABEL_PROMPT.invoke({
@@ -975,26 +1042,23 @@ def create_label_node(llm: Any):
                     "情感倾向": attrs.情感倾向,
                 }
 
-            # v3.4精简版：仅提取schema定义的属性（删除联动推荐）
-            # 相对方位关系属性：距离值、方向值
-            # 功能关系属性：时段、适合人群(开放文本)、具有限制(开放文本列表)、情感倾向
-            # 对比关系属性：维度
+            # v3.4精简版：根据关系类型选择性提取属性
+            # 使用 RELATION_ATTRS_MAP 动态过滤，避免硬编码
             relation_attrs = {}
             for key, attrs in result.relations.items():
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
-                    relation_attrs[normalized_key] = {
-                        # 相对方位关系属性（Schema v3.4：删除联动推荐）
-                        "距离值": attrs.距离值,
-                        "方向值": attrs.方向值,
-                        # 功能关系属性（Schema v3.4：开放文本）
-                        "时段": attrs.时段,
-                        "适合人群": attrs.适合人群,  # v3.4：开放文本
-                        "具有限制": attrs.具有限制 or [],  # v3.4：开放文本列表
-                        "情感倾向": attrs.情感倾向,
-                        # 对比关系属性（Schema v3.4）
-                        "维度": attrs.维度 or [],
-                    }
+                    # 提取关系类型
+                    relation_type = normalized_key.split(", ")[1].strip() if ", " in normalized_key else ""
+
+                    # 动态过滤：根据RELATION_ATTRS_MAP获取允许的属性列表
+                    allowed_attrs = RELATION_ATTRS_MAP.get(relation_type, [])
+                    # 使用model_dump获取所有非空属性
+                    attrs_dict = attrs.model_dump(exclude_none=True)
+                    # 仅保留允许的属性
+                    filtered_attrs = {k: v for k, v in attrs_dict.items() if k in allowed_attrs}
+
+                    relation_attrs[normalized_key] = filtered_attrs
                 else:
                     # 无法解析时保留原始 key
                     relation_attrs[key] = {}
@@ -1010,9 +1074,42 @@ def create_label_node(llm: Any):
                 "relation_count": len(relation_attrs)
             })
 
+            # P14新增：困惑检测（如果启用了查询功能）
+            if enable_query:
+                from .prompts import detect_label_confusion
+                query_count = state.get("query_count", 0)
+                max_queries = state.get("max_queries", 2)
+
+                if query_count < max_queries:
+                    label_result = {
+                        "entity_attrs": entity_attrs,
+                        "relation_attrs": relation_attrs,
+                    }
+                    confusion = detect_label_confusion(label_result, dict(state))
+                    if confusion:
+                        logger.info(f"[Label] 检测到困惑，请求导师帮助: {confusion['query_type']}")
+                        writer({
+                            "step": "label",
+                            "corpus_id": corpus_id,
+                            "status": "needs_mentor_help",
+                            "query_type": confusion["query_type"],
+                            "query_content": confusion["query_content"],
+                        })
+
+                        return {
+                            "entity_attrs": entity_attrs,
+                            "relation_attrs": relation_attrs,
+                            "mentor_query": confusion,
+                            "query_source_node": "label",
+                            "needs_mentor_help": True,
+                            "query_count": query_count,
+                            "current_step": StepEnum.QA_MENTOR,  # 回退到导师
+                        }
+
             return {
                 "entity_attrs": entity_attrs,
                 "relation_attrs": relation_attrs,
+                "needs_mentor_help": False,  # P14新增
                 "current_step": StepEnum.DONE,
             }
         except Exception as e:
@@ -1028,6 +1125,7 @@ def create_label_node(llm: Any):
                 "entity_attrs": {},
                 "relation_attrs": {},
                 "error": str(e),
+                "needs_mentor_help": False,
                 "current_step": StepEnum.DONE,
             }
 
@@ -1789,7 +1887,7 @@ def _should_trigger_retry(
 
 # ===== P9新增：联合抽取节点 =====
 
-def create_joint_ner_re_node(llm: Any):
+def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
     """
     创建联合抽取节点
 
@@ -1797,6 +1895,8 @@ def create_joint_ner_re_node(llm: Any):
     1. 一次LLM推理同时抽取实体和关系
     2. 避免NER→RE流水线的错误传播
     3. 全局理解文本，输出一致性更好的结果
+
+    P14改进：支持向导师发起查询（enable_query=True时）
     """
     parser = PydanticOutputParser(pydantic_object=JointExtractionResult)
 
@@ -1823,6 +1923,22 @@ def create_joint_ner_re_node(llm: Any):
 
             # 获取导师指导（QA Mentor模式）
             mentor_guidance = state.get("mentor_guidance", {})
+
+            # P14新增：如果有导师回答，更新提示
+            mentor_response = state.get("mentor_response")
+            if mentor_response:
+                # 使用导师更新的提示
+                updated_entity_hints = mentor_response.get("updated_entity_hints")
+                updated_relation_hints = mentor_response.get("updated_relation_hints")
+                if updated_entity_hints:
+                    qa_entity_hints = updated_entity_hints
+                if updated_relation_hints:
+                    qa_relation_hints = updated_relation_hints
+                # 更新导师指导
+                updated_guidance = mentor_response.get("updated_guidance")
+                if updated_guidance:
+                    mentor_guidance = updated_guidance
+                logger.info(f"[Joint_NER_RE] 使用导师更新的提示")
 
             # 调用 LLM
             # P12改进：使用改进版提示词（含反向验证+反面示例）
@@ -1871,11 +1987,44 @@ def create_joint_ner_re_node(llm: Any):
                 "confidence": result.overall_confidence
             })
 
+            # P14新增：困惑检测（如果启用了查询功能）
+            if enable_query:
+                from .prompts import detect_extraction_confusion
+                query_count = state.get("query_count", 0)
+                max_queries = state.get("max_queries", 2)
+
+                # 检测困惑（限制查询次数防止无限循环）
+                if query_count < max_queries:
+                    confusion = detect_extraction_confusion(result.model_dump(), dict(state))
+                    if confusion:
+                        logger.info(f"[Joint_NER_RE] 检测到困惑，请求导师帮助: {confusion['query_type']}")
+                        writer({
+                            "step": "joint_ner_re",
+                            "corpus_id": corpus_id,
+                            "status": "needs_mentor_help",
+                            "query_type": confusion["query_type"],
+                            "query_content": confusion["query_content"],
+                        })
+
+                        return {
+                            "entities": entities_dict,
+                            "triples": triples_list,
+                            "joint_extraction_result": result.model_dump(),
+                            "extraction_strategy": "joint",
+                            "mentor_query": confusion,
+                            "query_source_node": "joint_ner_re",
+                            "needs_mentor_help": True,
+                            "query_count": query_count,
+                            "current_step": StepEnum.QA_MENTOR,  # 回退到导师
+                        }
+
+            # 正常返回
             return {
                 "entities": entities_dict,
                 "triples": triples_list,
                 "joint_extraction_result": result.model_dump(),
                 "extraction_strategy": "joint",
+                "needs_mentor_help": False,  # P14新增：标记不需要帮助
                 "current_step": StepEnum.SELF_CHECK_JOINT,
             }
 
@@ -1891,6 +2040,7 @@ def create_joint_ner_re_node(llm: Any):
                 "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
                 "triples": [],
                 "error": str(e),
+                "needs_mentor_help": False,
                 "current_step": StepEnum.EVAL,  # 失败时跳过校验，直接评估
             }
 
@@ -2812,97 +2962,257 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
     2. 输出导师指导信息（语义关注点、实体优先级、质量标准）
     3. 设定预期约束
     4. 保存推理过程（可选）
+
+    P14改进：支持回答后续节点的查询（双向交流）
     """
-    from .schemas import QAMentorScaffoldResult
-    parser = PydanticOutputParser(pydantic_object=QAMentorScaffoldResult)
+    from .schemas import QAMentorScaffoldResult, MentorQueryResponse
+    scaffold_parser = PydanticOutputParser(pydantic_object=QAMentorScaffoldResult)
+    query_parser = PydanticOutputParser(pydantic_object=MentorQueryResponse)
 
     async def qa_mentor_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        """QA导师节点：深度语义分析 + 导师指导"""
+        """QA导师节点：深度语义分析 + 导师指导 + 回答查询"""
         corpus_id = state['corpus_id']
-        logger.info(f"[QA_Mentor] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "qa_mentor",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始导师深度分析"
-        })
+        # P14新增：检查是否有来自后续节点的查询
+        mentor_query = state.get("mentor_query")
 
-        try:
-            # 使用归一化后的文本
-            text_for_processing = _get_text_for_processing(state)
+        if mentor_query:
+            # ===== 回答查询模式 =====
+            query_source = state.get("query_source_node", "unknown")
+            logger.info(f"[QA_Mentor] 回答来自 {query_source} 的查询: {mentor_query.get('query_type')}")
 
-            # 调用LLM
-            prompt_text = QA_MENTOR_PROMPT.invoke({
-                "normalized_text": text_for_processing,
-            })
-            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
-            response = await llm.ainvoke(full_prompt)
-            result: QAMentorScaffoldResult = parser.parse(response.content)
-
-            logger.info(
-                f"[QA_Mentor] 完成: {len(result.qa_pairs)} 个问答对, "
-                f"{len(result.entity_hints)} 个实体提示, "
-                f"置信度={result.overall_confidence}"
-            )
-
-            # 发送完成事件
             writer({
                 "step": "qa_mentor",
                 "corpus_id": corpus_id,
-                "status": "completed",
-                "qa_count": len(result.qa_pairs),
-                "entity_hints": result.entity_hints,
-                "relation_hints": result.relation_hints,
-                "confidence": result.overall_confidence,
-                "has_mentor_guidance": result.mentor_guidance is not None
+                "status": "answering_query",
+                "query_source": query_source,
+                "query_type": mentor_query.get("query_type"),
             })
 
-            # 根据结果决定下一步
-            if result.should_skip_detailed_extraction:
-                logger.info(f"[QA_Mentor] 建议跳过详细抽取: {corpus_id}")
+            try:
+                text_for_processing = _get_text_for_processing(state)
+
+                # 构造查询上下文
+                query_type = mentor_query.get("query_type", "unknown")
+                query_content = mentor_query.get("query_content", "")
+                involved_entities = mentor_query.get("involved_entities", [])
+                involved_relations = mentor_query.get("involved_relations", [])
+                current_confidence = mentor_query.get("current_confidence", "medium")
+
+                # 构建当前处理结果的摘要作为上下文
+                context = _build_query_context(state, query_source)
+
+                # 获取之前的导师指导
+                previous_guidance = state.get("mentor_guidance", {})
+                previous_guidance_text = format_mentor_guidance(previous_guidance)
+
+                # 调用导师回答查询
+                prompt_text = MENTOR_QUERY_PROMPT.invoke({
+                    "source_node": query_source,
+                    "query_type": query_type,
+                    "query_content": query_content,
+                    "involved_entities": ", ".join(involved_entities) if involved_entities else "(无)",
+                    "involved_relations": ", ".join(involved_relations) if involved_relations else "(无)",
+                    "current_confidence": current_confidence,
+                    "context": context,
+                    "raw_text": text_for_processing,
+                    "previous_guidance": previous_guidance_text,
+                })
+                full_prompt = f"{prompt_text.messages[1].content}\n\n{query_parser.get_format_instructions()}"
+                response = await llm.ainvoke(full_prompt)
+                query_result: MentorQueryResponse = query_parser.parse(response.content)
+
+                logger.info(
+                    f"[QA_Mentor] 查询回答完成: 置信度={query_result.response_confidence}, "
+                    f"建议修改={query_result.suggests_revision}"
+                )
+
+                writer({
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "query_answered",
+                    "answer": query_result.answer[:100],
+                    "confidence": query_result.response_confidence,
+                    "return_to": query_result.return_to_node,
+                })
+
+                # 更新指导信息（如果有）
+                updated_guidance = {}
+                if query_result.updated_guidance:
+                    updated_guidance = query_result.updated_guidance.model_dump()
+                elif previous_guidance:
+                    updated_guidance = previous_guidance
+
+                # 返回到发起查询的节点
+                return_to = query_source if query_source else "joint_ner_re"
+
                 return {
-                    "qa_scaffold_result": result.model_dump(),
-                    "semantic_summary": result.semantic_summary,
-                    "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
-                    "reasoning_trace": result.reasoning_trace,
-                    "qa_entity_hints": result.entity_hints,
-                    "qa_relation_hints": result.relation_hints,
-                    "qa_context_dependencies": result.context_dependencies,
-                    "current_step": StepEnum.DONE,
-                }
-            else:
-                return {
-                    "qa_scaffold_result": result.model_dump(),
-                    "semantic_summary": result.semantic_summary,
-                    "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
-                    "reasoning_trace": result.reasoning_trace,
-                    "qa_entity_hints": result.entity_hints,
-                    "qa_relation_hints": result.relation_hints,
-                    "qa_context_dependencies": result.context_dependencies,
-                    "current_step": StepEnum.JOINT_NER_RE,
+                    "mentor_response": query_result.model_dump(),
+                    "mentor_guidance": updated_guidance,
+                    "qa_entity_hints": query_result.updated_entity_hints or state.get("qa_entity_hints", []),
+                    "qa_relation_hints": query_result.updated_relation_hint or state.get("qa_relation_hints", []),
+                    "needs_mentor_help": False,  # 已回答，继续处理
+                    "query_count": state.get("query_count", 0) + 1,  # 增加查询计数
+                    "return_to_node": return_to,
+                    "current_step": getattr(StepEnum, return_to.upper(), StepEnum.JOINT_NER_RE),
                 }
 
-        except Exception as e:
-            logger.error(f"[QA_Mentor] 处理失败: {e}")
+            except Exception as e:
+                logger.error(f"[QA_Mentor] 回答查询失败: {e}")
+                writer({
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "query_error",
+                    "error": str(e)
+                })
+                # 查询失败时，返回到原节点继续
+                return {
+                    "mentor_response": {},
+                    "needs_mentor_help": False,
+                    "query_count": state.get("query_count", 0) + 1,
+                    "return_to_node": state.get("query_source_node", "joint_ner_re"),
+                    "current_step": getattr(StepEnum, state.get("query_source_node", "joint_ner_re").upper(), StepEnum.JOINT_NER_RE),
+                }
+
+        else:
+            # ===== 初始化指导模式 =====
+            logger.info(f"[QA_Mentor] 处理语料: {corpus_id}")
+
             writer({
                 "step": "qa_mentor",
                 "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
+                "status": "started",
+                "message": "开始导师深度分析"
             })
-            return {
-                "qa_scaffold_result": {},
-                "semantic_summary": "",
-                "mentor_guidance": {},
-                "qa_entity_hints": [],
-                "qa_relation_hints": [],
-                "qa_context_dependencies": [],
-                "error": str(e),
-                "current_step": StepEnum.JOINT_NER_RE,  # 失败时继续
-            }
+
+            try:
+                # 使用归一化后的文本
+                text_for_processing = _get_text_for_processing(state)
+
+                # 调用LLM
+                prompt_text = QA_MENTOR_PROMPT.invoke({
+                    "normalized_text": text_for_processing,
+                })
+                full_prompt = f"{prompt_text.messages[1].content}\n\n{scaffold_parser.get_format_instructions()}"
+                response = await llm.ainvoke(full_prompt)
+                result: QAMentorScaffoldResult = scaffold_parser.parse(response.content)
+
+                logger.info(
+                    f"[QA_Mentor] 完成: {len(result.qa_pairs)} 个问答对, "
+                    f"{len(result.entity_hints)} 个实体提示, "
+                    f"置信度={result.overall_confidence}"
+                )
+
+                # 发送完成事件
+                writer({
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "qa_count": len(result.qa_pairs),
+                    "entity_hints": result.entity_hints,
+                    "relation_hints": result.relation_hints,
+                    "confidence": result.overall_confidence,
+                    "has_mentor_guidance": result.mentor_guidance is not None
+                })
+
+                # 根据结果决定下一步
+                if result.should_skip_detailed_extraction:
+                    logger.info(f"[QA_Mentor] 建议跳过详细抽取: {corpus_id}")
+                    return {
+                        "qa_scaffold_result": result.model_dump(),
+                        "semantic_summary": result.semantic_summary,
+                        "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                        "reasoning_trace": result.reasoning_trace,
+                        "qa_entity_hints": result.entity_hints,
+                        "qa_relation_hints": result.relation_hints,
+                        "qa_context_dependencies": result.context_dependencies,
+                        "needs_mentor_help": False,  # P14新增
+                        "current_step": StepEnum.DONE,
+                    }
+                else:
+                    return {
+                        "qa_scaffold_result": result.model_dump(),
+                        "semantic_summary": result.semantic_summary,
+                        "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                        "reasoning_trace": result.reasoning_trace,
+                        "qa_entity_hints": result.entity_hints,
+                        "qa_relation_hints": result.relation_hints,
+                        "qa_context_dependencies": result.context_dependencies,
+                        "needs_mentor_help": False,  # P14新增
+                        "current_step": StepEnum.JOINT_NER_RE,
+                    }
+
+            except Exception as e:
+                logger.error(f"[QA_Mentor] 处理失败: {e}")
+                writer({
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e)
+                })
+                return {
+                    "qa_scaffold_result": {},
+                    "semantic_summary": "",
+                    "mentor_guidance": {},
+                    "qa_entity_hints": [],
+                    "qa_relation_hints": [],
+                    "qa_context_dependencies": [],
+                    "error": str(e),
+                    "needs_mentor_help": False,
+                    "current_step": StepEnum.JOINT_NER_RE,  # 失败时继续
+                }
 
     return qa_mentor_node
+
+
+def _build_query_context(state: CorpusState, source_node: str) -> str:
+    """构建查询上下文：根据来源节点格式化当前处理结果"""
+    context_lines = []
+
+    if source_node == "joint_ner_re":
+        # 联合抽取节点：显示抽取结果
+        entities = state.get("entities", {})
+        triples = state.get("triples", [])
+        joint_result = state.get("joint_extraction_result", {})
+
+        if entities:
+            entity_lines = []
+            for entity_type, names in entities.items():
+                if names:
+                    entity_lines.append(f"{entity_type}: {', '.join(names[:5])}")
+            context_lines.append("当前抽取实体:\n" + "\n".join(entity_lines))
+
+        if triples:
+            triple_lines = [f"<{t.get('head')}, {t.get('relation')}, {t.get('tail')}>" for t in triples[:5]]
+            context_lines.append("当前抽取三元组:\n" + "\n".join(triple_lines))
+
+        if joint_result:
+            confidence = joint_result.get("overall_confidence", "unknown")
+            context_lines.append(f"整体置信度: {confidence}")
+
+    elif source_node == "eval":
+        # 评估节点：显示评估结果
+        eval_passed = state.get("eval_passed", False)
+        corrected_triples = state.get("corrected_triples", [])
+        original_triples = state.get("triples", [])
+
+        context_lines.append(f"评估通过: {eval_passed}")
+        context_lines.append(f"原始三元组数: {len(original_triples)}")
+        context_lines.append(f"修正后三元组数: {len(corrected_triples)}")
+
+        if corrected_triples:
+            passed_count = sum(1 for t in corrected_triples if t.get("passed_eval", False))
+            context_lines.append(f"通过评估数: {passed_count}")
+
+    elif source_node == "label":
+        # 标注节点：显示标注结果
+        entity_attrs = state.get("entity_attrs", {})
+        relation_attrs = state.get("relation_attrs", {})
+
+        context_lines.append(f"已标注实体数: {len(entity_attrs)}")
+        context_lines.append(f"已标注关系数: {len(relation_attrs)}")
+
+    return "\n\n".join(context_lines) if context_lines else "(无上下文信息)"
 
 
 def create_qa_approval_node(llm: Any, config: ExtractionConfig):

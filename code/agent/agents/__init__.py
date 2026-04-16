@@ -62,6 +62,8 @@ from .schemas import (
     RELATION_TYPES, FUNCTION_NODES, FEATURE_TAGS, COMPARE_DIMENSIONS, EVENT_CATEGORIES,
     # v3.2重构新增：关系类型映射常量和辅助函数
     RELATION_VARIANT_MAPPING, normalize_relation_type,
+    # v3.4新增：关系属性映射常量
+    RELATION_ATTRS_MAP,
 )
 from .prompts import (
     NER_PROMPT, RE_PROMPT,
@@ -86,6 +88,8 @@ from .prompts import (
     # P12新增：模块化Schema组件
     ENTITY_SCHEMA_CORE, RELATION_SCHEMA_CORE, ENTITY_ATTRIBUTE_SCHEMA, RELATION_ATTRIBUTE_SCHEMA,
     VALIDATION_COT, NEGATIVE_EXAMPLES, EXPERT_ROLE_TEMPLATE,
+    # v3.4新增：实体区分规则
+    ENTITY_DISTINCTION_RULES,
     # P12新增：重构版提示词
     JOINT_NER_RE_PROMPT_V2, SELF_CHECK_JOINT_PROMPT_V2,
     assemble_joint_extraction_prompt,
@@ -182,7 +186,9 @@ __all__ = [
     
     # ===== v3.2重构新增：关系类型映射 =====
     "RELATION_VARIANT_MAPPING", "normalize_relation_type",
-    
+    # v3.4新增：关系属性映射
+    "RELATION_ATTRS_MAP",
+
     # ===== v3.2重构新增：节点模板基类 =====
     "NodeTemplate", "RawTextNodeTemplate", "NoLLMNodeTemplate",
     "get_text_for_processing", "StateDict", "ResultDict", "NodeFunc",
@@ -222,6 +228,8 @@ __all__ = [
     "ENTITY_SCHEMA_CORE", "RELATION_SCHEMA_CORE",
     "ENTITY_ATTRIBUTE_SCHEMA", "RELATION_ATTRIBUTE_SCHEMA",
     "VALIDATION_COT", "NEGATIVE_EXAMPLES", "EXPERT_ROLE_TEMPLATE",
+    # v3.4新增：实体区分规则
+    "ENTITY_DISTINCTION_RULES",
 
     # ===== P12新增：重构版提示词 =====
     "JOINT_NER_RE_PROMPT_V2", "SELF_CHECK_JOINT_PROMPT_V2",

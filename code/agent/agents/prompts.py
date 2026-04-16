@@ -385,22 +385,46 @@ QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+# ===== v3.4新增：实体区分规则常量 =====
+# 此常量用于避免功能/事件实体被误分类为POI
+ENTITY_DISTINCTION_RULES = """⚠️ **重要区分规则**：
+- "购物"、"餐饮"、"头皮护理"等 → **功能**（不是POI）
+- "樱花节"、"开业"、"EHD双店长来武汉"等 → **事件**（不是POI）
+- 只有具体地点名称（如"武汉大学"、"某某咖啡厅")才是 **POI**
+
+**判断标准**：
+- 如果是**用途/活动类型** → 功能
+- 如果是**发生的事情** → 事件
+- 如果是**具体地点名称** → POI"""
+
+
 # ===== Step 1: NER 提示词模板 =====
 
 NER_SYSTEM = """你是一位"地理语义专家"，精通城市地理实体识别与社交媒体语料分析。
 你的任务是从小红书文本中提取地理知识实体。"""
 
-NER_USER = """## 候选目标
+# NER实体定义部分（不含区分规则，用于拼接）
+_NER_ENTITY_TYPES = """## 候选目标（v3.4扩展版：6种实体）
 请识别以下类别的实体：
+
+### 空间实体（GIS标准）—— 4种
 - 道路(Road): 街道、大道、小巷等（如：关山大道）
 - POI(Point of Interest): 具体店名、地标、机构（如：武汉大学、某某咖啡厅）
 - 建筑物(Building): 具体的楼宇、商场主体（如：泛悦汇）
 - 街区(Block): 具有边界感的生活区域（如：街道口、华农校区）
 
-## 思维链(CoT)
+### 语义实体（v3.4新增）—— 2种
+- 功能(Function): 场所可进行的用途类型（如：餐饮、购物、休闲）
+- 事件(Event): 发生的具体事件（如：樱花节、封路、开业）"""
+
+# NER提示词模板（拼接实体定义 + 区分规则）
+NER_USER = "\n\n".join([
+    _NER_ENTITY_TYPES,
+    ENTITY_DISTINCTION_RULES,
+    """## 思维链(CoT)
 1. 首先，识别句中指代具体位置的专有名词
 2. 其次，根据上下文判断其实体粒度
-3. 最后，将其归入上述四个候选目标之一
+3. 最后，将其归入上述候选目标之一
 
 ## QA脚手架提示（如有）
 前置QA分析可能发现以下实体提示，可作为参考：
@@ -411,12 +435,13 @@ NER_USER = """## 候选目标
 
 ## 任务示例
 输入: "在洪山区的街道口，泛悦汇三楼的这家书店氛围感拉满。"
-输出: {{\"道路\": [], \"POI\": [\"书店\"], \"建筑物\": [\"泛悦汇\"], \"街区\": [\"街道口\"]}}
+输出: {{\"道路\": [], \"POI\": [\"书店\"], \"建筑物\": [\"泛悦汇\"], \"街区\": [\"街道口\"], \"功能\": [], \"事件\": []}}
 
 ## 待处理文本
 {raw_text}
 
 请输出实体识别结果（JSON格式）。"""
+])
 
 NER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", NER_SYSTEM),
@@ -1094,17 +1119,27 @@ JOINT_NER_RE_SYSTEM = """你是一位"地理语义联合抽取专家"，擅长�
 
 JOINT_NER_RE_USER = """## 任务描述
 请从文本中**同时**抽取：
-1. 地理实体（道路/POI/建筑物/街区）
+1. 地理实体和语义实体（6种类型，v3.4扩展版）
 2. 实体间的语义关系（8种关系类型）
 3. 每个抽取的证据依据
 
-## 实体类型定义
+## 实体类型定义（v3.4扩展版：6种）
+
+### 空间实体（GIS标准）—— 4种
 | 类型 | 定义 | 示例 |
 |------|------|------|
 | 道路 | 交通通道 | 珞喻路、关山大道 |
-| POI | 具体地点 | 武汉大学、群光广场 |
+| POI | 具体地点/机构 | 武汉大学、群光广场 |
 | 建筑物 | 建筑设施 | 泛悦汇、融科天城 |
 | 街区 | 地理区域 | 街道口、光谷商圈 |
+
+### 语义实体（v3.4新增）—— 2种
+| 类型 | 定义 | 示例 |
+|------|------|------|
+| 功能 | 场所可进行的用途类型 | 餐饮、购物、休闲、观景 |
+| 事件 | 发生的具体事件 | 樱花节、封路、开业、停业 |
+
+""" + ENTITY_DISTINCTION_RULES + """
 
 ## 关系类型（v3.4精简版：8种）
 ### 空间基础关系（3个）—— 图谱骨架
@@ -1666,20 +1701,29 @@ BATCH_JOINT_SYSTEM = """你是一位"地理语义批量抽取专家"，擅长一
 
 BATCH_JOINT_USER = """## 任务描述
 请同时处理以下多条语料（共 {batch_size} 条），为每条语料提取：
-1. 地理实体（道路/POI/建筑物/街区）
+1. 地理实体和语义实体（6种类型，v3.4扩展版）
 2. 实体间的语义关系三元组
 3. 每个抽取的原文依据
 
 ---
 
-## 实体类型定义
+## 实体类型定义（v3.4扩展版：6种）
 
+### 空间实体（GIS标准）—— 4种
 | 类型 | 定义 | 示例 |
 |------|------|------|
 | 道路 | 交通通道 | 珞喻路、关山大道、雄楚大道 |
 | POI | 具体地点/机构 | 武汉大学、群光广场、某某咖啡厅 |
 | 建筑物 | 建筑设施 | 泛悦汇、融科天城、行政楼 |
 | 街区 | 地理区域 | 街道口、光谷商圈、华农校区 |
+
+### 语义实体（v3.4新增）—— 2种
+| 类型 | 定义 | 示例 |
+|------|------|------|
+| 功能 | 场所可进行的用途类型 | 餐饮、购物、休闲、观景 |
+| 事件 | 发生的具体事件 | 樱花节、封路、开业、停业 |
+
+""" + ENTITY_DISTINCTION_RULES + """
 
 ---
 
@@ -2111,6 +2155,217 @@ def format_revision_feedbacks(feedbacks: List[Dict]) -> str:
         desc = f.get("description", "")[:100]
         lines.append(f"反馈{i}: [{target}] {desc}")
     return "\n".join(lines)
+
+
+# ===== P14新增：导师查询提示词（双向交流机制） =====
+
+MENTOR_QUERY_SYSTEM = """你是一位经验丰富的"地理语义导师"，正在回答后续节点的查询。
+你的学生（Joint_NER_RE、Eval、Label节点）在处理过程中遇到了困惑，需要你的指导。
+
+作为导师，你的职责是：
+1. **澄清困惑**：对歧义和不确定点给出明确解释
+2. **提供指导**：基于原文给出处理建议
+3. **更新提示**：必要时更新实体/关系提示列表
+4. **建议修改**：如果发现问题，建议修改已抽取的结果
+
+回答原则：
+- 基于原文内容，不做无依据的推断
+- 简洁明了，直接回答问题
+- 如果确实无法确定，诚实说明并给出建议的处理方式
+- 必要时更新之前的指导信息"""
+
+MENTOR_QUERY_USER = """## 学生查询
+
+### 查询来源
+来自 **{source_node}** 节点的查询
+
+### 查询类型
+{query_type}
+
+### 问题描述
+{query_content}
+
+### 涉及的实体
+{involved_entities}
+
+### 涉及的关系
+{involved_relations}
+
+### 当前置信度
+{current_confidence}
+
+### 查询上下文
+{context}
+
+---
+
+## 原始文本
+{raw_text}
+
+---
+
+## 之前的导师指导
+{previous_guidance}
+
+---
+
+## 请回答学生的问题：
+
+1. **回答**：对问题的直接解答
+2. **澄清**：对困惑点的详细解释（如有需要）
+3. **推荐方案**：建议的处理方式
+4. **是否建议修改**：如果发现问题，给出修改建议
+5. **更新的提示**：如果需要，更新实体/关系提示列表
+
+请输出导师响应（JSON格式）。"""
+
+MENTOR_QUERY_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", MENTOR_QUERY_SYSTEM),
+    ("human", MENTOR_QUERY_USER),
+])
+
+
+# ===== P14新增：困惑检测辅助函数 =====
+
+def format_query_for_mentor(query: Dict) -> str:
+    """格式化查询内容用于导师提示词"""
+    if not query:
+        return "(无查询)"
+    query_type = query.get("query_type", "unknown")
+    content = query.get("query_content", "")
+    entities = query.get("involved_entities", [])
+    relations = query.get("involved_relations", [])
+
+    lines = [
+        f"查询类型: {query_type}",
+        f"问题: {content}",
+    ]
+    if entities:
+        lines.append(f"涉及实体: {', '.join(entities)}")
+    if relations:
+        lines.append(f"涉及关系: {', '.join(relations)}")
+    return "\n".join(lines)
+
+
+def detect_extraction_confusion(result: Dict, state: Dict) -> Optional[Dict]:
+    """检测联合抽取结果中的困惑点
+
+    Args:
+        result: JointExtractionResult 的 model_dump()
+        state: 当前 CorpusState
+
+    Returns:
+        如果检测到困惑，返回查询字典；否则返回 None
+    """
+    # 1. 实体歧义检测
+    for entity in result.get("entities", []):
+        entity_confidence = entity.get("confidence", "medium")
+        if entity_confidence == "low":
+            return {
+                "query_type": "entity_ambiguity",
+                "query_content": f"实体 '{entity.get('name')}' 类型不确定，可能是 '{entity.get('type')}' 但需要确认",
+                "involved_entities": [entity.get("name", "")],
+                "involved_relations": [],
+                "current_confidence": "low",
+            }
+
+    # 2. 关系困惑检测
+    for triple in result.get("triples", []):
+        triple_confidence = triple.get("confidence", "medium")
+        if triple_confidence == "low":
+            return {
+                "query_type": "relation_confusion",
+                "query_content": f"三元组 '{triple.get('head')}-{triple.get('relation')}-{triple.get('tail')}' 证据不足或关系不确定",
+                "involved_entities": [triple.get("head", ""), triple.get("tail", "")],
+                "involved_relations": [triple.get("relation", "")],
+                "current_confidence": "low",
+            }
+
+    # 3. 整体置信度过低
+    overall_confidence = result.get("overall_confidence", "medium")
+    if overall_confidence == "low":
+        return {
+            "query_type": "overall_uncertainty",
+            "query_content": "整体抽取置信度过低，文本语义复杂或存在多处歧义",
+            "involved_entities": [],
+            "involved_relations": [],
+            "current_confidence": "low",
+        }
+
+    # 4. 无实体但有文本
+    entities = result.get("entities", [])
+    if not entities and state.get("raw_text"):
+        return {
+            "query_type": "entity_ambiguity",
+            "query_content": "未能从文本中抽取到任何实体，请确认是否文本无地理语义",
+            "involved_entities": [],
+            "involved_relations": [],
+            "current_confidence": "medium",
+        }
+
+    return None
+
+
+def detect_eval_confusion(eval_result: Dict, state: Dict) -> Optional[Dict]:
+    """检测评估结果中的困惑点"""
+    # 1. 大量三元组被拒绝
+    corrected = eval_result.get("corrected_triples", [])
+    original_triples = state.get("triples", [])
+
+    if len(original_triples) > 0 and len(corrected) < len(original_triples) * 0.5:
+        rejected_count = len(original_triples) - len(corrected)
+        return {
+            "query_type": "eval_disagreement",
+            "query_content": f"评估拒绝了 {rejected_count} 个三元组，可能需要重新理解原文语义",
+            "involved_entities": [],
+            "involved_relations": [],
+            "current_confidence": "medium",
+        }
+
+    # 2. 评估置信度过低
+    if eval_result.get("eval_passed") is False and not eval_result.get("corrected_triples"):
+        return {
+            "query_type": "overall_uncertainty",
+            "query_content": "评估未通过且无修正三元组，可能需要重新抽取",
+            "involved_entities": [],
+            "involved_relations": [],
+            "current_confidence": "low",
+        }
+
+    return None
+
+
+def detect_label_confusion(label_result: Dict, state: Dict) -> Optional[Dict]:
+    """检测标注结果中的困惑点"""
+    # 1. 实体属性缺失
+    entity_attrs = label_result.get("entity_attrs", {})
+    entities = state.get("entities", {})
+
+    all_entity_names = []
+    for entity_type, names in entities.items():
+        all_entity_names.extend(names)
+
+    missing_attrs = [name for name in all_entity_names if name not in entity_attrs]
+    if len(missing_attrs) > len(all_entity_names) * 0.5:
+        return {
+            "query_type": "label_confusion",
+            "query_content": f"{len(missing_attrs)} 个实体缺少属性标注，可能需要确认实体类型",
+            "involved_entities": missing_attrs[:5],  # 只列出前5个
+            "involved_relations": [],
+            "current_confidence": "medium",
+        }
+
+    # 2. 标注置信度过低
+    if label_result.get("overall_confidence", "medium") == "low":
+        return {
+            "query_type": "label_confusion",
+            "query_content": "标注整体置信度过低，属性归属不确定",
+            "involved_entities": [],
+            "involved_relations": [],
+            "current_confidence": "low",
+        }
+
+    return None
 
 
 def format_feedback_summary(feedbacks: List[Dict], revision_cycle: int) -> str:

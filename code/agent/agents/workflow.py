@@ -2212,10 +2212,105 @@ def route_after_revision_joint(state: CorpusState) -> str:
     return "eval"
 
 
+# ===== P14新增：双向交流路由函数 =====
+
+def route_joint_to_mentor_or_eval(state: CorpusState) -> str:
+    """Joint_NER_RE 后路由 - 可向导师求助
+
+    P14新增：如果检测到困惑且未超过最大查询次数，回退到 QA_Mentor
+    """
+    needs_mentor_help = state.get("needs_mentor_help", False)
+    query_count = state.get("query_count", 0)
+    max_queries = state.get("max_queries", 2)
+
+    # 有错误时继续到 Eval（保守策略）
+    if state.get("error"):
+        logger.warning(f"[Joint-Route] 有错误，跳转到 Eval")
+        return "eval"
+
+    # 需要导师帮助且未超过最大查询次数
+    if needs_mentor_help and query_count < max_queries:
+        logger.info(f"[Joint-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        return "qa_mentor"
+
+    # 正常继续到 Eval
+    return "eval"
+
+
+def route_eval_to_mentor_or_label(state: CorpusState) -> str:
+    """Eval 后路由 - 可向导师求助
+
+    P14新增：如果检测到困惑且未超过最大查询次数，回退到 QA_Mentor
+    """
+    needs_mentor_help = state.get("needs_mentor_help", False)
+    query_count = state.get("query_count", 0)
+    max_queries = state.get("max_queries", 2)
+
+    # 有错误时继续到 Label（保守策略）
+    if state.get("error"):
+        logger.warning(f"[Eval-Route] 有错误，跳转到 Label")
+        return "label"
+
+    # 需要导师帮助且未超过最大查询次数
+    if needs_mentor_help and query_count < max_queries:
+        logger.info(f"[Eval-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        return "qa_mentor"
+
+    # 正常继续到 Label
+    return "label"
+
+
+def route_label_to_mentor_or_approval(state: CorpusState) -> str:
+    """Label 后路由 - 可向导师求助
+
+    P14新增：如果检测到困惑且未超过最大查询次数，回退到 QA_Mentor
+    """
+    needs_mentor_help = state.get("needs_mentor_help", False)
+    query_count = state.get("query_count", 0)
+    max_queries = state.get("max_queries", 2)
+
+    # 有错误时继续到 QA_Approval（保守策略）
+    if state.get("error"):
+        logger.warning(f"[Label-Route] 有错误，跳转到 QA_Approval")
+        return "qa_approval"
+
+    # 需要导师帮助且未超过最大查询次数
+    if needs_mentor_help and query_count < max_queries:
+        logger.info(f"[Label-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        return "qa_mentor"
+
+    # 正常继续到 QA_Approval
+    return "qa_approval"
+
+
+def route_mentor_to_target(state: CorpusState) -> str:
+    """QA_Mentor 后路由 - 根据返回目标节点决定下一步
+
+    P14新增：导师回答查询后，返回到发起查询的节点
+    """
+    # 检查是否有导师响应（说明是回答查询模式）
+    mentor_response = state.get("mentor_response")
+    return_to_node = state.get("return_to_node")
+
+    if mentor_response and return_to_node:
+        logger.info(f"[Mentor-Route] 返回到 {return_to_node}")
+        return return_to_node
+
+    # 检查是否建议跳过详细抽取
+    qa_scaffold_result = state.get("qa_scaffold_result", {})
+    if qa_scaffold_result.get("should_skip_detailed_extraction"):
+        logger.info(f"[Mentor-Route] 建议跳过详细抽取，结束")
+        return END
+
+    # 初始化指导模式：继续到 Joint_NER_RE
+    return "joint_ner_re"
+
+
 def build_qa_mentor_workflow(
     qa_llm: Any,
     worker_llm: Any,
-    config: ExtractionConfig
+    config: ExtractionConfig,
+    enable_bidirectional_query: bool = True,  # P14新增：是否启用双向交流
 ) -> CompiledStateGraph:
     """
     构建QA导师模式工作流
@@ -2225,22 +2320,27 @@ def build_qa_mentor_workflow(
             ↑                                                    ↓
             └──────────── Revision Loop (if needed) ─────────────┘
 
+    P14改进：支持双向交流
+    - Joint_NER_RE、Eval、Label 可向 QA_Mentor 发起查询
+    - QA_Mentor 回答后返回到发起节点继续处理
+
     Args:
         qa_llm: QA导师使用的LLM（如DeepSeek Reasoner）
         worker_llm: 后续节点使用的LLM（如DeepSeek Chat）
         config: 配置实例
+        enable_bidirectional_query: 是否启用双向交流（默认True）
 
     Returns:
         CompiledStateGraph
     """
     builder = StateGraph(CorpusState)
 
-    # 创建节点
+    # P14改进：创建节点时传入 enable_query 参数
     qa_mentor_node = create_qa_mentor_node(qa_llm, config)
     qa_approval_node = create_qa_approval_node(qa_llm, config)
-    joint_ner_re_node = create_joint_ner_re_node(worker_llm)
-    eval_node = create_eval_simplified_node(worker_llm)
-    label_node = create_label_node(worker_llm)
+    joint_ner_re_node = create_joint_ner_re_node(worker_llm, enable_query=enable_bidirectional_query)
+    eval_node = create_eval_simplified_node(worker_llm, enable_query=enable_bidirectional_query)
+    label_node = create_label_node(worker_llm, enable_query=enable_bidirectional_query)
     revision_joint_node = create_revision_joint_node(worker_llm)
 
     # 添加节点
@@ -2274,21 +2374,57 @@ def build_qa_mentor_workflow(
     if not config.enable_filter and not config.enable_normalize:
         builder.add_edge(START, "qa_mentor")
 
-    # QA导师 → 联合抽取
+    # P14改进：QA导师 → 根据返回目标节点路由
+    # 支持返回到发起查询的节点
     builder.add_conditional_edges(
         "qa_mentor",
-        route_after_qa_mentor,
-        {"joint_ner_re": "joint_ner_re", END: END}
+        route_mentor_to_target,
+        {
+            "joint_ner_re": "joint_ner_re",
+            "eval": "eval",
+            "label": "label",
+            END: END,
+        }
     )
 
-    # 联合抽取 → 评估
-    builder.add_edge("joint_ner_re", "eval")
+    # P14改进：联合抽取 → 导师帮助或评估（双向交流）
+    if enable_bidirectional_query:
+        builder.add_conditional_edges(
+            "joint_ner_re",
+            route_joint_to_mentor_or_eval,
+            {
+                "qa_mentor": "qa_mentor",  # 需要帮助时回退到导师
+                "eval": "eval",            # 正常继续
+            }
+        )
+    else:
+        builder.add_edge("joint_ner_re", "eval")
 
-    # 评估 → 标注
-    builder.add_edge("eval", "label")
+    # P14改进：评估 → 导师帮助或标注（双向交流）
+    if enable_bidirectional_query:
+        builder.add_conditional_edges(
+            "eval",
+            route_eval_to_mentor_or_label,
+            {
+                "qa_mentor": "qa_mentor",  # 需要帮助时回退到导师
+                "label": "label",          # 正常继续
+            }
+        )
+    else:
+        builder.add_edge("eval", "label")
 
-    # 标注 → QA审批
-    builder.add_edge("label", "qa_approval")
+    # P14改进：标注 → 导师帮助或QA审批（双向交流）
+    if enable_bidirectional_query:
+        builder.add_conditional_edges(
+            "label",
+            route_label_to_mentor_or_approval,
+            {
+                "qa_mentor": "qa_mentor",      # 需要帮助时回退到导师
+                "qa_approval": "qa_approval",  # 正常继续
+            }
+        )
+    else:
+        builder.add_edge("label", "qa_approval")
 
     # QA审批 → 修改循环或结束
     builder.add_conditional_edges(
@@ -2309,7 +2445,10 @@ def build_qa_mentor_workflow(
         {"eval": "eval"}
     )
 
-    logger.info("[Workflow] QA导师模式工作流构建完成")
+    if enable_bidirectional_query:
+        logger.info("[Workflow] QA导师双向交流模式工作流构建完成")
+    else:
+        logger.info("[Workflow] QA导师模式工作流构建完成（无双向交流）")
 
     return builder.compile(checkpointer=InMemorySaver())
 

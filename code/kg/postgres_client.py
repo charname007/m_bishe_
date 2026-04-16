@@ -470,7 +470,7 @@ class PostgresClient:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (entity_id) DO NOTHING
                 RETURNING entity_id
-            """,
+            """, (
                 entity_id,
                 entity["name"],
                 entity.get("type", "poi"),
@@ -479,7 +479,7 @@ class PostgresClient:
                 entity.get("aliases", []),
                 embedding,  # embedding向量
                 "xiaohongshu"  # 来源标记
-            )
+            ))
 
             row = cur.fetchone()
             if row and row[0]:

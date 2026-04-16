@@ -227,6 +227,28 @@ class AlignmentState(TypedDict):
     """新实体名称列表：未找到匹配的实体"""
 
 
+class MentorQueryState(TypedDict):
+    """导师查询状态 - 双向交流机制（P14新增）
+
+    允许后续节点（Joint_NER_RE、Eval、Label）向 QA_Mentor 发起查询，
+    实现双向交流而非单向状态传递。
+    """
+    mentor_query: Annotated[Optional[Dict], replace_value]
+    """向导师发起的查询：{query_type, query_content, involved_entities, involved_relations}"""
+    mentor_response: Annotated[Optional[Dict], replace_value]
+    """导师的回答：{answer, updated_guidance, updated_entity_hints, updated_relation_hints}"""
+    query_source_node: Annotated[Optional[str], replace_value]
+    """问题来源节点：joint_ner_re / eval / label"""
+    needs_mentor_help: Annotated[bool, replace_value]
+    """是否需要导师帮助：路由函数判断标志"""
+    query_count: Annotated[int, replace_value]
+    """查询次数计数：防止无限循环"""
+    max_queries: Annotated[int, replace_value]
+    """最大查询次数：默认2"""
+    return_to_node: Annotated[Optional[str], replace_value]
+    """导师回答后返回的目标节点"""
+
+
 class OutputState(TypedDict):
     """最终输出状态 - 校验/归一化后的结果"""
     final_entities: Annotated[List[Dict], replace_value]
@@ -260,18 +282,19 @@ class CorpusState(
     RetryState,
     QAMentorState,
     AlignmentState,
+    MentorQueryState,
     OutputState,
     ControlState,
 ):
     """
     单条语料处理状态 - 通过多重 TypedDict 继承组合
-    
+
     LangGraph 兼容性说明：
     - TypedDict 多重继承会合并所有父类的字段
     - Annotated reducer 保持不变，LangGraph 正常识别
     - 向下兼容现有节点代码，无需修改
-    
-    子状态分组（共14个）：
+
+    子状态分组（共15个）：
     - InputState: corpus_id, raw_text
     - ConfigState: 配置标记字段
     - FilterState: filter_result
@@ -284,6 +307,7 @@ class CorpusState(
     - RetryState: retry_count, max_retries, problem_entities, problem_triples 等
     - QAMentorState: mentor_guidance, qa_approval_result 等（P10新增）
     - AlignmentState: entity_alignment_result, aligned_entity_ids, new_entity_names（P11新增）
+    - MentorQueryState: mentor_query, mentor_response, query_source_node 等（P14新增）
     - OutputState: final_entities, final_triples, verification_confidence
     - ControlState: current_step, error
     """
