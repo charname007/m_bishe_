@@ -151,6 +151,20 @@ class PostgresClient:
             if not cur.fetchone():
                 cur.execute("ALTER TABLE entities ADD COLUMN attrs JSONB")
 
+            # triples 表新增 relation_attrs 列（用于存储关系属性）
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'triples'
+                AND table_schema = CURRENT_SCHEMA()
+                AND column_name = 'relation_attrs'
+            """)
+            if not cur.fetchone():
+                cur.execute("ALTER TABLE triples ADD COLUMN relation_attrs JSONB")
+
+            # 创建 JSONB 索引（用于属性查询优化）
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_attrs ON entities USING GIN (attrs)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_triples_relation_attrs ON triples USING GIN (relation_attrs)")
+
             self.conn.commit()
             logger.debug("PostgreSQL表结构创建完成")
 
@@ -263,7 +277,8 @@ class PostgresClient:
                     t.get("passed_eval", True),
                     t.get("relation_type", ""),
                     t.get("relation_subtype", ""),
-                    t.get("corpus_ids", [])
+                    t.get("corpus_ids", []),
+                    json.dumps(t.get("relation_attrs", {}), ensure_ascii=False)  # 新增 relation_attrs 字段
                 )
                 for t in triples
             ]
@@ -271,7 +286,7 @@ class PostgresClient:
             execute_values(cur, """
                 INSERT INTO triples
                 (batch_id, head_entity, relation, tail_entity, evidence,
-                 sem_score, fac_score, con_score, passed_eval, relation_type, relation_subtype, corpus_ids)
+                 sem_score, fac_score, con_score, passed_eval, relation_type, relation_subtype, corpus_ids, relation_attrs)
                 VALUES %s
             """, data)
 
@@ -447,12 +462,14 @@ class PostgresClient:
             if not entity_id:
                 # 获取同类型的最大编号
                 type_ = entity.get("type", "poi")
+                # P15修复：确保 type_ 是纯字符串，避免格式化问题
+                type_ = str(type_) if type_ else "poi"
                 cur.execute("""
                     SELECT entity_id FROM geo_entity_names
                     WHERE type = %s
                     ORDER BY entity_id DESC
                     LIMIT 1
-                """, (type_))
+                """, (type_,))
                 row = cur.fetchone()
                 if row and row[0]:
                     match = re.search(r'(\d+)$', row[0])
@@ -464,21 +481,23 @@ class PostgresClient:
                 entity_id = f"{type_prefix}_{max_num + 1}"
 
             # 插入记录（使用RETURNING语法，ON CONFLICT时返回NULL）
+            # P15修复：确保所有参数都是纯字符串，避免格式化问题
+            # P15修复：移除 aliases 和 source 列（表结构中不存在）
+            entity_name = str(entity["name"]) if entity.get("name") else ""
+            entity_type_str = str(entity.get("type", "poi")) if entity.get("type") else "poi"
             cur.execute("""
                 INSERT INTO geo_entity_names
-                (entity_id, name, type, longitude, latitude, aliases, embedding, source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (entity_id, name, type, longitude, latitude, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (entity_id) DO NOTHING
                 RETURNING entity_id
             """, (
                 entity_id,
-                entity["name"],
-                entity.get("type", "poi"),
+                entity_name,
+                entity_type_str,
                 entity.get("longitude"),
                 entity.get("latitude"),
-                entity.get("aliases", []),
                 embedding,  # embedding向量
-                "xiaohongshu"  # 来源标记
             ))
 
             row = cur.fetchone()

@@ -1,6 +1,7 @@
 """
 Neo4j 图数据库客户端
 """
+import json
 from typing import Dict, List, Optional
 from neo4j import GraphDatabase
 from loguru import logger
@@ -47,9 +48,13 @@ class Neo4jClient:
                 "type": "POI",
                 "aliases": ["武大"],
                 "category": "教育",
-                "corpus_ids": ["001", "002"]
+                "corpus_ids": ["001", "002"],
+                "attrs": {"类别": "高校", "推荐指数": 5}  # 新增：实体属性
             }
         """
+        # 将 attrs 转为 JSON 字符串存储（Neo4j 不原生支持 JSONB）
+        attrs_json = json.dumps(entity.get("attrs", {}), ensure_ascii=False) if entity.get("attrs") else ""
+
         with self.driver.session() as session:
             result = session.run("""
                 MERGE (e:Entity {name: $name})
@@ -58,6 +63,7 @@ class Neo4jClient:
                     e.category = $category,
                     e.aliases = $aliases,
                     e.corpus_ids = $corpus_ids,
+                    e.attrs = $attrs,
                     e.created_at = datetime(),
                     e.source = 'xiaohongshu'
                 ON MATCH SET
@@ -71,6 +77,11 @@ class Neo4jClient:
                         THEN apoc.coll.toSet(e.corpus_ids + $corpus_ids)
                         ELSE e.corpus_ids
                     END,
+                    e.attrs = CASE
+                        WHEN $attrs IS NOT NULL AND $attrs <> '' AND $attrs <> '{}'
+                        THEN $attrs
+                        ELSE e.attrs
+                    END,
                     e.updated_at = datetime()
                 RETURN e
             """,
@@ -78,7 +89,8 @@ class Neo4jClient:
                 type=entity.get("type", "Unknown"),
                 category=entity.get("category", ""),
                 aliases=entity.get("aliases", []),
-                corpus_ids=entity.get("corpus_ids", [])
+                corpus_ids=entity.get("corpus_ids", []),
+                attrs=attrs_json
             )
             return result.single() is not None
 
@@ -94,9 +106,13 @@ class Neo4jClient:
                 "evidence": "武汉大学在珞喻路上",
                 "corpus_ids": ["001"],
                 "relation_type": "位置关系",
-                "relation_subtype": "内部"
+                "relation_subtype": "内部",
+                "relation_attrs": {"距离值": "近", "方向值": "东"}  # 新增：关系属性
             }
         """
+        # 将 relation_attrs 转为 JSON 字符串存储（Neo4j 不原生支持 JSONB）
+        relation_attrs_json = json.dumps(triple.get("relation_attrs", {}), ensure_ascii=False) if triple.get("relation_attrs") else ""
+
         with self.driver.session() as session:
             # 先确保头尾实体存在（设置基本属性避免空壳实体）
             session.run("""
@@ -128,6 +144,7 @@ class Neo4jClient:
                     r.corpus_ids = $corpus_ids,
                     r.relation_type = $relation_type,
                     r.relation_subtype = $relation_subtype,
+                    r.relation_attrs = $relation_attrs,
                     r.created_at = datetime(),
                     r.source = 'xiaohongshu'
                 ON MATCH SET
@@ -146,6 +163,11 @@ class Neo4jClient:
                         THEN $relation_subtype
                         ELSE r.relation_subtype
                     END,
+                    r.relation_attrs = CASE
+                        WHEN $relation_attrs IS NOT NULL AND $relation_attrs <> '' AND $relation_attrs <> '{}'
+                        THEN $relation_attrs
+                        ELSE r.relation_attrs
+                    END,
                     r.updated_at = datetime()
                 RETURN r
             """,
@@ -155,7 +177,8 @@ class Neo4jClient:
                 evidence=triple.get("evidence", ""),
                 corpus_ids=triple.get("corpus_ids", []),
                 relation_type=triple.get("relation_type", ""),
-                relation_subtype=triple.get("relation_subtype", "")
+                relation_subtype=triple.get("relation_subtype", ""),
+                relation_attrs=relation_attrs_json
             )
             return result.single() is not None
 
@@ -170,14 +193,15 @@ class Neo4jClient:
 
         try:
             with self.driver.session() as session:
-                # 准备批量数据
+                # 准备批量数据（包含 attrs JSON字符串）
                 batch_data = [
                     {
                         "name": e["name"],
                         "type": e.get("type", "Unknown"),
                         "category": e.get("category", ""),
                         "aliases": e.get("aliases", []),
-                        "corpus_ids": e.get("corpus_ids", [])
+                        "corpus_ids": e.get("corpus_ids", []),
+                        "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
                     }
                     for e in entities
                 ]
@@ -191,6 +215,7 @@ class Neo4jClient:
                         e.category = entity.category,
                         e.aliases = entity.aliases,
                         e.corpus_ids = entity.corpus_ids,
+                        e.attrs = entity.attrs,
                         e.created_at = datetime(),
                         e.source = 'xiaohongshu'
                     ON MATCH SET
@@ -203,6 +228,11 @@ class Neo4jClient:
                             WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
                             THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
                             ELSE e.corpus_ids
+                        END,
+                        e.attrs = CASE
+                            WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
+                            THEN entity.attrs
+                            ELSE e.attrs
                         END,
                         e.updated_at = datetime()
                     RETURN count(e) as merged_count
@@ -236,7 +266,7 @@ class Neo4jClient:
 
         try:
             with self.driver.session() as session:
-                # 准备批量数据
+                # 准备批量数据（包含 relation_attrs JSON字符串）
                 batch_data = [
                     {
                         "head": t["head"],
@@ -245,7 +275,8 @@ class Neo4jClient:
                         "evidence": t.get("evidence", ""),
                         "corpus_ids": t.get("corpus_ids", []),
                         "relation_type": t.get("relation_type", ""),
-                        "relation_subtype": t.get("relation_subtype", "")
+                        "relation_subtype": t.get("relation_subtype", ""),
+                        "relation_attrs": json.dumps(t.get("relation_attrs", {}), ensure_ascii=False) if t.get("relation_attrs") else ""
                     }
                     for t in triples
                 ]
@@ -280,6 +311,7 @@ class Neo4jClient:
                         r.corpus_ids = triple.corpus_ids,
                         r.relation_type = triple.relation_type,
                         r.relation_subtype = triple.relation_subtype,
+                        r.relation_attrs = triple.relation_attrs,
                         r.created_at = datetime(),
                         r.source = 'xiaohongshu'
                     ON MATCH SET
@@ -297,6 +329,11 @@ class Neo4jClient:
                             WHEN triple.relation_subtype IS NOT NULL AND triple.relation_subtype <> ''
                             THEN triple.relation_subtype
                             ELSE r.relation_subtype
+                        END,
+                        r.relation_attrs = CASE
+                            WHEN triple.relation_attrs IS NOT NULL AND triple.relation_attrs <> '' AND triple.relation_attrs <> '{}'
+                            THEN triple.relation_attrs
+                            ELSE r.relation_attrs
                         END,
                         r.updated_at = datetime()
                     RETURN count(r) as merged_count

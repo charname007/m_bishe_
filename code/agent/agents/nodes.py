@@ -4096,6 +4096,10 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                     # 准备新实体数据
                     for i, name in enumerate(new_entities):
                         entity_type = entity_types.get(name, "poi")
+                        # P15修复：确保 entity_type 是字符串（psycopg2 不接受 Enum 类型）
+                        if hasattr(entity_type, 'value'):
+                            entity_type = entity_type.value
+                        entity_type = str(entity_type) if entity_type else "poi"
                         entity_data = {
                             "name": name,
                             "type": entity_type,
