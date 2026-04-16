@@ -186,63 +186,227 @@ class Neo4jClient:
         """
         批量合并实体 - 使用 UNWIND 批量操作
 
-        性能优化：单次 Cypher 查询处理所有实体，而非逐个处理
+        P15改进：根据实体类型使用不同的节点标签
+        - 地理实体（道路/POI/建筑物/街区）→ geo_entity_node:Entity
+        - 功能实体 → FunctionNode:Entity
+        - 事件实体 → EventNode:Entity
+        - 其他 → Entity
+
+        性能优化：按类型分组批量处理
         """
         if not entities:
             return {"merged": 0, "total": 0}
 
+        # P15改进：按实体类型分组
+        GEO_TYPES = {"道路", "POI", "建筑物", "街区"}
+        groups = {
+            "geo_entity_node": [],      # 地理实体
+            "FunctionNode": [],         # 功能实体
+            "EventNode": [],            # 事件实体
+            "Entity": [],               # 其他/Unknown
+        }
+
+        for e in entities:
+            entity_type = e.get("type", "Unknown")
+            if entity_type in GEO_TYPES:
+                groups["geo_entity_node"].append(e)
+            elif entity_type == "功能":
+                groups["FunctionNode"].append(e)
+            elif entity_type == "事件":
+                groups["EventNode"].append(e)
+            else:
+                groups["Entity"].append(e)
+
+        total_merged = 0
+
         try:
             with self.driver.session() as session:
-                # 准备批量数据（包含 attrs JSON字符串）
-                batch_data = [
-                    {
-                        "name": e["name"],
-                        "type": e.get("type", "Unknown"),
-                        "category": e.get("category", ""),
-                        "aliases": e.get("aliases", []),
-                        "corpus_ids": e.get("corpus_ids", []),
-                        "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
-                    }
-                    for e in entities
-                ]
+                # 处理地理实体组（geo_entity_node:Entity 双标签）
+                if groups["geo_entity_node"]:
+                    batch_data = [
+                        {
+                            "name": e["name"],
+                            "type": e.get("type", "Unknown"),
+                            "category": e.get("category", ""),
+                            "aliases": e.get("aliases", []),
+                            "corpus_ids": e.get("corpus_ids", []),
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                        }
+                        for e in groups["geo_entity_node"]
+                    ]
+                    result = session.run("""
+                        UNWIND $entities AS entity
+                        MERGE (e:geo_entity_node:Entity {name: entity.name})
+                        ON CREATE SET
+                            e.type = entity.type,
+                            e.category = entity.category,
+                            e.aliases = entity.aliases,
+                            e.corpus_ids = entity.corpus_ids,
+                            e.attrs = entity.attrs,
+                            e.created_at = datetime(),
+                            e.source = 'xiaohongshu'
+                        ON MATCH SET
+                            e.aliases = CASE
+                                WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
+                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                ELSE e.aliases
+                            END,
+                            e.corpus_ids = CASE
+                                WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
+                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                ELSE e.corpus_ids
+                            END,
+                            e.attrs = CASE
+                                WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
+                                THEN entity.attrs
+                                ELSE e.attrs
+                            END,
+                            e.updated_at = datetime()
+                        RETURN count(e) as merged_count
+                    """, entities=batch_data)
+                    record = result.single()
+                    total_merged += record["merged_count"] if record else 0
 
-                # 使用 UNWIND 批量合并
-                result = session.run("""
-                    UNWIND $entities AS entity
-                    MERGE (e:Entity {name: entity.name})
-                    ON CREATE SET
-                        e.type = entity.type,
-                        e.category = entity.category,
-                        e.aliases = entity.aliases,
-                        e.corpus_ids = entity.corpus_ids,
-                        e.attrs = entity.attrs,
-                        e.created_at = datetime(),
-                        e.source = 'xiaohongshu'
-                    ON MATCH SET
-                        e.aliases = CASE
-                            WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                            THEN apoc.coll.toSet(e.aliases + entity.aliases)
-                            ELSE e.aliases
-                        END,
-                        e.corpus_ids = CASE
-                            WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                            THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
-                            ELSE e.corpus_ids
-                        END,
-                        e.attrs = CASE
-                            WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
-                            THEN entity.attrs
-                            ELSE e.attrs
-                        END,
-                        e.updated_at = datetime()
-                    RETURN count(e) as merged_count
-                """, entities=batch_data)
+                # 处理功能实体组（FunctionNode:Entity 双标签）
+                if groups["FunctionNode"]:
+                    batch_data = [
+                        {
+                            "name": e["name"],
+                            "type": e.get("type", "功能"),
+                            "category": e.get("category", ""),
+                            "aliases": e.get("aliases", []),
+                            "corpus_ids": e.get("corpus_ids", []),
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                        }
+                        for e in groups["FunctionNode"]
+                    ]
+                    result = session.run("""
+                        UNWIND $entities AS entity
+                        MERGE (e:FunctionNode:Entity {name: entity.name})
+                        ON CREATE SET
+                            e.type = entity.type,
+                            e.category = entity.category,
+                            e.aliases = entity.aliases,
+                            e.corpus_ids = entity.corpus_ids,
+                            e.attrs = entity.attrs,
+                            e.created_at = datetime(),
+                            e.source = 'xiaohongshu'
+                        ON MATCH SET
+                            e.aliases = CASE
+                                WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
+                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                ELSE e.aliases
+                            END,
+                            e.corpus_ids = CASE
+                                WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
+                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                ELSE e.corpus_ids
+                            END,
+                            e.attrs = CASE
+                                WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
+                                THEN entity.attrs
+                                ELSE e.attrs
+                            END,
+                            e.updated_at = datetime()
+                        RETURN count(e) as merged_count
+                    """, entities=batch_data)
+                    record = result.single()
+                    total_merged += record["merged_count"] if record else 0
 
-                record = result.single()
-                merged_count = record["merged_count"] if record else 0
+                # 处理事件实体组（EventNode:Entity 双标签）
+                if groups["EventNode"]:
+                    batch_data = [
+                        {
+                            "name": e["name"],
+                            "type": e.get("type", "事件"),
+                            "category": e.get("category", ""),
+                            "aliases": e.get("aliases", []),
+                            "corpus_ids": e.get("corpus_ids", []),
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                        }
+                        for e in groups["EventNode"]
+                    ]
+                    result = session.run("""
+                        UNWIND $entities AS entity
+                        MERGE (e:EventNode:Entity {name: entity.name})
+                        ON CREATE SET
+                            e.type = entity.type,
+                            e.category = entity.category,
+                            e.aliases = entity.aliases,
+                            e.corpus_ids = entity.corpus_ids,
+                            e.attrs = entity.attrs,
+                            e.created_at = datetime(),
+                            e.source = 'xiaohongshu'
+                        ON MATCH SET
+                            e.aliases = CASE
+                                WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
+                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                ELSE e.aliases
+                            END,
+                            e.corpus_ids = CASE
+                                WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
+                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                ELSE e.corpus_ids
+                            END,
+                            e.attrs = CASE
+                                WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
+                                THEN entity.attrs
+                                ELSE e.attrs
+                            END,
+                            e.updated_at = datetime()
+                        RETURN count(e) as merged_count
+                    """, entities=batch_data)
+                    record = result.single()
+                    total_merged += record["merged_count"] if record else 0
 
-                logger.info(f"实体合并完成: {merged_count}/{len(entities)}")
-                return {"merged": merged_count, "total": len(entities)}
+                # 处理其他实体组（仅 Entity 标签）
+                if groups["Entity"]:
+                    batch_data = [
+                        {
+                            "name": e["name"],
+                            "type": e.get("type", "Unknown"),
+                            "category": e.get("category", ""),
+                            "aliases": e.get("aliases", []),
+                            "corpus_ids": e.get("corpus_ids", []),
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                        }
+                        for e in groups["Entity"]
+                    ]
+                    result = session.run("""
+                        UNWIND $entities AS entity
+                        MERGE (e:Entity {name: entity.name})
+                        ON CREATE SET
+                            e.type = entity.type,
+                            e.category = entity.category,
+                            e.aliases = entity.aliases,
+                            e.corpus_ids = entity.corpus_ids,
+                            e.attrs = entity.attrs,
+                            e.created_at = datetime(),
+                            e.source = 'xiaohongshu'
+                        ON MATCH SET
+                            e.aliases = CASE
+                                WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
+                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                ELSE e.aliases
+                            END,
+                            e.corpus_ids = CASE
+                                WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
+                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                ELSE e.corpus_ids
+                            END,
+                            e.attrs = CASE
+                                WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
+                                THEN entity.attrs
+                                ELSE e.attrs
+                            END,
+                            e.updated_at = datetime()
+                        RETURN count(e) as merged_count
+                    """, entities=batch_data)
+                    record = result.single()
+                    total_merged += record["merged_count"] if record else 0
+
+                logger.info(f"实体合并完成: {total_merged}/{len(entities)} (geo={len(groups['geo_entity_node'])}, func={len(groups['FunctionNode'])}, event={len(groups['EventNode'])}, other={len(groups['Entity'])})")
+                return {"merged": total_merged, "total": len(entities)}
         except Exception as e:
             logger.error(f"批量合并实体失败: {e}")
             # 降级为逐个处理
