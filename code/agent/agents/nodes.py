@@ -860,6 +860,13 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
             else:
                 corrected_triples = list(state["triples"])
 
+            # P15调试：检查 attributes 是否保留
+            corpus_id_debug = state.get('corpus_id', 'unknown')
+            for t in corrected_triples[:3]:
+                rel = t.get('relation')
+                attrs = t.get('attributes', {})
+                logger.debug(f"[Eval-Debug] corpus={corpus_id_debug}: <{t.get('head')}, {rel} (type={type(rel).__name__}), {t.get('tail')}> attributes={attrs}")
+
             # P2改进：规则校验（不依赖 LLM）
             corrected_triples = rule_based_validation(corrected_triples, state["entities"])
 
@@ -962,16 +969,30 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
 
 
 def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) -> List[Dict]:
-    """应用 LLM 返回的修正"""
+    """应用 LLM 返回的修正
+
+    P15修复：保留原 triple 的 attributes 字段（防止 relation_attrs 丢失）
+    """
     corrected = list(original_triples)
 
     for correction in corrections:
         original_key = (correction.original.head, correction.original.relation, correction.original.tail)
+
+        # 查找原 triple 以获取其 attributes
+        original_attrs = {}
+        original_evidence = ""
+        for triple in original_triples:
+            if (triple["head"], triple["relation"], triple["tail"]) == original_key:
+                original_attrs = triple.get("attributes", {})
+                original_evidence = triple.get("evidence", "")
+                break
+
         new_triple = {
             "head": correction.corrected.head,
             "relation": correction.corrected.relation,
             "tail": correction.corrected.tail,
-            "evidence": "",
+            "evidence": original_evidence,  # 保留原 evidence
+            "attributes": original_attrs,   # P15修复：保留原 attributes
         }
 
         for i, triple in enumerate(corrected):
@@ -1192,6 +1213,8 @@ def apply_corrections(original_triples: List[Dict], corrections: List[Any]) -> t
     """
     应用三元组修正
 
+    P15修复：保留原 triple 的 attributes 字段（防止 relation_attrs 丢失）
+
     Returns:
         (corrected_triples, correction_mapping)
         correction_mapping: {new_triple_key: original_triple_key} 用于继承评分
@@ -1202,11 +1225,26 @@ def apply_corrections(original_triples: List[Dict], corrections: List[Any]) -> t
     for correction in corrections:
         original = correction.original
         original_key = (original.head, original.relation, original.tail)
+
+        # 查找原 triple 以获取其 attributes
+        original_attrs = {}
+        original_evidence = ""
+        for triple in original_triples:
+            if (
+                triple["head"] == original.head
+                and triple["relation"] == original.relation
+                and triple["tail"] == original.tail
+            ):
+                original_attrs = triple.get("attributes", {})
+                original_evidence = triple.get("evidence", "")
+                break
+
         new_triple = {
             "head": correction.corrected.head,
             "relation": correction.corrected.relation,
             "tail": correction.corrected.tail,
-            "evidence": "",
+            "evidence": original_evidence,  # 保留原 evidence
+            "attributes": original_attrs,   # P15修复：保留原 attributes
         }
         new_key = (new_triple["head"], new_triple["relation"], new_triple["tail"])
 
@@ -1313,18 +1351,37 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     # 查找关系属性（使用标准格式）
                     triple_key = f"<{triple['head']}, {triple['relation']}, {triple['tail']}>"
 
-                    # 尝试多种 key 格式查找
+                    # P15调试：打印 triple 的 attributes 字段状态
+                    triple_attrs = triple.get("attributes", {})
+                    triple_relation_attrs = triple.get("relation_attrs", {})
+                    # 如果关系类型有属性映射但 triple 没有 attributes，记录警告
+                    relation_raw = triple.get("relation", "")
+                    relation_str = extract_enum_value(relation_raw) if hasattr(relation_raw, 'value') else str(relation_raw)
+                    expected_fields = RELATION_ATTRS_MAP.get(relation_str, [])
+                    if expected_fields and not triple_attrs:
+                        logger.warning(f"[Aggregator-Missing] {triple_key}: relation={relation_str}, expected_fields={expected_fields}, but attributes={triple_attrs}")
+                    elif triple_attrs:
+                        logger.debug(f"[Aggregator-Found] {triple_key}: relation={relation_str}, attributes={triple_attrs}")
+
+                    # 尝试多种 key 格式查找（优先从 Label node 输出查找）
                     attrs = (
                         relation_attrs.get(triple_key) or
                         relation_attrs.get(f"{triple['head']}, {triple['relation']}, {triple['tail']}") or
                         relation_attrs.get(f"<{triple['head']},{triple['relation']},{triple['tail']}>")
                     )
 
+                    # P15修复：如果 Label node 没有输出 relation_attrs，检查 triple 本身是否已有
+                    # RE node 输出的 attributes 字段也包含关系属性
+                    if not attrs:
+                        attrs = triple.get("relation_attrs") or triple.get("attributes")
+
                     if attrs:
                         # v3.2精简版：relation_type 直接使用7种标准关系类型
                         triple["relation_type"] = triple.get("relation", "")
                         # 根据关系类型选择对应的属性集（Schema v3.2）
-                        relation = triple.get("relation", "")
+                        relation_raw = triple.get("relation", "")
+                        # P15修复：确保 relation 是字符串（RELATION_ATTRS_MAP 的 key 是字符串）
+                        relation = extract_enum_value(relation_raw) if hasattr(relation_raw, 'value') else str(relation_raw)
                         attr_fields = RELATION_ATTRS_MAP.get(relation, [])
                         # 提取该关系类型的有效属性
                         triple["relation_attrs"] = {
@@ -1538,6 +1595,7 @@ def deduplicate_triples(triples: List[Dict]) -> List[Dict]:
                 "passed_eval": triple.get("passed_eval", False),  # 默认 False 更安全
                 "relation_type": triple.get("relation_type", ""),
                 "relation_subtype": triple.get("relation_subtype", ""),
+                "relation_attrs": triple.get("relation_attrs", {}),  # P15修复：保留关系属性
             })
         else:
             # 更新corpus_ids
@@ -1804,11 +1862,23 @@ def _apply_triple_corrections_for_self_check(
     original_triples: List[Dict],
     result: SelfCheckREResult
 ) -> List[Dict]:
-    """应用三元组修正"""
+    """应用三元组修正
+
+    P15修复：保留原 triple 的 attributes 字段（防止 relation_attrs 丢失）
+    """
     final_triples = []
+
+    # 构建原 triple 的 attributes 映射（用于继承）
+    original_attrs_map = {}
+    for triple in original_triples:
+        key = (triple["head"], triple["relation"], triple["tail"])
+        original_attrs_map[key] = triple.get("attributes", {})
 
     # 保留验证通过的三元组
     for vt in result.verified_triples:
+        key = (vt.head, vt.relation, vt.tail)
+        original_attrs = original_attrs_map.get(key, {})
+
         triple = {
             "head": vt.head,
             "relation": vt.relation,
@@ -1817,6 +1887,7 @@ def _apply_triple_corrections_for_self_check(
             "evidence_valid": vt.evidence_valid,
             "evidence_match": vt.evidence_match,
             "passed_eval": True,
+            "attributes": original_attrs,  # P15修复：保留原 attributes
         }
         final_triples.append(triple)
 
@@ -1825,6 +1896,10 @@ def _apply_triple_corrections_for_self_check(
         if tc.action == "delete":
             continue  # 删除操作：不添加到最终结果
 
+        # 查找原 triple 的 attributes
+        original_key = (tc.original_head, tc.original_relation, tc.original_tail)
+        original_attrs = original_attrs_map.get(original_key, {})
+
         corrected_triple = {
             "head": tc.corrected_head or tc.original_head,
             "relation": tc.corrected_relation or tc.original_relation,
@@ -1832,6 +1907,7 @@ def _apply_triple_corrections_for_self_check(
             "confidence": "medium",  # 修正后的置信度默认为 medium
             "correction_reason": tc.reason,
             "passed_eval": True,
+            "attributes": original_attrs,  # P15修复：继承原 attributes
         }
         final_triples.append(corrected_triple)
 
@@ -1996,10 +2072,15 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
                     "tail": t.tail,
                     "evidence": t.evidence,
                     "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
-                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
+                    "attributes": t.attributes.model_dump(exclude_none=True, mode='json') if t.attributes else {},  # P15修复：mode='json' 转换 Enum 为字符串
                 }
                 for t in result.triples
             ]
+
+            # P15调试：确认 triples_list 的 relation 类型
+            for t_item in triples_list[:3]:
+                rel = t_item.get('relation')
+                logger.debug(f"[Joint_NER_RE-Debug] corpus={corpus_id}: <{t_item.get('head')}, {rel} (type={type(rel).__name__}), {t_item.get('tail')}>")
 
             logger.info(
                 f"[Joint_NER_RE] 完成: {len(result.entities)}个实体, "
