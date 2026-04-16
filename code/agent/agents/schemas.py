@@ -141,12 +141,18 @@ class LimitNodeEnum(str, Enum):
 # ===== 功能节点枚举（v3.2新增：9大类） =====
 
 class FunctionEnum(str, Enum):
-    """功能节点枚举（v3.2精简版：9大类）"""
+    """功能节点枚举（v3.4扩展版：10大类，新增交通）
+
+    v3.4新增说明：
+    - 添加 TRANSPORT = "交通" 用于打车/公交/地铁等出行功能
+    - 保持向下兼容，原有9大类不变
+    """
     DINING = "餐饮"       # 高频：吃饭、探店、下午茶
     SHOPPING = "购物"     # 高频：逛街、买东西
     LEISURE = "休闲"      # 高频：游玩、散步、放松
     SOCIAL = "社交"       # 高频：聚会、打卡、约会
     VIEWING = "观景"      # 高频：赏花、观展、拍照
+    TRANSPORT = "交通"    # v3.4新增：打车、公交、地铁等出行功能
     ACCOMMODATION = "住宿"  # 中频：住酒店、民宿体验
     CULTURE = "文化"      # 中频：学习、体验、参观
     WORK = "工作"         # 低频：办公、产业
@@ -522,11 +528,14 @@ class TripleAttributes(BaseModel):
 
     @model_validator(mode='after')
     def validate_other_dimension(self):
-        """校验：当维度包含"其他"时，必须提供维度描述"""
-        if self.维度:
-            dimension_values = [d.value for d in self.维度]
-            if "其他" in dimension_values and not self.维度描述:
-                raise ValueError("当维度包含'其他'时，必须提供维度描述")
+        """校验：当维度包含"其他"时，建议提供维度描述（v3.4放宽：不再强制要求）
+
+        v3.4变更说明：
+        - 原版强制要求：当维度包含'其他'时，必须提供维度描述
+        - v3.4放宽：仅作为建议，不再强制校验（LLM输出难以控制）
+        - 维度描述仍为可选字段，建议LLM提供但不强制
+        """
+        # v3.4：放宽校验，不再强制要求维度描述
         return self
 
     @model_validator(mode='after')
@@ -610,11 +619,13 @@ class FunctionEntityAttributes(BaseModel):
 
     功能实体作为独立实体抽取，不再仅作为三元组Tail。
     所有属性必须有原文依据，禁止幻觉。
+
+    v3.4扩展：功能类型从9种扩展为10种，新增'交通'
     """
     model_config = ConfigDict(extra='forbid')
 
     功能类型: FunctionEnum = Field(
-        description="功能大类（9种）：餐饮/购物/休闲/社交/观景/住宿/文化/工作/其他"
+        description="功能大类（v3.4：10种）：餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他"
     )
     功能细分: Optional[str] = Field(
         default=None,
@@ -780,11 +791,14 @@ class RelationAttributes(BaseModel):
 
     @model_validator(mode='after')
     def validate_other_dimension(self):
-        """校验：当维度包含"其他"时，必须提供维度描述"""
-        if self.维度:
-            dimension_values = [d.value for d in self.维度]
-            if "其他" in dimension_values and not self.维度描述:
-                raise ValueError("当维度包含'其他'时，必须提供维度描述")
+        """校验：当维度包含"其他"时，建议提供维度描述（v3.4放宽：不再强制要求）
+
+        v3.4变更说明：
+        - 原版强制要求：当维度包含'其他'时，必须提供维度描述
+        - v3.4放宽：仅作为建议，不再强制校验（LLM输出难以控制）
+        - 维度描述仍为可选字段，建议LLM提供但不强制
+        """
+        # v3.4：放宽校验，不再强制要求维度描述
         return self
 
     @model_validator(mode='after')
@@ -964,7 +978,8 @@ RELATION_TYPES = [
 
 # ===== 功能节点枚举（v3.2新增：9大类） =====
 
-FUNCTION_NODES = ["餐饮", "购物", "休闲", "社交", "观景", "住宿", "文化", "工作", "其他"]
+# v3.4：扩展为10大类，新增交通
+FUNCTION_NODES = ["餐饮", "购物", "休闲", "社交", "观景", "交通", "住宿", "文化", "工作", "其他"]
 
 # ===== 情感节点枚举 =====
 

@@ -155,7 +155,7 @@ async def process_single_corpus(
         "qa_context_dependencies": [],
 
         # Extract 初始状态
-        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
         "triples": [],
         "joint_extraction_result": {},
 

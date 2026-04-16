@@ -1,6 +1,7 @@
 """
 知识图谱构建状态定义 - LangGraph TypedDict + Annotated reducer
 """
+import time  # KGState 时间戳需要
 from typing import TypedDict, List, Dict, Optional, Annotated, Any
 from enum import Enum
 
@@ -119,9 +120,42 @@ class ExtractState(TypedDict):
     v3.4改进：
     - entities字典新增'功能'和'事件'键
     - 新增function_entities和event_entities列表存储详细属性
+
+    ⚠️ **字段区别说明（P15新增）**：
+
+    entities 与 function_entities/event_entities 的关系：
+    ┌─────────────────────────────────────────────────────────────┐
+    │ entities: Dict[str, List[str]]                              │
+    │ - 轻量级存储：仅包含实体名称字符串                            │
+    │ - 用于快速访问和统计                                         │
+    │ - 示例：{"功能": ["餐饮", "购物"], "事件": ["樱花节"]}        │
+    ├─────────────────────────────────────────────────────────────┤
+    │ function_entities: List[Dict]                                │
+    │ - 详细存储：包含完整的 FunctionEntityAttributes              │
+    │ - 用于属性标注和数据库写入                                   │
+    │ - 示例：[{name: "餐饮", attrs: {功能类型: "餐饮", ...}}]     │
+    ├─────────────────────────────────────────────────────────────┤
+    │ event_entities: List[Dict]                                   │
+    │ - 详细存储：包含完整的 EventEntityAttributes                 │
+    │ - 用于属性标注和数据库写入                                   │
+    │ - 示例：[{name: "樱花节", attrs: {事件类别: "人文事件", ...}}]│
+    └─────────────────────────────────────────────────────────────┘
+
+    数据流向：
+    1. Joint_NER_RE 抽取时同时填充 entities 和 function_entities/event_entities
+    2. Label 节点从 function_entities/event_entities 读取详细属性
+    3. 最终入库使用 function_entities/event_entities 中的完整数据
+
+    其他实体类型（道路、POI、建筑物、街区）：
+    - 仅存储在 entities 字典中（名称 + entity_attrs）
+    - 无需单独的详细列表（属性较简单）
     """
     entities: Annotated[Dict[str, List[str]], replace_value]
-    """实体识别结果：新增'功能'和'事件'键"""
+    """实体识别结果：新增'功能'和'事件'键
+
+    格式：{"道路": [...], "POI": [...], "建筑物": [...], "街区": [...], "功能": [...], "事件": [...]}
+    用途：快速访问实体名称，统计各类型数量
+    """
     triples: Annotated[List[Dict], replace_value]
     """关系抽取结果"""
     joint_extraction_result: Annotated[Dict, replace_value]
@@ -129,14 +163,28 @@ class ExtractState(TypedDict):
     extraction_strategy: Annotated[str, replace_value]
     """抽取策略标识：joint/pipeline"""
     entity_attrs: Annotated[Dict[str, Dict], replace_value]
-    """实体属性"""
+    """实体属性
+
+    格式：{"武汉大学": {类别: "POI", 细分: "大学", ...}}
+    用途：存储空间实体（道路/POI/建筑物/街区）的属性
+    """
     relation_attrs: Annotated[Dict[str, Dict], replace_value]
     """关系属性"""
     # v3.4新增：功能实体和事件实体详细列表
     function_entities: Annotated[List[Dict], merge_list]
-    """功能实体详细列表（含属性）"""
+    """功能实体详细列表（含属性）
+
+    格式：[{name: "餐饮", function_attrs: {功能类型: "餐饮", 适合人群: ...}}]
+    用途：存储语义实体（功能）的完整属性，用于Label节点和数据库写入
+    区别：entities["功能"] 仅存储名称，此字段存储完整属性
+    """
     event_entities: Annotated[List[Dict], merge_list]
-    """事件实体详细列表（含属性）"""
+    """事件实体详细列表（含属性）
+
+    格式：[{name: "樱花节", event_attrs: {事件类别: "人文事件", 发生时间: ...}}]
+    用途：存储语义实体（事件）的完整属性，用于Label节点和数据库写入
+    区别：entities["事件"] 仅存储名称，此字段存储完整属性
+    """
 
 
 class EvalState(TypedDict):
@@ -310,8 +358,191 @@ class CorpusState(
     - MentorQueryState: mentor_query, mentor_response, query_source_node 等（P14新增）
     - OutputState: final_entities, final_triples, verification_confidence
     - ControlState: current_step, error
+
+    字段总数：52个字段
+    - 可通过 create_default_corpus_state() 工厂函数初始化
     """
     pass
+
+
+# ===== P15新增：状态工厂函数 =====
+
+def create_default_corpus_state(
+    corpus_id: str,
+    raw_text: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    enable_normalize: bool = False,
+    enable_qa_scaffold: bool = False,
+    enable_entity_alignment: bool = False,
+    enable_mentor_query: bool = False,
+    max_queries: int = 2,
+    max_revision_cycles: int = 3,
+) -> CorpusState:
+    """
+    创建默认 CorpusState 的工厂函数
+
+    解决问题：手动初始化52个字段繁琐且容易遗漏
+
+    Args:
+        corpus_id: 语料ID
+        raw_text: 原始文本
+        max_retries: 最大重试次数（默认3）
+        enable_normalize: 是否启用Normalize节点（设置配置标记）
+        enable_qa_scaffold: 是否启用QA Scaffold节点
+        enable_entity_alignment: 是否启用实体对齐节点
+        enable_mentor_query: 是否启用导师查询功能
+        max_queries: 最大导师查询次数（默认2）
+        max_revision_cycles: 最大修改轮次（默认3）
+
+    Returns:
+        初始化后的 CorpusState 字典
+
+    Example:
+        >>> state = create_default_corpus_state("test_001", "武汉大学在珞喻路上")
+        >>> assert state["corpus_id"] == "test_001"
+        >>> assert state["retry_count"] == 0
+    """
+    return {
+        # ===== InputState =====
+        "corpus_id": corpus_id,
+        "raw_text": raw_text,
+
+        # ===== ConfigState =====
+        "_config_enable_normalize": enable_normalize,
+        "_config_enable_qa_scaffold": enable_qa_scaffold,
+
+        # ===== FilterState =====
+        "filter_result": {},
+
+        # ===== NormalizeState =====
+        "normalize_result": {},
+        "normalized_text": "",
+
+        # ===== QAScaffoldState =====
+        "qa_scaffold_result": {},
+        "semantic_summary": "",
+        "qa_entity_hints": [],
+        "qa_relation_hints": [],
+        "qa_context_dependencies": [],
+
+        # ===== ExtractState (v3.4扩展版) =====
+        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
+        "triples": [],
+        "joint_extraction_result": {},
+        "extraction_strategy": "",
+        "entity_attrs": {},
+        "relation_attrs": {},
+        "function_entities": [],  # v3.4新增
+        "event_entities": [],     # v3.4新增
+
+        # ===== EvalState =====
+        "eval_scores": [],
+        "eval_passed": False,
+        "corrected_triples": [],
+
+        # ===== SelfCheckState =====
+        "self_check_ner_result": {},
+        "self_check_re_result": {},
+        "self_check_filter_result": {},
+        "self_check_normalize_result": {},
+        "self_check_qa_result": {},
+        "self_check_joint_result": {},
+        "self_check_eval_result": {},
+        "self_check_label_result": {},
+        "reflection_text": "",
+        "improvement_strategy": "",
+        "reflection_history": [],
+
+        # ===== RetryState =====
+        "retry_count": 0,
+        "max_retries": max_retries,
+        "retry_reason": "",
+        "retry_suggested": False,
+        "problem_entities": [],
+        "problem_triples": [],
+        "needs_review": False,
+
+        # ===== QAMentorState =====
+        "mentor_guidance": {},
+        "qa_approval_result": {},
+        "integrated_semantic_summary": "",
+        "revision_feedbacks": [],
+        "revision_cycle_count": 0,
+        "max_revision_cycles": max_revision_cycles,
+        "pending_approval_nodes": [],
+        "reasoning_trace": "",
+
+        # ===== AlignmentState =====
+        "entity_alignment_result": {},
+        "aligned_entity_ids": {},
+        "new_entity_names": [],
+
+        # ===== MentorQueryState =====
+        "mentor_query": None,
+        "mentor_response": None,
+        "query_source_node": None,
+        "needs_mentor_help": False,
+        "query_count": 0,
+        "max_queries": max_queries,
+        "return_to_node": None,
+
+        # ===== OutputState =====
+        "final_entities": [],
+        "final_triples": [],
+        "verification_confidence": "medium",
+
+        # ===== ControlState =====
+        "current_step": StepEnum.NER,
+        "error": None,
+    }
+
+
+def create_default_kg_state(
+    batch_id: str,
+    corpus_list: List[Dict],
+    worker_count: int = 0,
+) -> "KGState":
+    """
+    创建默认 KGState 的工厂函数
+
+    Args:
+        batch_id: 批次ID
+        corpus_list: 语料列表
+        worker_count: Worker数量
+
+    Returns:
+        初始化后的 KGState 字典
+    """
+    return {
+        # ===== 输入数据 =====
+        "batch_id": batch_id,
+        "corpus_list": corpus_list,
+        "total_count": len(corpus_list),
+
+        # ===== MAP阶段 =====
+        "worker_count": worker_count,
+        "corpus_partitions": {},
+        "worker_results": [],
+
+        # ===== REDUCE阶段 =====
+        "aggregated_entities": [],
+        "aggregated_triples": [],
+        "entity_aliases": {},
+
+        # ===== FINALIZE阶段 =====
+        "neo4j_stats": {},
+        "postgres_stats": {},
+        "error": None,
+
+        # ===== 状态控制 =====
+        "current_phase": PhaseEnum.INIT,
+        "active_workers": [],
+        "failed_workers": [],
+
+        # ===== 元数据 =====
+        "start_time": time.time(),
+        "end_time": None,
+    }
 
 
 # ===== Worker处理结果 =====
@@ -367,6 +598,17 @@ class KGState(TypedDict):
 
 
 # ===== 实体/关系类型定义 =====
+
+# v3.4新增：默认实体字典（用于初始化和错误处理）
+# 所有代码应统一使用此常量，确保实体类型一致性
+DEFAULT_ENTITY_DICT = {
+    "道路": [],
+    "POI": [],
+    "建筑物": [],
+    "街区": [],
+    "功能": [],
+    "事件": [],
+}
 
 # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
 ENTITY_TYPES = {

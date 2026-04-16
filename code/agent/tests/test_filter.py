@@ -86,7 +86,7 @@ class TestRouteAfterFilter:
                 "has_spatial_relation": True,
                 "geo_entity_hint": "武汉大学、珞喻路"
             },
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -123,7 +123,7 @@ class TestRouteAfterFilter:
                 "has_spatial_relation": False,
                 "geo_entity_hint": None
             },
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -153,7 +153,7 @@ class TestRouteAfterFilter:
             "corpus_id": "test",
             "raw_text": "测试文本",
             "filter_result": {},  # 空的 filter_result
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -190,7 +190,7 @@ class TestRouteAfterFilter:
                 "has_spatial_relation": True,
                 "geo_entity_hint": "这里（模糊地点指代）"
             },
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,

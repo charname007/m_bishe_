@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import time
+import unicodedata  # P15新增：Unicode归一化（防止混淆攻击）
 import uuid
 from typing import Any, Dict, List, Optional, cast
 
@@ -16,7 +17,8 @@ from langgraph.types import RetryPolicy
 
 from loguru import logger
 
-from .state import CorpusState, KGState, StepEnum, PhaseEnum, DEFAULT_MAX_RETRIES
+from .state import CorpusState, KGState, StepEnum, PhaseEnum, DEFAULT_MAX_RETRIES, DEFAULT_ENTITY_DICT
+from .state import create_default_corpus_state, create_default_kg_state  # P15新增：状态工厂函数
 from .nodes import (
     create_filter_node,          # P5新增：Filter 筛选节点
     create_normalize_node,       # P6新增：Normalize 归一化节点
@@ -61,6 +63,98 @@ from .nodes import (
 from .config import ExtractionConfig, DEFAULT_CONFIG
 
 
+# ===== P15新增：提示注入检测 =====
+# 检测用户文本中可能存在的提示注入攻击模式
+# 使用合并后的正则表达式优化性能（单次扫描代替多次）
+COMBINED_PROMPT_INJECTION_PATTERN = re.compile(
+    r'(?:'
+    # 直接指令注入
+    r'ignore\s+previous\s+instructions|'
+    r'ignore\s+all\s+previous|'
+    r'forget\s+previous|'
+    r'disregard\s+all|'
+    # 系统提示篡改
+    r'system\s*:\s*|'
+    r'\[SYSTEM\]|'
+    r'<<SYSTEM>>|'
+    r'###\s*SYSTEM|'
+    # 角色扮演注入
+    r'act\s+as\s+|'
+    r'pretend\s+to\s+be|'
+    r'you\s+are\s+now|'
+    r'switch\s+to\s+mode|'
+    # 特殊标记注入
+    r'\[INST\]|'
+    r'<<INST>>|'
+    r'<\||'
+    r'\|>|'
+    r'###\s*INSTRUCTION|'
+    # 输出控制注入
+    r'output\s+only|'
+    r'respond\s+with|'
+    r'print\s+|'
+    r'display\s+|'
+    # 思维链干扰
+    r'thinking\s*:|'
+    r'reasoning\s*:|'
+    r'internal\s+thoughts'
+    r')',
+    re.IGNORECASE
+)
+
+MAX_INJECTION_CHECK_LENGTH = 10000  # 只检查前10000字符，避免性能问题
+
+
+def _detect_prompt_injection(text: str) -> Optional[str]:
+    """
+    检测文本中潜在的提示注入攻击模式
+
+    Args:
+        text: 待检测的文本
+
+    Returns:
+        如果检测到注入模式，返回匹配的模式描述；否则返回 None
+    """
+    # 只检查前N个字符（性能优化）
+    check_text = text[:MAX_INJECTION_CHECK_LENGTH]
+
+    # P15优化：使用合并后的正则表达式，单次扫描代替多次
+    match = COMBINED_PROMPT_INJECTION_PATTERN.search(check_text)
+    if match:
+        return f"检测到潜在提示注入模式: '{match.group()}'"
+
+    return None
+
+
+def _sanitize_for_llm(text: str, strict_mode: bool = False) -> str:
+    """
+    为LLM调用清理文本，防止提示注入
+
+    Args:
+        text: 原始文本
+        strict_mode: 严格模式 - 检测到注入时抛出异常（默认False，警告并继续）
+
+    Returns:
+        清理后的文本
+
+    Raises:
+        ValueError: 严格模式下检测到提示注入
+    """
+    injection_detected = _detect_prompt_injection(text)
+
+    if injection_detected:
+        if strict_mode:
+            raise ValueError(f"提示注入检测失败: {injection_detected}")
+        else:
+            # 警告模式：记录日志但继续处理
+            logger.warning(f"[安全警告] {injection_detected}, 文本将继续处理但需人工复核")
+
+    # Unicode归一化（防止Unicode混淆攻击）
+    text = unicodedata.normalize('NFKC', text)
+
+    return text
+
+
 def _validate_corpus_text(text: str, config: ExtractionConfig = DEFAULT_CONFIG) -> str:
     """
     验证并清理语料文本
@@ -93,6 +187,9 @@ def _validate_corpus_text(text: str, config: ExtractionConfig = DEFAULT_CONFIG) 
     # 保留中文、英文、数字、标点符号
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
 
+    # P15新增：提示注入检测和Unicode归一化
+    text = _sanitize_for_llm(text, strict_mode=False)
+
     return text
 
 
@@ -124,14 +221,28 @@ def _get_database_config() -> Dict[str, Any]:
     """
     获取数据库配置
 
+    P15改进：简化环境变量命名，使用单一命名约定
+    - 原有多个回退（NEO4J_PASSWORD/NEO4J_PASS/NEO4J_PWD）增加暴露面
+    - 现使用单一环境变量名，降低安全风险
+
+    环境变量命名规范：
+    - NEO4J_PASSWORD: Neo4j密码（必需）
+    - NEO4J_URI: Neo4j连接地址（默认 bolt://localhost:7687）
+    - NEO4J_USER: Neo4j用户名（默认 neo4j）
+    - PG_PASSWORD: PostgreSQL密码（必需）
+    - PG_HOST: PostgreSQL主机（默认 localhost）
+    - PG_PORT: PostgreSQL端口（默认 5432）
+    - PG_DATABASE: PostgreSQL数据库（默认 kg）
+    - PG_USER: PostgreSQL用户名（默认 postgres）
+
     Returns:
         包含所有数据库连接参数的字典
 
     Raises:
         ValueError: 必需的环境变量未设置
     """
-    # Neo4j密码是必需的
-    neo4j_password = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PWD")
+    # Neo4j密码是必需的（单一命名约定）
+    neo4j_password = os.getenv("NEO4J_PASSWORD")
     if not neo4j_password:
         raise ValueError("Neo4j密码未设置，请配置环境变量 NEO4J_PASSWORD")
 
@@ -141,17 +252,9 @@ def _get_database_config() -> Dict[str, Any]:
         raise ValueError("PostgreSQL密码未设置，请配置环境变量 PG_PASSWORD")
 
     return {
-        # Neo4j配置（兼容多种环境变量命名）
-        "neo4j_uri": (
-            os.getenv("NEO4J_URI") or
-            os.getenv("NEO4J_URL") or
-            "bolt://localhost:7687"
-        ),
-        "neo4j_user": (
-            os.getenv("NEO4J_USER") or
-            os.getenv("NEO4J_USERNAME") or
-            "neo4j"
-        ),
+        # Neo4j配置（单一命名约定）
+        "neo4j_uri": os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        "neo4j_user": os.getenv("NEO4J_USER", "neo4j"),
         "neo4j_password": neo4j_password,
         # PostgreSQL配置
         "pg_host": os.getenv("PG_HOST", "localhost"),
@@ -1419,43 +1522,12 @@ def build_distributed_workflow(
                 corpus_id = _validate_corpus_id(corpus.get("id"))
                 raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
-                initial_state: CorpusState = {
-                    "corpus_id": corpus_id,
-                    "raw_text": raw_text,
-                    # P5改进：Filter 筛选初始状态
-                    "filter_result": {},
-                    # P6改进：Normalize 归一化初始状态
-                    "normalize_result": {},
-                    "normalized_text": "",
-                    # P8改进：QA Scaffold 脚手架初始状态
-                    "qa_scaffold_result": {},
-                    "semantic_summary": "",
-                    "qa_entity_hints": [],
-                    "qa_relation_hints": [],
-                    "qa_context_dependencies": [],
-                    "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
-                    "triples": [],
-                    "eval_scores": [],
-                    "eval_passed": False,
-                    "corrected_triples": [],
-                    "entity_attrs": {},
-                    "relation_attrs": {},
-                    # P4改进：Self-Check + 反思循环初始状态
-                    "self_check_ner_result": {},
-                    "self_check_re_result": {},
-                    "final_entities": [],
-                    "final_triples": [],
-                    "verification_confidence": "medium",
-                    "retry_count": 0,
-                    "max_retries": config.self_check_max_retries,
-                    "retry_reason": "",
-                    "retry_suggested": False,
-                    "problem_entities": [],
-                    "problem_triples": [],
-                    "needs_review": False,
-                    "current_step": StepEnum.NER,
-                    "error": None,
-                }
+                # P15改进：使用工厂函数创建初始状态
+                initial_state = create_default_corpus_state(
+                    corpus_id=corpus_id,
+                    raw_text=raw_text,
+                    max_retries=config.self_check_max_retries,
+                )
                 # 为每条语料生成唯一的 thread_id，避免并发状态串扰
                 thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
                 result = await corpus_workflow.ainvoke(initial_state, thread_config)  # type: ignore
@@ -1504,7 +1576,7 @@ def build_distributed_workflow(
                     # 构建兼容的结果格式
                     result = {
                         "corpus_id": corpus_id,
-                        "entities": data.get("entities", {"道路": [], "POI": [], "建筑物": [], "街区": []}),
+                        "entities": data.get("entities", DEFAULT_ENTITY_DICT.copy()),  # v3.4修复：使用6种实体类型
                         "triples": data.get("triples", []),
                         "corrected_triples": data.get("triples", []),
                         "eval_passed": True,
@@ -1791,42 +1863,12 @@ async def process_corpus(llm: Any, corpus: Dict, config: Optional[ExtractionConf
     corpus_id = _validate_corpus_id(corpus.get("id"))
     raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
-    initial_state: CorpusState = {
-        "corpus_id": corpus_id,
-        "raw_text": raw_text,
-        # P5改进：Filter 筛选初始状态
-        "filter_result": {},
-        # P6改进：Normalize 归一化初始状态
-        "normalize_result": {},
-        "normalized_text": "",
-        # P8改进：QA Scaffold 脚手架初始状态
-        "qa_scaffold_result": {},
-        "semantic_summary": "",
-        "qa_entity_hints": [],
-        "qa_relation_hints": [],
-        "qa_context_dependencies": [],
-        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
-        "triples": [],
-        "eval_scores": [],
-        "eval_passed": False,
-        "corrected_triples": [],
-        "entity_attrs": {},
-        "relation_attrs": {},
-        # P4改进：Self-Check + 反思循环初始状态
-        "self_check_ner_result": {},
-        "self_check_re_result": {},
-        "final_entities": [],
-        "final_triples": [],
-        "verification_confidence": "medium",
-        "retry_count": 0,
-        "max_retries": config.self_check_max_retries,
-        "retry_reason": "",
-        "problem_entities": [],
-        "problem_triples": [],
-        "needs_review": False,
-        "current_step": StepEnum.NER,
-        "error": None,
-    }
+    # P15改进：使用工厂函数创建初始状态（避免52字段手动初始化）
+    initial_state = create_default_corpus_state(
+        corpus_id=corpus_id,
+        raw_text=raw_text,
+        max_retries=config.self_check_max_retries,
+    )
 
     # 使用唯一 thread_id 避免状态串扰
     thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
@@ -1865,42 +1907,12 @@ async def process_corpus_streaming(
     corpus_id = _validate_corpus_id(corpus.get("id"))
     raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
-    initial_state: CorpusState = {
-        "corpus_id": corpus_id,
-        "raw_text": raw_text,
-        # P5改进：Filter 筛选初始状态
-        "filter_result": {},
-        # P6改进：Normalize 归一化初始状态
-        "normalize_result": {},
-        "normalized_text": "",
-        # P8改进：QA Scaffold 脚手架初始状态
-        "qa_scaffold_result": {},
-        "semantic_summary": "",
-        "qa_entity_hints": [],
-        "qa_relation_hints": [],
-        "qa_context_dependencies": [],
-        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
-        "triples": [],
-        "eval_scores": [],
-        "eval_passed": False,
-        "corrected_triples": [],
-        "entity_attrs": {},
-        "relation_attrs": {},
-        # P4改进：Self-Check + 反思循环初始状态
-        "self_check_ner_result": {},
-        "self_check_re_result": {},
-        "final_entities": [],
-        "final_triples": [],
-        "verification_confidence": "medium",
-        "retry_count": 0,
-        "max_retries": config.self_check_max_retries,
-        "retry_reason": "",
-        "problem_entities": [],
-        "problem_triples": [],
-        "needs_review": False,
-        "current_step": StepEnum.NER,
-        "error": None,
-    }
+    # P15改进：使用工厂函数创建初始状态（避免52字段手动初始化）
+    initial_state = create_default_corpus_state(
+        corpus_id=corpus_id,
+        raw_text=raw_text,
+        max_retries=config.self_check_max_retries,
+    )
 
     thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
 
@@ -2476,68 +2488,15 @@ async def process_corpus_with_qa_mentor(
     corpus_id = _validate_corpus_id(corpus.get("id"))
     raw_text = _validate_corpus_text(corpus.get("text", ""), config)
 
-    initial_state: CorpusState = {
-        "corpus_id": corpus_id,
-        "raw_text": raw_text,
-        "_config_enable_normalize": config.enable_normalize,
-        "_config_enable_qa_scaffold": config.enable_qa_scaffold,
-        "filter_result": {},
-        "normalize_result": {},
-        "normalized_text": "",
-        "qa_scaffold_result": {},
-        "semantic_summary": "",
-        "qa_entity_hints": [],
-        "qa_relation_hints": [],
-        "qa_context_dependencies": [],
-        "mentor_guidance": {},
-        "qa_approval_result": {},
-        "integrated_semantic_summary": "",
-        "revision_feedbacks": [],
-        "revision_cycle_count": 0,
-        "max_revision_cycles": config.max_revision_cycles,
-        "pending_approval_nodes": [],
-        "reasoning_trace": "",
-        # P14新增：导师查询状态初始化
-        "mentor_query": None,
-        "mentor_response": None,
-        "query_source_node": None,
-        "needs_mentor_help": False,
-        "query_count": 0,
-        "max_queries": 2,
-        "return_to_node": None,
-        "joint_extraction_result": {},
-        "extraction_strategy": "",
-        "self_check_filter_result": {},
-        "self_check_normalize_result": {},
-        "self_check_qa_result": {},
-        "self_check_joint_result": {},
-        "self_check_eval_result": {},
-        "self_check_label_result": {},
-        "reflection_text": "",
-        "improvement_strategy": "",
-        "reflection_history": [],
-        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
-        "triples": [],
-        "eval_scores": [],
-        "eval_passed": False,
-        "corrected_triples": [],
-        "self_check_ner_result": {},
-        "self_check_re_result": {},
-        "final_entities": [],
-        "final_triples": [],
-        "verification_confidence": "medium",
-        "retry_count": 0,
-        "max_retries": DEFAULT_MAX_RETRIES,
-        "retry_reason": "",
-        "retry_suggested": False,
-        "problem_entities": [],
-        "problem_triples": [],
-        "needs_review": False,
-        "entity_attrs": {},
-        "relation_attrs": {},
-        "current_step": StepEnum.QA_MENTOR,
-        "error": None,
-    }
+    # P15改进：使用工厂函数创建初始状态
+    initial_state = create_default_corpus_state(
+        corpus_id=corpus_id,
+        raw_text=raw_text,
+        max_retries=DEFAULT_MAX_RETRIES,
+        enable_normalize=config.enable_normalize,
+        enable_qa_scaffold=config.enable_qa_scaffold,
+        max_revision_cycles=config.max_revision_cycles,
+    )
 
     thread_config = {"configurable": {"thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
     result = await workflow.ainvoke(initial_state, thread_config)

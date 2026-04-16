@@ -16,10 +16,14 @@ from .config import ExtractionConfig, DEFAULT_CONFIG
 from .state import (
     KGState, WorkerResult, CorpusState,
     StepEnum, PhaseEnum, DEFAULT_MAX_RETRIES, ENTITY_TYPES, RELATION_TYPES, ENTITY_CATEGORIES,
+    # v3.4新增：默认实体字典（用于初始化和错误处理）
+    DEFAULT_ENTITY_DICT,
     # v3.2重构新增：子状态类
     InputState, ConfigState, FilterState, NormalizeState, QAScaffoldState,
     ExtractState, EvalState, SelfCheckState, ReflexionState, RetryState,
     QAMentorState, AlignmentState, OutputState, ControlState,
+    # P15新增：状态工厂函数
+    create_default_corpus_state, create_default_kg_state,
 )
 from .node_template import (
     NodeTemplate, RawTextNodeTemplate, NoLLMNodeTemplate, get_text_for_processing,
@@ -106,6 +110,8 @@ from .prompts import (
     format_dimension_scores, format_improvement_strategy,
 )
 from .nodes import (
+    # P15新增：枚举值提取工具函数
+    extract_enum_value, extract_enum_values_from_list,
     create_ner_node,
     create_re_node,
     create_eval_1_node,
@@ -147,6 +153,15 @@ from .nodes import (
     create_label_node_v3,
     get_node_creators,  # 版本切换辅助函数
 )
+# P15新增：路由决策器
+from .route_decider import (
+    RouteDecider,
+    route_after_filter_v2,
+    route_after_self_check_joint_v2,
+    route_after_self_check_ner_v2,
+    route_after_self_check_re_v2,
+    route_joint_to_mentor_or_eval_v2,
+)
 from .workflow import (
     build_corpus_workflow,
     build_distributed_workflow,
@@ -168,7 +183,11 @@ __all__ = [
     "KGState", "WorkerResult", "CorpusState",
     "StepEnum", "PhaseEnum", "DEFAULT_MAX_RETRIES",
     "ENTITY_TYPES", "RELATION_TYPES", "ENTITY_CATEGORIES",
-    
+    # v3.4新增：默认实体字典
+    "DEFAULT_ENTITY_DICT",
+    # P15新增：状态工厂函数
+    "create_default_corpus_state", "create_default_kg_state",
+
     # ===== v3.2重构新增：子状态类 =====
     "InputState", "ConfigState", "FilterState", "NormalizeState",
     "QAScaffoldState", "ExtractState", "EvalState", "SelfCheckState",
@@ -245,6 +264,12 @@ __all__ = [
     "format_dimension_scores", "format_improvement_strategy",
 
     # ===== 节点工厂函数 =====
+    "extract_enum_value", "extract_enum_values_from_list",  # P15新增：枚举值提取工具
+    # P15新增：路由决策器
+    "RouteDecider",
+    "route_after_filter_v2", "route_after_self_check_joint_v2",
+    "route_after_self_check_ner_v2", "route_after_self_check_re_v2",
+    "route_joint_to_mentor_or_eval_v2",
     "create_ner_node", "create_re_node",
     "create_eval_1_node", "create_eval_2_node", "create_eval_simplified_node",
     "create_label_node", "create_coordinator_node", "create_aggregator_node",

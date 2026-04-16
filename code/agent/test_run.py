@@ -73,7 +73,7 @@ def create_initial_state(corpus_id: str, raw_text: str) -> CorpusState:
         "improvement_strategy": "",
         "reflection_history": [],
         # Step 1: NER
-        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
         # Step 2: RE
         "triples": [],
         # Step 3: Eval

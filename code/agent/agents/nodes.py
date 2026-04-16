@@ -13,15 +13,52 @@ import os
 import re
 from collections import defaultdict
 from difflib import SequenceMatcher
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.types import StreamWriter
 
 from loguru import logger
 
-from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES, RELATION_TYPES
+from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES, RELATION_TYPES, DEFAULT_ENTITY_DICT
 from .config import ExtractionConfig
+
+
+# ===== P15新增：枚举值提取工具函数 =====
+
+def extract_enum_value(enum_or_value: Any) -> Any:
+    """
+    从 Enum 或原始值中提取实际值
+
+    Args:
+        enum_or_value: 可能是 Enum 实例或原始值
+
+    Returns:
+        提取的值（如果是 Enum 则返回 .value，否则返回原值）
+
+    Example:
+        >>> from .schemas import RelationTypeEnum
+        >>> extract_enum_value(RelationTypeEnum.LOCATED)
+        '位于'
+        >>> extract_enum_value('位于')
+        '位于'
+    """
+    if hasattr(enum_or_value, 'value'):
+        return enum_or_value.value
+    return enum_or_value
+
+
+def extract_enum_values_from_list(items: List[Any]) -> List[Any]:
+    """
+    从列表中批量提取枚举值
+
+    Args:
+        items: 可能包含 Enum 实例的列表
+
+    Returns:
+        提取值后的列表
+    """
+    return [extract_enum_value(item) for item in items]
 
 
 # ===== P6改进：辅助函数 - 获取处理文本 =====
@@ -439,7 +476,7 @@ def create_ner_node(llm: Any):
                 "error": str(e)
             })
             return {
-                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                 "error": str(e),
                 "current_step": StepEnum.DONE,  # 出错时直接结束
             }
@@ -499,7 +536,7 @@ def create_re_node(llm: Any):
             triples = [
                 {
                     "head": t.head,
-                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,  # Enum转字符串
+                    "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence or "",
                     "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
@@ -1277,26 +1314,13 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 corrected_triples = corpus_state.get("corrected_triples", [])
 
                 # v3.4精简版：关系类型属性映射（8个关系类型）
+                # 使用从 schemas.py 导入的 RELATION_ATTRS_MAP 常量
                 # Schema v3.4定义：
                 # - 位于、包含：无关系属性
                 # - 相对方位：距离值、方向值（删除联动推荐）
-                # - 具有功能：时段、适合人群(开放文本)、具有限制(开放文本列表)、情感倾向
-                # - 优于/相似/劣于：维度
+                # - 具有功能：时段、适合人群、具有限制、情感倾向、功能描述
+                # - 优于/相似/劣于：维度、维度描述
                 # - 发生事件：无关系属性（属性在事件实体上）
-                RELATION_ATTRS_MAP = {
-                    # 相对方位关系属性（v3.4：删除联动推荐，仅2个属性）
-                    "相对方位": ["距离值", "方向值"],
-                    # 功能关系属性（v3.4：开放文本属性）
-                    "具有功能": ["时段", "适合人群", "具有限制", "情感倾向"],
-                    # 对比关系属性（1个属性）
-                    "优于": ["维度"],
-                    "相似": ["维度"],
-                    "劣于": ["维度"],
-                    # 无属性的关系
-                    "位于": [],
-                    "包含": [],
-                    "发生事件": [],  # 属性在事件实体上，非关系属性
-                }
 
                 for triple in corrected_triples:
                     triple["_corpus_id"] = corpus_id
@@ -1957,17 +1981,17 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
             # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
             entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
                     entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
                     "head": t.head,
-                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,  # Enum转字符串
+                    "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,  # Enum转字符串
+                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
                     "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
                 }
                 for t in result.triples
@@ -2905,7 +2929,7 @@ async def process_corpus_batch_with_llm(
                 # 不启用fallback，记录失败
                 for corpus in batch_corpus:
                     all_batch_results[corpus["id"]] = {
-                        "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                        "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                         "triples": [],
                         "confidence": "error",
                         "error": extraction_result.get("fallback_reason", "批量处理失败"),
@@ -3043,8 +3067,8 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 elif previous_guidance:
                     updated_guidance = previous_guidance
 
-                # 返回到发起查询的节点
-                return_to = query_source if query_source else "joint_ner_re"
+                # 返回到发起查询的节点（优先使用导师建议的目标节点）
+                return_to = query_result.return_to_node if query_result.return_to_node else (query_source if query_source else "joint_ner_re")
 
                 return {
                     "mentor_response": query_result.model_dump(),
@@ -3402,17 +3426,17 @@ def create_revision_joint_node(llm: Any):
             # 转换为现有格式（v3.4扩展版：6种实体类型）
             entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
                     entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
                     "head": t.head,
-                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,
+                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
                     "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
                 }
                 for t in result.triples
@@ -4243,17 +4267,17 @@ def create_joint_ner_re_node_v3(llm: Any):
             # 转换为现有格式（v3.4扩展版：6种实体类型）
             entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
                     entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
                     "head": t.head,
-                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,
+                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
                     "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
                 }
                 for t in result.triples
@@ -4292,7 +4316,7 @@ def create_joint_ner_re_node_v3(llm: Any):
                 "error": str(e)
             })
             return {
-                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                 "triples": [],
                 "error": str(e),
                 "current_step": StepEnum.EVAL,
@@ -4530,7 +4554,7 @@ def create_re_node_v3(llm: Any):
             triples = [
                 {
                     "head": t.head,
-                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence or "",
                     "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},

@@ -108,7 +108,7 @@ class TestRouteAfterSelfCheckNER:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": True,
@@ -137,7 +137,7 @@ class TestRouteAfterSelfCheckNER:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -173,7 +173,7 @@ class TestRouteAfterSelfCheckNER:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -206,7 +206,7 @@ class TestRouteAfterSelfCheckRE:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": True,
@@ -235,7 +235,7 @@ class TestRouteAfterSelfCheckRE:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -272,7 +272,7 @@ class TestRouteAfterSelfCheckRE:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -307,7 +307,7 @@ class TestRouteAfterSelfCheckRE:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
@@ -341,7 +341,7 @@ class TestRouteAfterSelfCheckRE:
         state: CorpusState = {
             "corpus_id": "test",
             "raw_text": "test",
-            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+            "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
             "triples": [],
             "eval_scores": [],
             "eval_passed": False,
