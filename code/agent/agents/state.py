@@ -5,6 +5,9 @@ import time  # KGState 时间戳需要
 from typing import TypedDict, List, Dict, Optional, Annotated, Any
 from enum import Enum
 
+# P15修复：从 schemas.py 导入 RELATION_TYPES，避免重复定义
+from .schemas import RELATION_TYPES
+
 
 # ===== Reducer函数 - 用于合并状态更新 =====
 
@@ -84,6 +87,8 @@ class ConfigState(TypedDict):
     """标记：是否启用了 Normalize 节点"""
     _config_enable_qa_scaffold: Annotated[bool, replace_value]
     """标记：是否启用了 QA Scaffold 节点"""
+    _config_enable_entity_alignment: Annotated[bool, replace_value]
+    """标记：是否启用了 Entity Alignment 节点（P15新增）"""
 
 
 class FilterState(TypedDict):
@@ -410,6 +415,7 @@ def create_default_corpus_state(
         # ===== ConfigState =====
         "_config_enable_normalize": enable_normalize,
         "_config_enable_qa_scaffold": enable_qa_scaffold,
+        "_config_enable_entity_alignment": enable_entity_alignment,  # P15新增
 
         # ===== FilterState =====
         "filter_result": {},
@@ -622,18 +628,8 @@ ENTITY_TYPES = {
     "事件": "发生的具体事件（如：樱花节、封路、开业等）"
 }
 
-# v3.3精简版：8个关系类型（空间基础3 + 社交语义1 + 对比评价3 + 事件1）
-# 参考：docs/semantic_schema_v3.3.md
-RELATION_TYPES = [
-    # 空间基础关系（3个）—— 图谱骨架
-    "位于", "包含", "相对方位",
-    # 社交语义关系（1个）—— 图谱血肉
-    "具有功能",
-    # 对比评价关系（3个）—— 特色
-    "优于", "相似", "劣于",
-    # 事件关系（1个）
-    "发生事件"
-]
+# RELATION_TYPES 已从 schemas.py 导入（P15修复）
+# 原定义位置：schemas.py:968，与 RelationTypeEnum 同源
 
 # v3.3改进：实体类别参考列表（仅供参考，非强制枚举）
 # 细分采用开放文本设计，权威分类由数据源（高德POI）在对齐阶段补充

@@ -631,24 +631,26 @@ route_after_self_check = route_after_self_check_re
 
 # ===== P9新增：联合抽取路由函数 =====
 
-def create_config_init_node(enable_normalize: bool, enable_qa_scaffold: bool):
-    """创建配置初始化节点（P9新增）
+def create_config_init_node(enable_normalize: bool, enable_qa_scaffold: bool, enable_entity_alignment: bool = False):
+    """创建配置初始化节点（P9新增，P15修复）
 
     在流程开始时设置配置标记字段，供路由函数判断后续节点是否启用。
 
     Args:
         enable_normalize: 是否启用 Normalize 节点
         enable_qa_scaffold: 是否启用 QA Scaffold 节点
+        enable_entity_alignment: 是否启用 Entity Alignment 节点（P15新增）
 
     Returns:
         配置初始化节点函数
     """
     async def config_init_node(state: CorpusState) -> Dict:
         """设置配置标记字段"""
-        logger.info(f"[Config-Init] 设置配置标记: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}")
+        logger.info(f"[Config-Init] 设置配置标记: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}")
         return {
             "_config_enable_normalize": enable_normalize,
             "_config_enable_qa_scaffold": enable_qa_scaffold,
+            "_config_enable_entity_alignment": enable_entity_alignment,  # P15修复：新增实体对齐标记
         }
 
     return config_init_node
@@ -742,9 +744,26 @@ def route_after_self_check_eval(state: CorpusState) -> str:
 
 
 def route_after_self_check_label(state: CorpusState) -> str:
-    """Self-Check-Label 后路由"""
+    """Self-Check-Label 后路由（P15修复：支持实体对齐节点）
+
+    根据配置标记判断下一步：
+    - 如果启用了实体对齐 → entity_alignment
+    - 否则 → END
+
+    Args:
+        state: 当前语料状态
+
+    Returns:
+        下一个节点名称
+    """
+    # P15修复：从配置标记字段获取是否启用实体对齐
+    enable_entity_alignment = state.get("_config_enable_entity_alignment", False)
 
     if state.get("error"):
+        # 错误时根据配置决定下一步
+        if enable_entity_alignment:
+            logger.warning(f"[Self-Check-Label-Route] 有错误，但继续到实体对齐")
+            return "entity_alignment"
         logger.warning(f"[Self-Check-Label-Route] 有错误，结束")
         return END
 
@@ -755,11 +774,19 @@ def route_after_self_check_label(state: CorpusState) -> str:
 
     if retry_count >= max_retries:
         logger.warning(f"[Self-Check-Label-Route] 达到最大重试")
+        # P15修复：达到最大重试时也检查是否需要实体对齐
+        if enable_entity_alignment:
+            return "entity_alignment"
         return END
 
     if retry_suggested:
         logger.info(f"[Self-Check-Label-Route] 建议重新标注")
         return "label"
+
+    # P15修复：通过时根据配置决定下一步
+    if enable_entity_alignment:
+        logger.info(f"[Self-Check-Label-Route] 通过，继续到实体对齐")
+        return "entity_alignment"
 
     logger.info(f"[Self-Check-Label-Route] 通过，结束")
     return END
@@ -992,18 +1019,18 @@ def build_corpus_workflow(
         node_creators = get_node_creators("v3")
         joint_ner_re_node = node_creators["joint_ner_re"](llm)
         self_check_joint_node = node_creators["self_check_joint"](llm)
-        filter_node_v3 = node_creators["filter"](llm)
-        re_node_v3 = node_creators["re"](llm)
-        label_node_v3 = node_creators["label"](llm)
+        filter_node_versioned = node_creators["filter"](llm)
+        re_node_versioned = node_creators["re"](llm)
+        label_node_versioned = node_creators["label"](llm)
         logger.info("[Workflow] 使用优化版提示词（Token节省约60%）")
     else:
         # 使用原版节点
         node_creators = get_node_creators("v2")
         joint_ner_re_node = node_creators["joint_ner_re"](llm)
         self_check_joint_node = node_creators["self_check_joint"](llm)
-        filter_node_v3 = create_filter_node(llm)  # Filter节点保持原版
-        re_node_v3 = node_creators["re"](llm)
-        label_node_v3 = node_creators["label"](llm)
+        filter_node_versioned = node_creators["filter"](llm)
+        re_node_versioned = node_creators["re"](llm)
+        label_node_versioned = node_creators["label"](llm)
         logger.info("[Workflow] 使用原版提示词")
 
     # 创建节点函数（通用节点保持不变）
@@ -1044,7 +1071,7 @@ def build_corpus_workflow(
         eval_node = create_eval_simplified_node(llm)
         builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
         # P13改进：使用版本化Label节点
-        builder.add_node("label", label_node_v3 if prompt_version == "v3" else label_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node("label", label_node_versioned, retry_policy=LLM_RETRY_POLICY)
 
         # 前置节点处理（Filter → Self-Check-Filter → Normalize → Self-Check-Normalize → QA_Scaffold）
         # P5+P6+P8改进：前置节点组合
@@ -1053,13 +1080,14 @@ def build_corpus_workflow(
         # 创建配置初始化节点（如果需要）
         need_config_init = enable_self_check_filter or enable_self_check_normalize
         if need_config_init:
-            config_init_node = create_config_init_node(enable_normalize, enable_qa_scaffold)
+            # P15修复：传入 enable_entity_alignment 参数
+            config_init_node = create_config_init_node(enable_normalize, enable_qa_scaffold, enable_entity_alignment)
             builder.add_node("config_init", config_init_node)
-            logger.info(f"[Workflow] 添加配置初始化节点: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}")
+            logger.info(f"[Workflow] 添加配置初始化节点: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}")
 
         if enable_filter and enable_normalize:
             # P13改进：使用版本化Filter节点
-            builder.add_node("filter", filter_node_v3 if prompt_version == "v3" else create_filter_node(llm), retry_policy=LLM_RETRY_POLICY)
+            builder.add_node("filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY)
             normalize_node = create_normalize_node(llm)
             builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
 
@@ -1133,7 +1161,7 @@ def build_corpus_workflow(
 
         elif enable_filter:
             # P13改进：使用版本化Filter节点
-            builder.add_node("filter", filter_node_v3 if prompt_version == "v3" else create_filter_node(llm), retry_policy=LLM_RETRY_POLICY)
+            builder.add_node("filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY)
 
             if enable_self_check_filter:
                 # 需要配置初始化节点来设置标记字段（normalize=False, qa_scaffold由配置决定）
@@ -1273,7 +1301,8 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_label",
                     route_after_self_check_label,
-                    {"label": "label", "entity_alignment": "entity_alignment"}
+                    # P15修复：添加 END 键，确保路由函数返回 END 时能正确映射
+                    {"label": "label", "entity_alignment": "entity_alignment", END: END}
                 )
                 builder.add_edge("entity_alignment", END)
                 logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查 + 实体对齐启用")

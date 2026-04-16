@@ -153,15 +153,8 @@ from .nodes import (
     create_label_node_v3,
     get_node_creators,  # 版本切换辅助函数
 )
-# P15新增：路由决策器
-from .route_decider import (
-    RouteDecider,
-    route_after_filter_v2,
-    route_after_self_check_joint_v2,
-    route_after_self_check_ner_v2,
-    route_after_self_check_re_v2,
-    route_joint_to_mentor_or_eval_v2,
-)
+# P15修复：路由决策器（保留类作为未来迁移基础，删除未使用的v2函数）
+from .route_decider import RouteDecider
 from .workflow import (
     build_corpus_workflow,
     build_distributed_workflow,
@@ -265,11 +258,8 @@ __all__ = [
 
     # ===== 节点工厂函数 =====
     "extract_enum_value", "extract_enum_values_from_list",  # P15新增：枚举值提取工具
-    # P15新增：路由决策器
+    # P15修复：路由决策器（保留类，删除未使用的v2函数）
     "RouteDecider",
-    "route_after_filter_v2", "route_after_self_check_joint_v2",
-    "route_after_self_check_ner_v2", "route_after_self_check_re_v2",
-    "route_joint_to_mentor_or_eval_v2",
     "create_ner_node", "create_re_node",
     "create_eval_1_node", "create_eval_2_node", "create_eval_simplified_node",
     "create_label_node", "create_coordinator_node", "create_aggregator_node",

@@ -136,7 +136,7 @@ class RouteDecider:
         # 1. 错误处理
         if self.has_error:
             self.log_warning(from_node, "有错误")
-            return default_next if default_next != "END" else "END"
+            return default_next if default_next != _ROUTE_END else _ROUTE_END
 
         # 2. 获取检查结果
         check_result = self.state.get(result_key, {})
@@ -432,55 +432,11 @@ class RouteDecider:
         return _ROUTE_END  # P15修复：使用 LangGraph END 常量
 
 
-# ===== 兼容性函数包装器 =====
-# 提供与原有路由函数兼容的接口，便于渐进式迁移
+# ===== P15修复说明 =====
+# RouteDecider 类保留作为未来路由逻辑集中化的基础
+# 原 workflow.py 中的遗留路由函数仍在使用，渐进式迁移计划：
+# 1. 首先完成 RouteDecider 类的功能完善
+# 2. 在 workflow.py 中逐步替换遗留路由函数
+# 3. 最终实现路由逻辑的完全集中化
 
-def create_route_function(decider_method: Callable) -> Callable:
-    """
-    创建兼容性路由函数
-
-    Args:
-        decider_method: RouteDecider 的方法
-
-    Returns:
-        路由函数（接收 state 参数）
-    """
-    def route_function(state: CorpusState) -> str:
-        decider = RouteDecider(state)
-        return decider_method(decider)
-    return route_function
-
-
-# 预定义的路由函数（使用 RouteDecider）
-def route_after_filter_v2(state: CorpusState) -> str:
-    """Filter 后路由（使用 RouteDecider）"""
-    decider = RouteDecider(state)
-    enable_normalize = state.get("_config_enable_normalize", False)
-    enable_qa_scaffold = state.get("_config_enable_qa_scaffold", False)
-    return decider.after_filter(enable_normalize=enable_normalize, enable_qa_scaffold=enable_qa_scaffold)
-
-
-def route_after_self_check_joint_v2(state: CorpusState) -> str:
-    """Self-Check-Joint 后路由（使用 RouteDecider）"""
-    decider = RouteDecider(state)
-    return decider.after_self_check("self_check_joint_result", "eval", "joint_ner_re")
-
-
-def route_after_self_check_ner_v2(state: CorpusState) -> str:
-    """Self-Check-NER 后路由（使用 RouteDecider）"""
-    decider = RouteDecider(state)
-    return decider.after_self_check("self_check_ner_result", "re", "ner")
-
-
-def route_after_self_check_re_v2(state: CorpusState) -> str:
-    """Self-Check-RE 后路由（使用 RouteDecider）"""
-    decider = RouteDecider(state)
-    return decider.after_self_check("self_check_re_result", "eval", "re")
-
-
-def route_joint_to_mentor_or_eval_v2(state: CorpusState) -> str:
-    """Joint 后路由（含导师求助，使用 RouteDecider）"""
-    decider = RouteDecider(state)
-    query_count = state.get("query_count", 0)
-    max_queries = state.get("max_queries", 2)
-    return decider.after_joint_with_mentor(True, query_count, max_queries)
+__all__ = ["RouteDecider"]

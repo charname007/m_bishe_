@@ -62,23 +62,9 @@ def extract_enum_values_from_list(items: List[Any]) -> List[Any]:
 
 
 # ===== P6改进：辅助函数 - 获取处理文本 =====
+# P15修复：统一使用 node_template.py 中的公开版本，避免重复定义
+from .node_template import get_text_for_processing
 
-def _get_text_for_processing(state: CorpusState) -> str:
-    """
-    获取用于处理的文本，优先使用归一化文本
-
-    Args:
-        state: 当前语料状态
-
-    Returns:
-        用于 NER/RE/Eval 等后续处理的文本
-        - 如果有归一化文本（normalized_text），优先使用
-        - 否则使用原始文本（raw_text）
-    """
-    normalized = state.get("normalized_text", "")
-    if normalized and normalized.strip():
-        return normalized
-    return state.get("raw_text", "")
 from .schemas import (
     FilterResult,  # P5新增
     NormalizeResult,  # P6新增
@@ -324,7 +310,7 @@ def create_qa_scaffold_node(llm: Any):
         corpus_id = state['corpus_id']
 
         # 使用归一化后的文本（如果有的话）
-        text_for_processing = _get_text_for_processing(state)
+        text_for_processing = get_text_for_processing(state)
 
         logger.info(f"[QA_Scaffold] 处理语料: {corpus_id}")
 
@@ -423,7 +409,7 @@ def create_ner_node(llm: Any):
 
         try:
             # P6改进：优先使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
             logger.debug(f"[NER] 使用文本: {text_for_processing[:50]}...")
 
             # P8改进：获取 QA Scaffold 上下文
@@ -515,7 +501,7 @@ def create_re_node(llm: Any):
 
         try:
             # P6改进：优先使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # P8改进：获取 QA Scaffold 上下文
             qa_relation_hints = state.get("qa_relation_hints", [])
@@ -825,7 +811,7 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
 
         try:
             # P6改进：优先使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # P8改进：获取 QA Scaffold 上下文
             semantic_summary = state.get("semantic_summary", "")
@@ -1036,7 +1022,7 @@ def create_label_node(llm: Any, enable_query: bool = False):
 
         try:
             # v2.2改进：获取原始文本用于提取情感标签、体验评价
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # P8改进：获取 QA Scaffold 上下文
             semantic_summary = state.get("semantic_summary", "")
@@ -1594,7 +1580,7 @@ def create_self_check_ner_node(llm: Any):
 
         try:
             # P6改进：优先使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # P8改进：获取 QA Scaffold 上下文
             qa_entity_hints = state.get("qa_entity_hints", [])
@@ -1701,7 +1687,7 @@ def create_self_check_re_node(llm: Any):
                 verified_entities = ner_result['verified_entities']
 
             # P6改进：优先使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # 使用 OutputParser 进行结构化输出
             prompt_text = SELF_CHECK_RE_PROMPT.invoke({
@@ -1938,7 +1924,7 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
         try:
             # 使用归一化文本
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # 获取 QA Scaffold 上下文
             qa_entity_hints = state.get("qa_entity_hints", [])
@@ -1980,10 +1966,28 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
             # 转换为现有格式（兼容后续节点）
             # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
             entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
+            # P15修复：创建功能实体和事件实体详细列表
+            function_entities_list = []
+            event_entities_list = []
+
             for e in result.entities:
                 entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
                     entities_dict[entity_type].append(e.name)
+
+                # P15修复：功能实体和事件实体需要保存完整属性
+                if entity_type == "功能" and e.function_attrs:
+                    function_entities_list.append({
+                        "name": e.name,
+                        "evidence": e.evidence,
+                        "function_attrs": e.function_attrs.model_dump(exclude_none=True),
+                    })
+                elif entity_type == "事件" and e.event_attrs:
+                    event_entities_list.append({
+                        "name": e.name,
+                        "evidence": e.evidence,
+                        "event_attrs": e.event_attrs.model_dump(exclude_none=True),
+                    })
 
             triples_list = [
                 {
@@ -2035,6 +2039,8 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
                             "triples": triples_list,
                             "joint_extraction_result": result.model_dump(),
                             "extraction_strategy": "joint",
+                            "function_entities": function_entities_list,  # P15修复：新增
+                            "event_entities": event_entities_list,  # P15修复：新增
                             "mentor_query": confusion,
                             "query_source_node": "joint_ner_re",
                             "needs_mentor_help": True,
@@ -2048,6 +2054,8 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
                 "triples": triples_list,
                 "joint_extraction_result": result.model_dump(),
                 "extraction_strategy": "joint",
+                "function_entities": function_entities_list,  # P15修复：新增
+                "event_entities": event_entities_list,  # P15修复：新增
                 "needs_mentor_help": False,  # P14新增：标记不需要帮助
                 "current_step": StepEnum.SELF_CHECK_JOINT,
             }
@@ -2098,7 +2106,7 @@ def create_self_check_joint_node(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             # 获取反思历史（用于迭代改进）
             reflection_history = state.get("reflection_history", [])
@@ -2194,7 +2202,7 @@ def create_self_check_qa_node(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             qa_result = state.get("qa_scaffold_result", {})
 
@@ -2275,7 +2283,7 @@ def create_self_check_eval_node(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             prompt_text = SELF_CHECK_EVAL_PROMPT.invoke({
                 "raw_text": text,
@@ -2351,7 +2359,7 @@ def create_self_check_label_node(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             entity_attrs = state.get("entity_attrs", {})
             relation_attrs = state.get("relation_attrs", {})
@@ -3014,7 +3022,7 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
             })
 
             try:
-                text_for_processing = _get_text_for_processing(state)
+                text_for_processing = get_text_for_processing(state)
 
                 # 构造查询上下文
                 query_type = mentor_query.get("query_type", "unknown")
@@ -3111,7 +3119,7 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
 
             try:
                 # 使用归一化后的文本
-                text_for_processing = _get_text_for_processing(state)
+                text_for_processing = get_text_for_processing(state)
 
                 # 调用LLM
                 prompt_text = QA_MENTOR_PROMPT.invoke({
@@ -3269,7 +3277,7 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             # 格式化各节点结果用于审批
             joint_result = state.get("joint_extraction_result", {})
@@ -3389,7 +3397,7 @@ def create_revision_joint_node(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
 
             # 获取QA反馈
             revision_feedbacks = state.get("revision_feedbacks", [])
@@ -4241,7 +4249,7 @@ def create_joint_ner_re_node_v3(llm: Any):
         })
 
         try:
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # 获取 QA Scaffold 上下文
             qa_entity_hints = state.get("qa_entity_hints", [])
@@ -4431,7 +4439,7 @@ def create_self_check_joint_node_v3(llm: Any):
         })
 
         try:
-            text = _get_text_for_processing(state)
+            text = get_text_for_processing(state)
             reflection_history = state.get("reflection_history", [])
 
             from .prompts import SELF_CHECK_JOINT_PROMPT_V3
@@ -4536,7 +4544,7 @@ def create_re_node_v3(llm: Any):
             return {"current_step": StepEnum.EVAL, "triples": []}
 
         try:
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
             qa_relation_hints = state.get("qa_relation_hints", [])
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
@@ -4620,7 +4628,7 @@ def create_label_node_v3(llm: Any):
         })
 
         try:
-            text_for_processing = _get_text_for_processing(state)
+            text_for_processing = get_text_for_processing(state)
 
             # 收集所有实体名
             all_entities = []
