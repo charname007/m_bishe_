@@ -46,6 +46,13 @@ from .nodes import (
     create_revision_joint_node,
     # P11新增：实体对齐节点
     create_entity_alignment_node,
+    # P13新增：优化版节点（RISEN/CARE/TIDD-EC框架）
+    create_joint_ner_re_node_v3,
+    create_filter_node_v2,
+    create_self_check_joint_node_v3,
+    create_re_node_v2,
+    create_label_node_v2,
+    get_node_creators,  # 版本切换辅助函数
 )
 
 
@@ -816,7 +823,8 @@ def build_corpus_workflow(
     enable_self_check_normalize: bool = False,  # P9新增：Normalize二次检查（可选）
     enable_entity_alignment: bool = False,  # P11新增：实体对齐
     config: ExtractionConfig = None,  # P11新增：配置对象（用于实体对齐）
-    max_retries: int = DEFAULT_MAX_RETRIES
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    prompt_version: str = "v2",  # P13新增：提示词版本切换
 ) -> CompiledStateGraph:
     """
     构建单条语料处理工作流
@@ -837,6 +845,10 @@ def build_corpus_workflow(
     P11新增模式（实体对齐）：
     - 实体对齐模式: ... → Label → Entity_Alignment → END
 
+    P13新增（提示词版本切换）：
+    - prompt_version="v2": 原版提示词（约4000 Token）
+    - prompt_version="v3": RISEN优化版（约1500 Token，节省60%成本）
+
     P1改进：为 LLM 调用节点添加 RetryPolicy，自动处理临时故障
     P2改进：支持简化评估模式，减少 LLM 调用成本
     P4改进：支持 Self-Check + 反思循环，提升抽取质量
@@ -845,6 +857,7 @@ def build_corpus_workflow(
     P8改进：支持 QA Scaffold 节点，5W1H问答构建语义脚手架
     P9改进：支持联合抽取 + Reflexion机制 + 所有节点二次检查
     P11改进：支持实体对齐节点，将抽取实体与数据库已有实体匹配
+    P13改进：支持提示词版本切换，优化Token消耗
 
     Args:
         llm: LangChain LLM 实例

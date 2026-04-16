@@ -1,7 +1,8 @@
 """
 知识图谱存储模块
 """
-from .neo4j_client import Neo4jClient
+# 延迟导入neo4j_client以避免numpy兼容性问题
+# from .neo4j_client import Neo4jClient
 from .postgres_client import PostgresClient
 from .data_process import (
     DataProcessor,
@@ -25,7 +26,7 @@ from .data_process import (
 )
 
 __all__ = [
-    "Neo4jClient",
+    # "Neo4jClient",  # 延迟导入，需要时直接 from kg.neo4j_client import Neo4jClient
     "PostgresClient",
     "DataProcessor",
     "AsyncDataProcessor",

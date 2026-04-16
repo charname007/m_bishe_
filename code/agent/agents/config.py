@@ -166,6 +166,19 @@ class ExtractionConfig:
     alignment_use_llm_decision: bool = True
     """是否使用LLM对候选进行最终判断"""
 
+    # ===== 提示词版本配置（P13新增） =====
+    prompt_version: str = "v2"
+    """提示词版本：v2（原版）或 v3（RISEN优化版）
+
+    v2: 原版提示词（完整Schema定义，约4000 Token）
+    v3: RISEN/CARE/TIDD-EC优化版（表格化Schema，约1500 Token，节省60%）
+
+    推荐使用场景：
+    - 生产环境（追求稳定性）: v2
+    - 批量处理（追求成本效率）: v3
+    - 调试测试（追求指令清晰）: v3
+    """
+
     @classmethod
     def from_env(cls) -> "ExtractionConfig":
         """

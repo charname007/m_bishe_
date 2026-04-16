@@ -434,6 +434,14 @@ class TripleAttributes(BaseModel):
         default=None,
         description="功能的情感倾向：正面/中性/负面（必须有原文依据）"
     )
+    功能描述: Optional[str] = Field(
+        default=None,
+        description="当功能为'其他'时，具体描述功能内容（必须有原文依据）"
+    )
+    功能类型: Optional[str] = Field(
+        default=None,
+        description="功能类型标识（用于校验：当功能类型='其他'时必须提供功能描述）"
+    )
 
     # ===== 对比关系属性 =====
     维度: Optional[List[CompareDimensionEnum]] = Field(
@@ -560,6 +568,13 @@ class TripleAttributes(BaseModel):
                 raise ValueError("当维度包含'其他'时，必须提供维度描述")
         return self
 
+    @model_validator(mode='after')
+    def validate_other_function(self):
+        """校验：当功能类型为'其他'时，必须提供功能描述"""
+        if self.功能类型 and self.功能类型 == "其他" and not self.功能描述:
+            raise ValueError("当功能类型为'其他'时，必须提供功能描述")
+        return self
+
 
 class Triple(BaseModel):
     """单个三元组（v3.2精简版：8个关系，强类型属性，全部可选）"""
@@ -627,15 +642,15 @@ class EvalResultSimplified(BaseModel):
     corrections: List[Correction] = Field(default_factory=list, description="修正列表（仅当need_correction=True时有效）")
 
 
-# ===== Label阶段输出模型（v3.3：特征标签改为开放文本） =====
+# ===== Label阶段输出模型（v3.3：特征标签开放文本，细分简化） =====
 
 class EntityAttributes(BaseModel):
-    """实体属性（v3.3：特征标签改为开放文本）
+    """实体属性（v3.3改进）
 
     v3.3改进：
-    - 特征标签从强枚举改为开放文本列表
-    - 设计原因：社交媒体特征表达多样且新词涌现
-    - 展示优先场景：保留原文真实表达更具价值
+    - 特征标签：开放文本，保留原文表达
+    - 细分：开放文本，仅记录文本中明确提及的分类词
+    - 设计原因：社交媒体表达模糊，权威分类由数据源（高德POI）在对齐阶段补充
 
     原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
     """
@@ -644,11 +659,11 @@ class EntityAttributes(BaseModel):
     # 基础分类属性（可选）
     类别: Optional[str] = Field(
         default=None,
-        description="实体类别：道路/POI/建筑物/街区（必须有原文依据）"
+        description="实体类别（用于NER边界识别）：道路/POI/建筑物/街区（必须有原文依据）"
     )
     细分: Optional[str] = Field(
         default=None,
-        description="细分类别：餐饮/商业综合体/商圈/主干道等（必须有原文依据）"
+        description="细分类别（开放文本，仅记录文本明确提及的分类）：餐厅/商场/大学等。注：权威分类由数据源在对齐阶段补充"
     )
 
     # 文本属性（从语料提取，全部可选）
@@ -708,6 +723,14 @@ class RelationAttributes(BaseModel):
         default=None,
         description="功能的情感倾向：正面/中性/负面（语料中出现才标注）"
     )
+    功能描述: Optional[str] = Field(
+        default=None,
+        description="当功能为'其他'时，具体描述功能内容（语料中出现才标注）"
+    )
+    功能类型: Optional[str] = Field(
+        default=None,
+        description="功能类型标识（用于校验：当功能类型='其他'时必须提供功能描述）"
+    )
 
     # ===== 对比关系属性 =====
     维度: Optional[List[CompareDimensionEnum]] = Field(
@@ -726,6 +749,13 @@ class RelationAttributes(BaseModel):
             dimension_values = [d.value for d in self.维度]
             if "其他" in dimension_values and not self.维度描述:
                 raise ValueError("当维度包含'其他'时，必须提供维度描述")
+        return self
+
+    @model_validator(mode='after')
+    def validate_other_function(self):
+        """校验：当功能类型为'其他'时，必须提供功能描述"""
+        if self.功能类型 and self.功能类型 == "其他" and not self.功能描述:
+            raise ValueError("当功能类型为'其他'时，必须提供功能描述")
         return self
 
 
@@ -853,7 +883,9 @@ class SelfCheckREResult(BaseModel):
     )
 
 
-# ===== 实体类别细分枚举（用于Prompt） =====
+# ===== 实体类别参考列表（仅供Prompt参考，非强制枚举） =====
+# v3.3说明：细分采用开放文本设计，以下列表仅作为高德POI分类的参考对照
+# 实体入库时通过entity_alignment节点关联数据源，继承权威分类
 
 ENTITY_CATEGORY_DETAIL = {
     "POI": ["餐饮", "交通", "教育", "历史保护", "购物", "医疗", "娱乐", "文化", "酒店", "服务"],

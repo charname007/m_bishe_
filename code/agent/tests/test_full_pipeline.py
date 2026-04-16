@@ -29,7 +29,9 @@ from agents import (
     CorpusState,
     StepEnum,
 )
-from kg.postgres_client import PostgresClient
+# 直接导入PostgresClient避免触发neo4j导入
+import kg.postgres_client
+PostgresClient = kg.postgres_client.PostgresClient
 
 # 配置日志
 logging.basicConfig(

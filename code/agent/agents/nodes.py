@@ -57,6 +57,8 @@ from .schemas import (
     # P9新增：联合抽取和所有Self-Check模型
     JointEntity, JointTriple, JointExtractionResult,
     SelfCheckJointResult, SelfCheckQAResult, SelfCheckEvalResult, SelfCheckLabelResult,
+    # P12新增：Self-Check增强版模型
+    SelfCheckJointResultV2,
 )
 from .prompts import (
     FILTER_PROMPT,  # P5新增
@@ -81,6 +83,13 @@ from .prompts import (
     ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
     # P12新增：四维度评分格式化函数
     format_dimension_scores, format_improvement_strategy,
+    # P13新增：优化版提示词（RISEN/CARE/TIDD-EC框架）
+    JOINT_NER_RE_PROMPT_V3, FILTER_PROMPT_V2, RE_PROMPT_V2, LABEL_PROMPT_V2,
+    SELF_CHECK_JOINT_PROMPT_V3,
+    assemble_optimized_joint_prompt,
+    format_mentor_guidance, format_reflection_history, format_improvement_strategy,
+    # 辅助格式化函数（节点内部使用）
+    format_entities, format_triples,
 )
 
 
@@ -1651,7 +1660,8 @@ def create_self_check_re_node(llm: Any):
                 "self_check_re_result": {},
                 "corrected_triples": state.get("triples", []),  # 失败时保留原 triples
                 "error": str(e),
-                "retry_count": state.get('retry_count', 0) + 1,
+                "retry_count": min(state.get('retry_count', 0) + 1, max_retries),  # 确保不超过上限
+                "retry_suggested": True,  # 异常时建议重试
                 "current_step": StepEnum.EVAL,
             }
 
@@ -1905,7 +1915,8 @@ def create_self_check_joint_node(llm: Any):
     async def self_check_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
         corpus_id = state['corpus_id']
         retry_count = state.get('retry_count', 0)
-        logger.info(f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}")
+        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
+        logger.info(f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}")
 
         writer({
             "step": "self_check_joint",
@@ -1977,7 +1988,8 @@ def create_self_check_joint_node(llm: Any):
             return {
                 "self_check_joint_result": {},
                 "error": str(e),
-                "retry_count": retry_count + 1,
+                "retry_count": min(retry_count + 1, max_retries),  # 确保不超过上限
+                "retry_suggested": True,  # 异常时建议重试
                 "current_step": StepEnum.EVAL,
             }
 
@@ -3329,351 +3341,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
         
         return candidates_per_query
 
-    async def entity_alignment_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        """实体对齐节点（混合策略优化版）"""
-        corpus_id = state['corpus_id']
-        logger.info(f"[Entity_Alignment] 处理语料: {corpus_id}")
-
-        writer({
-            "step": "entity_alignment",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始实体对齐"
-        })
-
-        try:
-            # 确保环境变量已加载
-            from dotenv import load_dotenv
-            from pathlib import Path
-            project_root = Path(__file__).parent.parent.parent
-            load_dotenv(project_root / ".env")
-
-            # 连接数据库 - 使用DSN字符串格式避免编码问题
-            import psycopg2
-
-            dsn = "host=localhost port=5432 dbname=bishe user=cznb6666 password=cznb6666"
-            conn = psycopg2.connect(dsn)
-
-            # 使用连接执行查询（不通过PostgresClient类）
-            logger.info("[Entity_Alignment] PostgreSQL连接已建立（DSN模式）")
-
-            # 预加载geo_entity_names embedding（小表，首次调用时加载）
-            nonlocal _geo_cache
-            if _geo_cache is None:
-                _geo_cache = _load_geo_embeddings(conn)
-            geo_entities, geo_embeddings_np = _geo_cache
-
-            # 获取抽取的实体
-            joint_result = state.get("joint_extraction_result", {})
-            entities_dict = state.get("entities", {})
-
-            entity_names = []
-            entity_types = {}
-            if joint_result and "entities" in joint_result:
-                for e in joint_result["entities"]:
-                    name = e.get("name", "")
-                    type_ = e.get("type", "")
-                    if name and name not in entity_names:
-                        entity_names.append(name)
-                        entity_types[name] = type_
-            else:
-                for type_, names in entities_dict.items():
-                    for name in names:
-                        if name and name not in entity_names:
-                            entity_names.append(name)
-                            entity_types[name] = type_
-
-            if not entity_names:
-                logger.info(f"[Entity_Alignment] 无实体需要对齐")
-                pg_client.close()
-                return {
-                    "entity_alignment_result": {
-                        "alignment_items": [],
-                        "aligned_entities": [],
-                        "new_entities": [],
-                        "skipped_entities": [],
-                        "overall_alignment_rate": 0.0,
-                        "alignment_confidence": "high"
-                    },
-                    "aligned_entity_ids": {},
-                    "new_entity_names": [],
-                    "current_step": StepEnum.DONE,
-                }
-
-            # 加载嵌入模型
-            model = _get_embedding_model()
-
-            # 生成实体嵌入向量（批量）
-            entity_embeddings = model.encode(entity_names, show_progress_bar=False, convert_to_numpy=True)
-
-            # 对齐配置
-            high_threshold = config.alignment_high_confidence_threshold
-            low_threshold = config.alignment_similarity_threshold
-            top_k = config.alignment_top_k
-            use_llm = config.alignment_use_llm_decision
-
-            # 批量相似度搜索（混合策略）
-            # geo: 内存批量计算（预加载）
-            geo_candidates_per_query = _batch_similarity_search_geo(
-                entity_embeddings, geo_embeddings_np, geo_entities, top_k
-            )
-            
-            # amap: 数据库批量查询（利用HNSW索引）
-            query_embeddings_list = [emb.tolist() for emb in entity_embeddings]
-            amap_candidates_per_query = _batch_similarity_search_amap(
-                pg_client, query_embeddings_list, top_k
-            )
-
-            alignment_items = []
-            aligned_entities = []
-            new_entities = []
-            skipped_entities = []
-            aligned_ids = {}
-
-            # 处理每个实体
-            for i, name in enumerate(entity_names):
-                logger.debug(f"[Entity_Alignment] 对齐实体: {name}")
-
-                # 合并geo和amap候选
-                candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
-
-                # 按相似度排序，取top_k
-                candidates.sort(key=lambda x: x["similarity"], reverse=True)
-                candidates = candidates[:top_k]
-
-                best_candidate = candidates[0] if candidates else None
-                best_similarity = best_candidate.get("similarity", 0.0) if best_candidate else 0.0
-
-                alignment_item = {
-                    "extracted_name": name,
-                    "extracted_type": entity_types.get(name, ""),
-                    "candidates": candidates,
-                    "best_match": None,
-                    "alignment_status": "pending",
-                    "llm_decision": None
-                }
-
-                # 高置信度：直接匹配
-                if best_similarity >= high_threshold:
-                    alignment_item["alignment_status"] = "aligned"
-                    alignment_item["best_match"] = best_candidate
-                    alignment_item["llm_decision"] = f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
-
-                    aligned_entities.append({
-                        "name": name,
-                        "db_id": best_candidate["db_entity_id"],
-                        "db_name": best_candidate["name"],
-                        "similarity": best_similarity,
-                        "source": best_candidate["source"]
-                    })
-                    aligned_ids[name] = best_candidate["db_entity_id"]
-
-                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})")
-
-                elif best_similarity < low_threshold:
-                    alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
-                    new_entities.append(name)
-                    logger.debug(f"[Entity_Alignment] {name} -> 新实体 (低置信度)")
-
-                elif use_llm and candidates:
-                    candidates_for_format = []
-                    for c in candidates:
-                        c_formatted = c.copy()
-                        c_formatted["db_name"] = c_formatted.get("name", "")
-                        c_formatted["db_type"] = c_formatted.get("type", "")
-                        candidates_for_format.append(c_formatted)
-                    
-                    candidates_text = format_alignment_candidates(candidates_for_format)
-
-                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke({
-                        "extracted_name": name,
-                        "extracted_type": entity_types.get(name, ""),
-                        "raw_text": state.get("raw_text", ""),
-                        "candidates": candidates_text,
-                    })
-
-                    try:
-                        response = await llm.ainvoke(prompt_text.messages[1].content)
-
-                        import re
-                        status_match = re.search(r'alignment_status[=:]\s*"?(\w+)"?', response.content, re.IGNORECASE)
-                        index_match = re.search(r'best_match_index[=:]\s*(\d+)', response.content, re.IGNORECASE)
-                        decision_match = re.search(r'llm_decision[=:]\s*"([^"]+)"', response.content, re.IGNORECASE)
-
-                        llm_status = status_match.group(1) if status_match else "new_entity"
-                        best_index = int(index_match.group(1)) if index_match else -1
-                        llm_decision = decision_match.group(1) if decision_match else "LLM判断"
-                        
-                        VALID_STATUSES = {"aligned", "new_entity", "skip"}
-                        if llm_status not in VALID_STATUSES:
-                            llm_status = "new_entity"
-
-                        alignment_item["alignment_status"] = llm_status
-                        alignment_item["llm_decision"] = llm_decision
-
-                        if llm_status == "aligned" and best_index >= 0 and best_index < len(candidates):
-                            best_match = candidates[best_index]
-                            alignment_item["best_match"] = best_match
-
-                            aligned_entities.append({
-                                "name": name,
-                                "db_id": best_match["db_entity_id"],
-                                "db_name": best_match["name"],
-                                "similarity": best_match["similarity"],
-                                "source": best_match["source"]
-                            })
-                            aligned_ids[name] = best_match["db_entity_id"]
-
-                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})")
-                        else:
-                            new_entities.append(name)
-                            logger.debug(f"[Entity_Alignment] {name} -> 新实体 (LLM判断)")
-
-                    except Exception as e:
-                        logger.warning(f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体")
-                        alignment_item["alignment_status"] = "new_entity"
-                        alignment_item["llm_decision"] = f"LLM判断异常，默认为新实体"
-                        new_entities.append(name)
-
-                else:
-                    alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = f"中置信度({best_similarity:.3f})，未启用LLM判断"
-                    new_entities.append(name)
-
-                alignment_items.append(alignment_item)
-
-            # ===== 新实体创建逻辑（P12新增） =====
-            # 将未对齐的新实体写入数据库和neo4j
-            # 注意：延迟关闭pg_client，避免重复连接
-            created_entity_ids = {}
-            if new_entities:
-                logger.info(f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体...")
-
-                try:
-                    # 使用已有的pg_client连接（避免重新连接）
-                    neo4j_config = settings.get_neo4j_config()
-                    from kg.neo4j_client import Neo4jClient
-                    neo4j_client = Neo4jClient(**neo4j_config)
-
-                    # 批量生成新实体的embedding
-                    new_embeddings = model.encode(new_entities, show_progress_bar=False, convert_to_numpy=True)
-
-                    # 准备新实体数据
-                    for i, name in enumerate(new_entities):
-                        entity_type = entity_types.get(name, "poi")
-                        entity_data = {
-                            "name": name,
-                            "type": entity_type,
-                            "aliases": [],
-                            "source": "xiaohongshu"
-                        }
-
-                        # 写入Postgres geo_entity_names表（使用已有连接）
-                        pg_entity_id = pg_client.insert_new_geo_entity(
-                            entity_data,
-                            new_embeddings[i].tolist()
-                        )
-
-                        if pg_entity_id:
-                            # 写入Neo4j
-                            neo4j_entity_id = neo4j_client.create_new_geo_entity(entity_data)
-                            if neo4j_entity_id:
-                                created_entity_ids[name] = neo4j_entity_id
-                                logger.info(f"[Entity_Alignment] 新实体已创建: {name} -> {neo4j_entity_id}")
-                            else:
-                                # neo4j创建失败，使用postgres的entity_id
-                                created_entity_ids[name] = pg_entity_id
-                                logger.warning(f"[Entity_Alignment] Neo4j创建失败，使用PG ID: {name} -> {pg_entity_id}")
-                        else:
-                            logger.warning(f"[Entity_Alignment] 新实体创建失败: {name}")
-
-                    neo4j_client.close()
-                    logger.success(f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}")
-
-                except Exception as create_error:
-                    logger.error(f"[Entity_Alignment] 新实体创建异常: {create_error}")
-                    import traceback
-                    traceback.print_exc()
-
-            # 关闭数据库连接（延迟关闭，新实体创建完成后）
-            pg_client.close()
-
-            # 统计
-            total_entities = len(entity_names)
-            aligned_count = len(aligned_entities)
-            alignment_rate = aligned_count / total_entities if total_entities > 0 else 0.0
-            geo_aligned = sum(1 for e in aligned_entities if e.get("source") == "geo_entity_names")
-            amap_aligned = sum(1 for e in aligned_entities if e.get("source") == "amap_poi_wgs84")
-
-            if alignment_rate >= 0.8:
-                overall_confidence = "high"
-            elif alignment_rate >= 0.5:
-                overall_confidence = "medium"
-            else:
-                overall_confidence = "low"
-
-            logger.info(
-                f"[Entity_Alignment] 完成: {aligned_count}/{total_entities} 已对齐, "
-                f"{len(new_entities)} 新实体(创建{len(created_entity_ids)}个), 对齐率={alignment_rate:.1%}"
-                f"(geo:{geo_aligned}, amap:{amap_aligned})"
-            )
-
-            writer({
-                "step": "entity_alignment",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "aligned_count": aligned_count,
-                "new_count": len(new_entities),
-                "created_count": len(created_entity_ids),
-                "alignment_rate": alignment_rate,
-                "geo_aligned": geo_aligned,
-                "amap_aligned": amap_aligned,
-                "confidence": overall_confidence
-            })
-
-            # 合并aligned_ids和created_entity_ids
-            all_entity_ids = {**aligned_ids, **created_entity_ids}
-
-            return {
-                "entity_alignment_result": {
-                    "alignment_items": alignment_items,
-                    "aligned_entities": aligned_entities,
-                    "new_entities": new_entities,
-                    "created_entities": [{"name": k, "entity_id": v} for k, v in created_entity_ids.items()],
-                    "skipped_entities": skipped_entities,
-                    "overall_alignment_rate": alignment_rate,
-                    "alignment_confidence": overall_confidence,
-                    "geo_aligned_count": geo_aligned,
-                    "amap_aligned_count": amap_aligned,
-                    "created_count": len(created_entity_ids)
-                },
-                "aligned_entity_ids": all_entity_ids,  # 包含已对齐和新创建的实体ID
-                "new_entity_names": [n for n in new_entities if n not in created_entity_ids],  # 仅保留创建失败的
-                "current_step": StepEnum.DONE,
-            }
-
-        except Exception as e:
-            logger.error(f"[Entity_Alignment] 处理失败: {e}")
-            import traceback
-            traceback.print_exc()
-            writer({
-                "step": "entity_alignment",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
-            return {
-                "entity_alignment_result": {},
-                "aligned_entity_ids": {},
-                "new_entity_names": [],
-                "error": str(e),
-                "current_step": StepEnum.DONE,
-            }
-
-    return entity_alignment_node
-
-    # ===== 模块级缓存（P12性能优化） =====
+    # ===== 函数级缓存（P12性能优化） =====
 # ===== 函数级缓存（P12性能优化） =====
     # 嵌入模型缓存（避免重复加载）
     _embedding_model_cache = None
@@ -4070,10 +3738,12 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             if new_entities:
                 logger.info(f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体...")
 
+                new_pg_client = None
+                neo4j_client = None
                 try:
                     # 重新连接数据库
                     pg_config = settings.get_postgres_config()
-                    pg_client = PostgresClient(**pg_config)
+                    new_pg_client = PostgresClient(**pg_config)
 
                     neo4j_config = settings.get_neo4j_config()
                     from kg.neo4j_client import Neo4jClient
@@ -4093,7 +3763,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         }
 
                         # 写入Postgres geo_entity_names表
-                        pg_entity_id = pg_client.insert_new_geo_entity(
+                        pg_entity_id = new_pg_client.insert_new_geo_entity(
                             entity_data,
                             new_embeddings[i].tolist()
                         )
@@ -4111,15 +3781,26 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         else:
                             logger.warning(f"[Entity_Alignment] 新实体创建失败: {name}")
 
-                    pg_client.close()
-                    neo4j_client.close()
-
                     logger.success(f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}")
 
                 except Exception as create_error:
                     logger.error(f"[Entity_Alignment] 新实体创建异常: {create_error}")
                     import traceback
                     traceback.print_exc()
+                finally:
+                    # 确保连接始终关闭（修复连接泄漏bug）
+                    if new_pg_client is not None:
+                        try:
+                            new_pg_client.close()
+                            logger.debug("[Entity_Alignment] 新实体创建PostgresClient连接已关闭")
+                        except Exception as close_error:
+                            logger.warning(f"[Entity_Alignment] 关闭PostgresClient时出错: {close_error}")
+                    if neo4j_client is not None:
+                        try:
+                            neo4j_client.close()
+                            logger.debug("[Entity_Alignment] Neo4jClient连接已关闭")
+                        except Exception as close_error:
+                            logger.warning(f"[Entity_Alignment] 关闭Neo4jClient时出错: {close_error}")
 
             # 计算整体对齐率
             total_entities = len(entity_names)
@@ -4197,3 +3878,509 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             }
 
     return entity_alignment_node
+
+
+# ===== P13新增：优化版节点函数（使用V3提示词） =====
+
+def create_joint_ner_re_node_v3(llm: Any):
+    """
+    创建优化版联合抽取节点（使用RISEN框架提示词）
+
+    改进点：
+    1. Token减少约60%（表格化Schema）
+    2. RISEN框架结构化（Role→Instructions→Steps→End→Narrowing）
+    3. RCoT反向验证（减少幻觉）
+    4. TIDD-EC约束规则集中化
+    """
+    parser = PydanticOutputParser(pydantic_object=JointExtractionResult)
+
+    async def joint_ner_re_node_v3(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Joint NER + RE V3: RISEN框架优化版"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Joint_NER_RE_V3] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "joint_ner_re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "version": "v3",
+            "message": "开始联合抽取（优化版）"
+        })
+
+        try:
+            text_for_processing = _get_text_for_processing(state)
+
+            # 获取 QA Scaffold 上下文
+            qa_entity_hints = state.get("qa_entity_hints", [])
+            qa_relation_hints = state.get("qa_relation_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+            mentor_guidance = state.get("mentor_guidance", {})
+
+            # 使用动态组装函数（更灵活）
+            from .prompts import assemble_optimized_joint_prompt
+            full_prompt = assemble_optimized_joint_prompt(
+                raw_text=text_for_processing,
+                entity_hints=format_entity_hints(qa_entity_hints),
+                relation_hints=format_relation_hints(qa_relation_hints),
+                mentor_guidance=format_mentor_guidance(mentor_guidance),
+            )
+
+            # 添加格式化指令
+            full_prompt_with_format = f"{full_prompt}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt_with_format)
+            result: JointExtractionResult = parser.parse(response.content)
+
+            # 转换为现有格式
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            for e in result.entities:
+                if e.type in entities_dict:
+                    entities_dict[e.type].append(e.name)
+
+            triples_list = [
+                {
+                    "head": t.head,
+                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "tail": t.tail,
+                    "evidence": t.evidence,
+                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else t.confidence,
+                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                }
+                for t in result.triples
+            ]
+
+            logger.info(
+                f"[Joint_NER_RE_V3] 完成: {len(result.entities)}个实体, "
+                f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
+            )
+
+            writer({
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "version": "v3",
+                "entity_count": len(result.entities),
+                "triple_count": len(result.triples),
+                "confidence": result.overall_confidence
+            })
+
+            return {
+                "entities": entities_dict,
+                "triples": triples_list,
+                "joint_extraction_result": result.model_dump(),
+                "extraction_strategy": "joint_v3",
+                "current_step": StepEnum.SELF_CHECK_JOINT,
+            }
+
+        except Exception as e:
+            logger.error(f"[Joint_NER_RE_V3] 失败: {e}")
+            writer({
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "version": "v3",
+                "error": str(e)
+            })
+            return {
+                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "triples": [],
+                "error": str(e),
+                "current_step": StepEnum.EVAL,
+            }
+
+    return joint_ner_re_node_v3
+
+
+def create_filter_node_v2(llm: Any):
+    """
+    创建优化版筛选节点（使用APE框架）
+
+    改进点：
+    1. Token减少约67%（精简判断规则）
+    2. APE框架（Action→Purpose→Expectation）
+    3. 保守策略（无法确定时默认放行）
+    """
+    parser = PydanticOutputParser(pydantic_object=FilterResult)
+
+    async def filter_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Filter V2: APE框架优化版"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Filter_V2] 筛选语料: {corpus_id}")
+
+        writer({
+            "step": "filter",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "version": "v2",
+            "message": "开始文本筛选（优化版）"
+        })
+
+        try:
+            from .prompts import FILTER_PROMPT_V2
+            prompt_text = FILTER_PROMPT_V2.invoke({"raw_text": state["raw_text"]})
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: FilterResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Filter_V2] 结果: is_valid={result.is_valid}, "
+                f"confidence={result.confidence}, "
+                f"region_hint={result.region_hint}"
+            )
+
+            writer({
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "version": "v2",
+                "is_valid": result.is_valid,
+                "confidence": result.confidence,
+                "skip_reason": result.skip_reason,
+            })
+
+            next_step = StepEnum.NER if result.is_valid else StepEnum.DONE
+
+            return {
+                "filter_result": result.model_dump(),
+                "current_step": next_step,
+            }
+
+        except Exception as e:
+            logger.error(f"[Filter_V2] 失败: {e}")
+            writer({
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "version": "v2",
+                "error": str(e)
+            })
+            # 保守策略：筛选失败时默认继续处理
+            return {
+                "filter_result": {
+                    "is_valid": True,
+                    "confidence": "low",
+                    "skip_reason": None,
+                },
+                "error": str(e),
+                "current_step": StepEnum.NER,
+            }
+
+    return filter_node_v2
+
+
+def create_self_check_joint_node_v3(llm: Any):
+    """
+    创建优化版联合抽取校验节点（Pre-Mortem + 四维度评分）
+
+    改进点：
+    1. Pre-Mortem预失败分析（提前识别风险）
+    2. 四维度量化评分（完整性/准确性/真实性/证据性）
+    3. RCoT反向验证步骤
+    4. 可执行的改进动作列表
+    """
+    from .schemas import SelfCheckJointResultV2  # P12新增增强版模型
+    parser = PydanticOutputParser(pydantic_object=SelfCheckJointResultV2)
+
+    async def self_check_joint_node_v3(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Self-Check Joint V3: Pre-Mortem + 四维度评分"""
+        corpus_id = state['corpus_id']
+        retry_count = state.get('retry_count', 0)
+        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
+        logger.info(f"[Self-Check-Joint_V3] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}")
+
+        writer({
+            "step": "self_check_joint",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "version": "v3",
+            "retry_count": retry_count
+        })
+
+        try:
+            text = _get_text_for_processing(state)
+            reflection_history = state.get("reflection_history", [])
+
+            from .prompts import SELF_CHECK_JOINT_PROMPT_V3
+            prompt_text = SELF_CHECK_JOINT_PROMPT_V3.invoke({
+                "raw_text": text,
+                "entities": format_joint_entities(
+                    state.get("joint_extraction_result", {}).get("entities", [])
+                ),
+                "triples": format_joint_triples(state.get("triples", [])),
+                "semantic_summary": state.get("semantic_summary", ""),
+                "context_dependencies": format_context_dependencies(state.get("qa_context_dependencies", [])),
+                "previous_reflection": format_reflection_history(reflection_history),
+                "improvement_attempts": format_improvement_strategy(state.get("improvement_strategy", {})),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: SelfCheckJointResultV2 = parser.parse(response.content)
+
+            # 提取四维度评分
+            dimension_scores = result.dimension_scores
+            overall_confidence = result.overall_confidence
+
+            logger.info(
+                f"[Self-Check-Joint_V3] 完成: 四维度评分={dimension_scores}, "
+                f"整体置信度={overall_confidence}, 重试建议={result.retry_suggested}"
+            )
+
+            writer({
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "version": "v3",
+                "dimension_scores": dimension_scores,
+                "confidence": overall_confidence,
+                "retry_suggested": result.retry_suggested,
+            })
+
+            return {
+                "self_check_joint_result": result.model_dump(),
+                "reflection_text": result.reflection_text,
+                "improvement_strategy": result.improvement_strategy,
+                "reflection_history": reflection_history + [result.reflection_text],
+                "retry_count": retry_count + (1 if result.retry_suggested else 0),
+                "retry_suggested": result.retry_suggested,
+                "retry_reason": result.retry_reason,
+                "current_step": StepEnum.EVAL if not result.retry_suggested else StepEnum.JOINT_NER_RE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Self-Check-Joint_V3] 失败: {e}")
+            writer({
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "version": "v3",
+                "error": str(e)
+            })
+            return {
+                "self_check_joint_result": {},
+                "reflection_text": "",
+                "error": str(e),
+                "current_step": StepEnum.EVAL,
+            }
+
+    return self_check_joint_node_v3
+
+
+def create_re_node_v2(llm: Any):
+    """
+    创建优化版关系抽取节点（表格化Schema）
+
+    改进点：
+    1. Token减少约60%（表格化关系定义）
+    2. RCoT反向验证步骤
+    3. TIDD-EC Do/Don't集中约束
+    """
+    parser = PydanticOutputParser(pydantic_object=RelationExtractionResult)
+
+    async def re_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
+        """RE V2: 表格化Schema优化版"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[RE_V2] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "re",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "version": "v2",
+            "message": "开始关系抽取（优化版）"
+        })
+
+        total_entities = sum(len(v) for v in state["entities"].values())
+        if total_entities == 0:
+            logger.debug(f"[RE_V2] 无实体，跳过")
+            writer({
+                "step": "re",
+                "corpus_id": corpus_id,
+                "status": "skipped",
+                "version": "v2",
+                "reason": "无实体"
+            })
+            return {"current_step": StepEnum.EVAL, "triples": []}
+
+        try:
+            text_for_processing = _get_text_for_processing(state)
+            qa_relation_hints = state.get("qa_relation_hints", [])
+            qa_context_dependencies = state.get("qa_context_dependencies", [])
+
+            from .prompts import RE_PROMPT_V2
+            prompt_text = RE_PROMPT_V2.invoke({
+                "raw_text": text_for_processing,
+                "entities": format_entities(state["entities"]),
+                "relation_hints": format_relation_hints(qa_relation_hints),
+                "context_dependencies": format_context_dependencies(qa_context_dependencies),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: RelationExtractionResult = parser.parse(response.content)
+
+            triples = [
+                {
+                    "head": t.head,
+                    "relation": t.relation.value if hasattr(t.relation, 'value') else t.relation,
+                    "tail": t.tail,
+                    "evidence": t.evidence or "",
+                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                }
+                for t in result.triples
+            ]
+
+            logger.debug(f"[RE_V2] 结果: {len(triples)}个三元组")
+
+            writer({
+                "step": "re",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "version": "v2",
+                "triple_count": len(triples),
+            })
+
+            return {
+                "triples": triples,
+                "current_step": StepEnum.EVAL,
+            }
+
+        except Exception as e:
+            logger.error(f"[RE_V2] 失败: {e}")
+            writer({
+                "step": "re",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "version": "v2",
+                "error": str(e)
+            })
+            return {
+                "triples": [],
+                "error": str(e),
+                "current_step": StepEnum.DONE,
+            }
+
+    return re_node_v2
+
+
+def create_label_node_v2(llm: Any):
+    """
+    创建优化版属性标注节点（表格化Schema）
+
+    改进点：
+    1. Token减少约60%
+    2. 特征标签开放文本设计（v3.3）
+    3. TIDD-EC约束规则
+    """
+    parser = PydanticOutputParser(pydantic_object=LabelResult)
+
+    async def label_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
+        """Label V2: 表格化Schema优化版"""
+        corpus_id = state['corpus_id']
+        logger.info(f"[Label_V2] 处理语料: {corpus_id}")
+
+        writer({
+            "step": "label",
+            "corpus_id": corpus_id,
+            "status": "started",
+            "version": "v2",
+            "message": "开始属性标注（优化版）"
+        })
+
+        try:
+            text_for_processing = _get_text_for_processing(state)
+
+            # 收集所有实体名
+            all_entities = []
+            for entity_type, names in state["entities"].items():
+                for name in names:
+                    all_entities.append(name)
+
+            # 格式化关系列表
+            relations_list = format_triples(state.get("triples", []))
+
+            from .prompts import LABEL_PROMPT_V2
+            prompt_text = LABEL_PROMPT_V2.invoke({
+                "raw_text": text_for_processing,
+                "entities": all_entities,
+                "relations": relations_list,
+                "semantic_summary": state.get("semantic_summary", ""),
+                "entity_hints": format_entity_hints(state.get("qa_entity_hints", [])),
+                "relation_hints": format_relation_hints(state.get("qa_relation_hints", [])),
+            })
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result: LabelResult = parser.parse(response.content)
+
+            logger.debug(f"[Label_V2] 完成: {len(result.entities)}个实体属性")
+
+            writer({
+                "step": "label",
+                "corpus_id": corpus_id,
+                "status": "completed",
+                "version": "v2",
+                "entity_attr_count": len(result.entities),
+                "relation_attr_count": len(result.relations),
+            })
+
+            # 转换属性字典格式
+            entity_attrs = {}
+            for name, attrs in result.entities.items():
+                entity_attrs[name] = attrs.model_dump(exclude_none=True) if hasattr(attrs, 'model_dump') else attrs
+
+            relation_attrs = {}
+            for key, attrs in result.relations.items():
+                relation_attrs[key] = attrs.model_dump(exclude_none=True) if hasattr(attrs, 'model_dump') else attrs
+
+            return {
+                "entity_attrs": entity_attrs,
+                "relation_attrs": relation_attrs,
+                "current_step": StepEnum.DONE,
+            }
+
+        except Exception as e:
+            logger.error(f"[Label_V2] 失败: {e}")
+            writer({
+                "step": "label",
+                "corpus_id": corpus_id,
+                "status": "error",
+                "version": "v2",
+                "error": str(e)
+            })
+            return {
+                "entity_attrs": {},
+                "relation_attrs": {},
+                "error": str(e),
+                "current_step": StepEnum.DONE,
+            }
+
+    return label_node_v2
+
+
+# ===== 版本切换辅助函数 =====
+
+def get_node_creators(prompt_version: str = "v2"):
+    """
+    根据提示词版本返回对应的节点创建函数
+
+    Args:
+        prompt_version: "v2"（原版）或 "v3"（优化版）
+
+    Returns:
+        Dict: 各节点的创建函数字典
+    """
+    if prompt_version == "v3":
+        return {
+            "filter": create_filter_node_v2,
+            "joint_ner_re": create_joint_ner_re_node_v3,
+            "self_check_joint": create_self_check_joint_node_v3,
+            "re": create_re_node_v2,
+            "label": create_label_node_v2,
+        }
+    else:
+        # v2 默认版本
+        return {
+            "filter": create_filter_node,
+            "joint_ner_re": create_joint_ner_re_node,
+            "self_check_joint": create_self_check_joint_node,
+            "re": create_re_node,
+            "label": create_label_node,
+        }
