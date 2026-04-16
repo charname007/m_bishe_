@@ -2,7 +2,8 @@
 Neo4j 图数据库客户端
 """
 import json
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Any
 from neo4j import GraphDatabase
 from loguru import logger
 
@@ -421,93 +422,115 @@ class Neo4jClient:
 
     def batch_merge_relations(self, triples: List[Dict]) -> Dict:
         """
-        批量合并关系 - 使用 UNWIND 批量操作
+        批量合并关系 - P15改进：按关系类型使用独立的关系标签
 
-        性能优化：单次 Cypher 查询处理所有三元组
+        P15改进：
+        - 不再使用统一的 RELATION 标签 + type 属性
+        - 每种关系类型使用独立的 Neo4j 关系标签（位于/包含/相对方位/具有功能/发生事件/优于/相似/劣于）
+        - 按关系类型分组执行不同的 Cypher 查询
         """
         if not triples:
             return {"merged": 0, "total": 0}
 
+        # P15改进：按关系类型分组
+        # 8种标准关系类型
+        relation_groups: Dict[str, List[Dict]] = defaultdict(list)
+        for t in triples:
+            rel_type = t.get("relation", "Unknown")
+            relation_groups[rel_type].append(t)
+
+        total_merged = 0
+        group_stats = {}
+
         try:
             with self.driver.session() as session:
-                # 准备批量数据（包含 relation_attrs JSON字符串）
-                batch_data = [
-                    {
-                        "head": t["head"],
-                        "relation": t["relation"],
-                        "tail": t["tail"],
-                        "evidence": t.get("evidence", ""),
-                        "corpus_ids": t.get("corpus_ids", []),
-                        "relation_type": t.get("relation_type", ""),
-                        "relation_subtype": t.get("relation_subtype", ""),
-                        "relation_attrs": json.dumps(t.get("relation_attrs", {}), ensure_ascii=False) if t.get("relation_attrs") else ""
-                    }
-                    for t in triples
-                ]
+                for rel_type, group_triples in relation_groups.items():
+                    # 准备批量数据
+                    batch_data = [
+                        {
+                            "head": t["head"],
+                            "relation": t["relation"],
+                            "tail": t["tail"],
+                            "evidence": t.get("evidence", ""),
+                            "corpus_ids": t.get("corpus_ids", []),
+                            "relation_type": t.get("relation_type", ""),
+                            "relation_subtype": t.get("relation_subtype", ""),
+                            "relation_attrs": json.dumps(t.get("relation_attrs", {}), ensure_ascii=False) if t.get("relation_attrs") else ""
+                        }
+                        for t in group_triples
+                    ]
 
-                # 使用 UNWIND 批量合并
-                # 注意：在创建关系时，确保头尾实体节点有基本属性（避免空壳实体）
-                result = session.run("""
-                    UNWIND $triples AS triple
-                    MERGE (h:Entity {name: triple.head})
-                    ON CREATE SET
-                        h.type = 'Unknown',
-                        h.category = '',
-                        h.aliases = [],
-                        h.corpus_ids = [],
-                        h.created_at = datetime(),
-                        h.source = 'xiaohongshu'
-                    ON MATCH SET
-                        h.updated_at = datetime()
-                    MERGE (t:Entity {name: triple.tail})
-                    ON CREATE SET
-                        t.type = 'Unknown',
-                        t.category = '',
-                        t.aliases = [],
-                        t.corpus_ids = [],
-                        t.created_at = datetime(),
-                        t.source = 'xiaohongshu'
-                    ON MATCH SET
-                        t.updated_at = datetime()
-                    MERGE (h)-[r:RELATION {type: triple.relation}]->(t)
-                    ON CREATE SET
-                        r.evidence = triple.evidence,
-                        r.corpus_ids = triple.corpus_ids,
-                        r.relation_type = triple.relation_type,
-                        r.relation_subtype = triple.relation_subtype,
-                        r.relation_attrs = triple.relation_attrs,
-                        r.created_at = datetime(),
-                        r.source = 'xiaohongshu'
-                    ON MATCH SET
-                        r.corpus_ids = CASE
-                            WHEN triple.corpus_ids IS NOT NULL AND size(triple.corpus_ids) > 0
-                            THEN apoc.coll.toSet(r.corpus_ids + triple.corpus_ids)
-                            ELSE r.corpus_ids
-                        END,
-                        r.relation_type = CASE
-                            WHEN triple.relation_type IS NOT NULL AND triple.relation_type <> ''
-                            THEN triple.relation_type
-                            ELSE r.relation_type
-                        END,
-                        r.relation_subtype = CASE
-                            WHEN triple.relation_subtype IS NOT NULL AND triple.relation_subtype <> ''
-                            THEN triple.relation_subtype
-                            ELSE r.relation_subtype
-                        END,
-                        r.relation_attrs = CASE
-                            WHEN triple.relation_attrs IS NOT NULL AND triple.relation_attrs <> '' AND triple.relation_attrs <> '{}'
-                            THEN triple.relation_attrs
-                            ELSE r.relation_attrs
-                        END,
-                        r.updated_at = datetime()
-                    RETURN count(r) as merged_count
-                """, triples=batch_data)
+                    # P15改进：使用具体关系类型作为标签名
+                    # Cypher 关系类型命名规则：字母开头，可包含数字下划线
+                    # 中文关系类型使用反引号包裹
+                    rel_label = f"`{rel_type}`"
 
-                record = result.single()
-                merged_count = record["merged_count"] if record else 0
+                    # 执行批量合并
+                    # 注意：f-string 中 Cypher 的花括号需要双写 {{ }}
+                    query = f"""
+                        UNWIND $triples AS triple
+                        MERGE (h:Entity {{name: triple.head}})
+                        ON CREATE SET
+                            h.type = 'Unknown',
+                            h.category = '',
+                            h.aliases = [],
+                            h.corpus_ids = [],
+                            h.created_at = datetime(),
+                            h.source = 'xiaohongshu'
+                        ON MATCH SET
+                            h.updated_at = datetime()
+                        MERGE (t:Entity {{name: triple.tail}})
+                        ON CREATE SET
+                            t.type = 'Unknown',
+                            t.category = '',
+                            t.aliases = [],
+                            t.corpus_ids = [],
+                            t.created_at = datetime(),
+                            t.source = 'xiaohongshu'
+                        ON MATCH SET
+                            t.updated_at = datetime()
+                        MERGE (h)-[r:{rel_label}]->(t)
+                        ON CREATE SET
+                            r.evidence = triple.evidence,
+                            r.corpus_ids = triple.corpus_ids,
+                            r.relation_type = triple.relation_type,
+                            r.relation_subtype = triple.relation_subtype,
+                            r.relation_attrs = triple.relation_attrs,
+                            r.created_at = datetime(),
+                            r.source = 'xiaohongshu'
+                        ON MATCH SET
+                            r.corpus_ids = CASE
+                                WHEN triple.corpus_ids IS NOT NULL AND size(triple.corpus_ids) > 0
+                                THEN apoc.coll.toSet(r.corpus_ids + triple.corpus_ids)
+                                ELSE r.corpus_ids
+                            END,
+                            r.relation_type = CASE
+                                WHEN triple.relation_type IS NOT NULL AND triple.relation_type <> ''
+                                THEN triple.relation_type
+                                ELSE r.relation_type
+                            END,
+                            r.relation_subtype = CASE
+                                WHEN triple.relation_subtype IS NOT NULL AND triple.relation_subtype <> ''
+                                THEN triple.relation_subtype
+                                ELSE r.relation_subtype
+                            END,
+                            r.relation_attrs = CASE
+                                WHEN triple.relation_attrs IS NOT NULL AND triple.relation_attrs <> '' AND triple.relation_attrs <> '{{}}'
+                                THEN triple.relation_attrs
+                                ELSE r.relation_attrs
+                            END,
+                            r.updated_at = datetime()
+                        RETURN count(r) as merged_count
+                    """
+                    result = session.run(query, triples=batch_data)
 
-                logger.info(f"关系合并完成: {merged_count}/{len(triples)}")
-                return {"merged": merged_count, "total": len(triples)}
+                    record = result.single()
+                    merged_count = record["merged_count"] if record else 0
+                    total_merged += merged_count
+                    group_stats[rel_type] = merged_count
+
+                logger.info(f"关系合并完成: {total_merged}/{len(triples)} ({dict(group_stats)})")
+                return {"merged": total_merged, "total": len(triples), "groups": group_stats}
         except Exception as e:
             logger.error(f"批量合并关系失败: {e}")
             # 降级为逐个处理
