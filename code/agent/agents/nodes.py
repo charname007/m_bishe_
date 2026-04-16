@@ -87,9 +87,6 @@ from .prompts import (
     JOINT_NER_RE_PROMPT_V3, FILTER_PROMPT_V2, RE_PROMPT_V2, LABEL_PROMPT_V2,
     SELF_CHECK_JOINT_PROMPT_V3,
     assemble_optimized_joint_prompt,
-    format_mentor_guidance, format_reflection_history, format_improvement_strategy,
-    # 辅助格式化函数（节点内部使用）
-    format_entities, format_triples,
 )
 
 
@@ -978,25 +975,24 @@ def create_label_node(llm: Any):
                     "情感倾向": attrs.情感倾向,
                 }
 
-            # v3.2精简版：仅提取schema定义的属性
-            # 相对方位关系属性：距离值、方向值、联动推荐
-            # 功能关系属性：时段、适合人群、具有限制、情感倾向
+            # v3.4精简版：仅提取schema定义的属性（删除联动推荐）
+            # 相对方位关系属性：距离值、方向值
+            # 功能关系属性：时段、适合人群(开放文本)、具有限制(开放文本列表)、情感倾向
             # 对比关系属性：维度
             relation_attrs = {}
             for key, attrs in result.relations.items():
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
                     relation_attrs[normalized_key] = {
-                        # 相对方位关系属性（Schema v3.2）
+                        # 相对方位关系属性（Schema v3.4：删除联动推荐）
                         "距离值": attrs.距离值,
                         "方向值": attrs.方向值,
-                        "联动推荐": attrs.联动推荐,
-                        # 功能关系属性（Schema v3.2）
+                        # 功能关系属性（Schema v3.4：开放文本）
                         "时段": attrs.时段,
-                        "适合人群": attrs.适合人群,
-                        "具有限制": attrs.具有限制 or [],
+                        "适合人群": attrs.适合人群,  # v3.4：开放文本
+                        "具有限制": attrs.具有限制 or [],  # v3.4：开放文本列表
                         "情感倾向": attrs.情感倾向,
-                        # 对比关系属性（Schema v3.2）
+                        # 对比关系属性（Schema v3.4）
                         "维度": attrs.维度 or [],
                     }
                 else:
@@ -1182,17 +1178,17 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 relation_attrs = corpus_state.get("relation_attrs", {})
                 corrected_triples = corpus_state.get("corrected_triples", [])
 
-                # v3.2精简版：关系类型属性映射（7个关系类型）
-                # Schema v3.2定义：
+                # v3.4精简版：关系类型属性映射（8个关系类型）
+                # Schema v3.4定义：
                 # - 位于、包含：无关系属性
-                # - 相对方位：距离值、方向值、联动推荐
-                # - 具有功能：时段、适合人群、具有限制、情感倾向
+                # - 相对方位：距离值、方向值（删除联动推荐）
+                # - 具有功能：时段、适合人群(开放文本)、具有限制(开放文本列表)、情感倾向
                 # - 优于/相似/劣于：维度
-                # - 发生事件：无关系属性（属性在事件节点上）
+                # - 发生事件：无关系属性（属性在事件实体上）
                 RELATION_ATTRS_MAP = {
-                    # 相对方位关系属性（3个属性）
-                    "相对方位": ["距离值", "方向值", "联动推荐"],
-                    # 功能关系属性（4个属性）
+                    # 相对方位关系属性（v3.4：删除联动推荐，仅2个属性）
+                    "相对方位": ["距离值", "方向值"],
+                    # 功能关系属性（v3.4：开放文本属性）
                     "具有功能": ["时段", "适合人群", "具有限制", "情感倾向"],
                     # 对比关系属性（1个属性）
                     "优于": ["维度"],
@@ -1201,7 +1197,7 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     # 无属性的关系
                     "位于": [],
                     "包含": [],
-                    "发生事件": [],  # 属性在事件节点上，非关系属性
+                    "发生事件": [],  # 属性在事件实体上，非关系属性
                 }
 
                 for triple in corrected_triples:
@@ -1842,10 +1838,12 @@ def create_joint_ner_re_node(llm: Any):
             result: JointExtractionResult = parser.parse(response.content)
 
             # 转换为现有格式（兼容后续节点）
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                if e.type in entities_dict:
-                    entities_dict[e.type].append(e.name)
+                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                if entity_type in entities_dict:
+                    entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
@@ -1890,7 +1888,7 @@ def create_joint_ner_re_node(llm: Any):
                 "error": str(e)
             })
             return {
-                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": []},
+                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
                 "triples": [],
                 "error": str(e),
                 "current_step": StepEnum.EVAL,  # 失败时跳过校验，直接评估
@@ -3091,11 +3089,12 @@ def create_revision_joint_node(llm: Any):
             response = await llm.ainvoke(full_prompt)
             result: JointExtractionResult = parser.parse(response.content)
 
-            # 转换为现有格式
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            # 转换为现有格式（v3.4扩展版：6种实体类型）
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                if e.type in entities_dict:
-                    entities_dict[e.type].append(e.name)
+                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                if entity_type in entities_dict:
+                    entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
@@ -3931,11 +3930,12 @@ def create_joint_ner_re_node_v3(llm: Any):
             response = await llm.ainvoke(full_prompt_with_format)
             result: JointExtractionResult = parser.parse(response.content)
 
-            # 转换为现有格式
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": []}
+            # 转换为现有格式（v3.4扩展版：6种实体类型）
+            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
             for e in result.entities:
-                if e.type in entities_dict:
-                    entities_dict[e.type].append(e.name)
+                entity_type = e.type.value if hasattr(e.type, 'value') else e.type
+                if entity_type in entities_dict:
+                    entities_dict[entity_type].append(e.name)
 
             triples_list = [
                 {
@@ -3991,7 +3991,7 @@ def create_joint_ner_re_node_v3(llm: Any):
     return joint_ner_re_node_v3
 
 
-def create_filter_node_v2(llm: Any):
+def create_filter_node_v3(llm: Any):
     """
     创建优化版筛选节点（使用APE框架）
 
@@ -4165,7 +4165,7 @@ def create_self_check_joint_node_v3(llm: Any):
     return self_check_joint_node_v3
 
 
-def create_re_node_v2(llm: Any):
+def create_re_node_v3(llm: Any):
     """
     创建优化版关系抽取节点（表格化Schema）
 
@@ -4261,7 +4261,7 @@ def create_re_node_v2(llm: Any):
     return re_node_v2
 
 
-def create_label_node_v2(llm: Any):
+def create_label_node_v3(llm: Any):
     """
     创建优化版属性标注节点（表格化Schema）
 
@@ -4369,11 +4369,11 @@ def get_node_creators(prompt_version: str = "v2"):
     """
     if prompt_version == "v3":
         return {
-            "filter": create_filter_node_v2,
+            "filter": create_filter_node_v3,
             "joint_ner_re": create_joint_ner_re_node_v3,
             "self_check_joint": create_self_check_joint_node_v3,
-            "re": create_re_node_v2,
-            "label": create_label_node_v2,
+            "re": create_re_node_v3,
+            "label": create_label_node_v3,
         }
     else:
         # v2 默认版本

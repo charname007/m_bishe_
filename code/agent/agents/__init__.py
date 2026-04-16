@@ -135,6 +135,13 @@ from .nodes import (
     create_revision_joint_node,
     # P11新增：实体对齐节点
     create_entity_alignment_node,
+    # P13新增：优化版节点（RISEN/CARE/TIDD-EC框架）
+    create_joint_ner_re_node_v3,
+    create_filter_node_v3,
+    create_self_check_joint_node_v3,
+    create_re_node_v3,
+    create_label_node_v3,
+    get_node_creators,  # 版本切换辅助函数
 )
 from .workflow import (
     build_corpus_workflow,
@@ -244,7 +251,11 @@ __all__ = [
     "process_corpus_batch_with_llm",
     "create_qa_mentor_node", "create_qa_approval_node", "create_revision_joint_node",
     "create_entity_alignment_node",
-    
+    # P13新增：优化版节点
+    "create_joint_ner_re_node_v3", "create_filter_node_v3",
+    "create_self_check_joint_node_v3", "create_re_node_v3", "create_label_node_v3",
+    "get_node_creators",
+
     # ===== 工作流 =====
     "build_corpus_workflow", "build_distributed_workflow",
     "process_corpus", "process_batch",

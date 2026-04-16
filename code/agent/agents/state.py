@@ -114,9 +114,14 @@ class QAScaffoldState(TypedDict):
 
 
 class ExtractState(TypedDict):
-    """抽取状态 - NER/RE/联合抽取节点结果"""
+    """抽取状态 - NER/RE/联合抽取节点结果（v3.4扩展版）
+
+    v3.4改进：
+    - entities字典新增'功能'和'事件'键
+    - 新增function_entities和event_entities列表存储详细属性
+    """
     entities: Annotated[Dict[str, List[str]], replace_value]
-    """实体识别结果"""
+    """实体识别结果：新增'功能'和'事件'键"""
     triples: Annotated[List[Dict], replace_value]
     """关系抽取结果"""
     joint_extraction_result: Annotated[Dict, replace_value]
@@ -127,6 +132,11 @@ class ExtractState(TypedDict):
     """实体属性"""
     relation_attrs: Annotated[Dict[str, Dict], replace_value]
     """关系属性"""
+    # v3.4新增：功能实体和事件实体详细列表
+    function_entities: Annotated[List[Dict], merge_list]
+    """功能实体详细列表（含属性）"""
+    event_entities: Annotated[List[Dict], merge_list]
+    """事件实体详细列表（含属性）"""
 
 
 class EvalState(TypedDict):
@@ -334,11 +344,16 @@ class KGState(TypedDict):
 
 # ===== 实体/关系类型定义 =====
 
+# v3.4扩展版：实体类型扩展为6种（新增功能、事件）
 ENTITY_TYPES = {
+    # 空间实体（GIS标准）—— 4种
     "道路": "街道、大道、小巷等（如：关山大道）",
     "POI": "具体店名、地标、机构（如：武汉大学、某某咖啡厅）",
     "建筑物": "具体的楼宇、商场主体（如：泛悦汇）",
-    "街区": "具有边界感的生活区域（如：街道口、华农校区）"
+    "街区": "具有边界感的生活区域（如：街道口、华农校区）",
+    # 语义实体（v3.4新增）—— 2种
+    "功能": "场所可进行的用途类型（如：餐饮、购物、休闲等）",
+    "事件": "发生的具体事件（如：樱花节、封路、开业等）"
 }
 
 # v3.3精简版：8个关系类型（空间基础3 + 社交语义1 + 对比评价3 + 事件1）

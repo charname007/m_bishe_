@@ -48,10 +48,10 @@ from .nodes import (
     create_entity_alignment_node,
     # P13新增：优化版节点（RISEN/CARE/TIDD-EC框架）
     create_joint_ner_re_node_v3,
-    create_filter_node_v2,
+    create_filter_node_v3,
     create_self_check_joint_node_v3,
-    create_re_node_v2,
-    create_label_node_v2,
+    create_re_node_v3,
+    create_label_node_v3,
     get_node_creators,  # 版本切换辅助函数
 )
 
@@ -877,7 +877,33 @@ def build_corpus_workflow(
     if config is None:
         config = DEFAULT_CONFIG
 
-    # 创建节点函数
+    # P13新增：从配置中获取提示词版本（如果未显式指定）
+    if prompt_version == "v2" and hasattr(config, 'prompt_version'):
+        prompt_version = config.prompt_version
+
+    # P13新增：根据提示词版本选择节点创建函数
+    logger.info(f"[Workflow] 提示词版本: {prompt_version}")
+
+    if prompt_version == "v3":
+        # 使用优化版节点（RISEN/CARE/TIDD-EC框架）
+        node_creators = get_node_creators("v3")
+        joint_ner_re_node = node_creators["joint_ner_re"](llm)
+        self_check_joint_node = node_creators["self_check_joint"](llm)
+        filter_node_v3 = node_creators["filter"](llm)
+        re_node_v3 = node_creators["re"](llm)
+        label_node_v3 = node_creators["label"](llm)
+        logger.info("[Workflow] 使用优化版提示词（Token节省约60%）")
+    else:
+        # 使用原版节点
+        node_creators = get_node_creators("v2")
+        joint_ner_re_node = node_creators["joint_ner_re"](llm)
+        self_check_joint_node = node_creators["self_check_joint"](llm)
+        filter_node_v3 = create_filter_node(llm)  # Filter节点保持原版
+        re_node_v3 = node_creators["re"](llm)
+        label_node_v3 = node_creators["label"](llm)
+        logger.info("[Workflow] 使用原版提示词")
+
+    # 创建节点函数（通用节点保持不变）
     ner_node = create_ner_node(llm)
     re_node = create_re_node(llm)
     label_node = create_label_node(llm)
@@ -887,19 +913,18 @@ def build_corpus_workflow(
 
     # P9新增：联合抽取模式
     if use_joint_extraction:
-        # 联合抽取节点
-        joint_ner_re_node = create_joint_ner_re_node(llm)
+        # P13改进：使用版本化节点
         builder.add_node("joint_ner_re", joint_ner_re_node, retry_policy=LLM_RETRY_POLICY)
 
         # 二次检查节点（如果启用）
         if enable_full_self_check:
             self_check_qa_node = create_self_check_qa_node(llm)
-            self_check_joint_node = create_self_check_joint_node(llm)
-            self_check_eval_node = create_self_check_eval_node(llm)
-            self_check_label_node = create_self_check_label_node(llm)
-
+            # P13改进：使用版本化Self-Check-Joint节点
             builder.add_node("self_check_qa", self_check_qa_node, retry_policy=LLM_RETRY_POLICY)
             builder.add_node("self_check_joint", self_check_joint_node, retry_policy=LLM_RETRY_POLICY)
+
+            self_check_eval_node = create_self_check_eval_node(llm)
+            self_check_label_node = create_self_check_label_node(llm)
             builder.add_node("self_check_eval", self_check_eval_node, retry_policy=LLM_RETRY_POLICY)
             builder.add_node("self_check_label", self_check_label_node, retry_policy=LLM_RETRY_POLICY)
 
@@ -915,7 +940,8 @@ def build_corpus_workflow(
         # 评估和标注节点
         eval_node = create_eval_simplified_node(llm)
         builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
-        builder.add_node("label", label_node, retry_policy=LLM_RETRY_POLICY)
+        # P13改进：使用版本化Label节点
+        builder.add_node("label", label_node_v3 if prompt_version == "v3" else label_node, retry_policy=LLM_RETRY_POLICY)
 
         # 前置节点处理（Filter → Self-Check-Filter → Normalize → Self-Check-Normalize → QA_Scaffold）
         # P5+P6+P8改进：前置节点组合
@@ -929,9 +955,9 @@ def build_corpus_workflow(
             logger.info(f"[Workflow] 添加配置初始化节点: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}")
 
         if enable_filter and enable_normalize:
-            filter_node = create_filter_node(llm)
+            # P13改进：使用版本化Filter节点
+            builder.add_node("filter", filter_node_v3 if prompt_version == "v3" else create_filter_node(llm), retry_policy=LLM_RETRY_POLICY)
             normalize_node = create_normalize_node(llm)
-            builder.add_node("filter", filter_node, retry_policy=LLM_RETRY_POLICY)
             builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
 
             # Filter → Self-Check-Filter → Normalize
@@ -1003,8 +1029,8 @@ def build_corpus_workflow(
                 logger.info(f"[Workflow] 联合抽取: Filter + Normalize")
 
         elif enable_filter:
-            filter_node = create_filter_node(llm)
-            builder.add_node("filter", filter_node, retry_policy=LLM_RETRY_POLICY)
+            # P13改进：使用版本化Filter节点
+            builder.add_node("filter", filter_node_v3 if prompt_version == "v3" else create_filter_node(llm), retry_policy=LLM_RETRY_POLICY)
 
             if enable_self_check_filter:
                 # 需要配置初始化节点来设置标记字段（normalize=False, qa_scaffold由配置决定）

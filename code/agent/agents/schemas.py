@@ -1,6 +1,6 @@
 """
 Pydantic模型定义 - 用于LangChain with_structured_output
-v3.2改进：精简版8关系体系 + 5实体属性 + 9功能大类
+v3.4改进：实体类型扩展（新增功能实体、事件实体）+ 属性Schema简化（删除联动推荐，开放文本属性）
 核心原则：所有属性和关系必须有原文依据（明确出现/暗示表达/语义推断），禁止幻觉
 """
 from typing import List, Dict, Optional, Any, Union
@@ -34,6 +34,25 @@ class RelationTypeEnum(str, Enum):
 
     # 事件关系（1个）
     HAS_EVENT = "发生事件"
+
+
+# ===== 实体类型枚举（v3.4新增：6种） =====
+
+class EntityTypeEnum(str, Enum):
+    """实体类型枚举（v3.4扩展版：6种）
+
+    实体体系：
+    - 空间实体（4个）：道路、POI、建筑物、街区 —— GIS标准
+    - 语义实体（2个）：功能、事件 —— 社交媒体特色（v3.4新增）
+    """
+    # 空间实体（GIS标准）
+    ROAD = "道路"           # 交通通道
+    POI = "POI"             # 具体地点/机构
+    BUILDING = "建筑物"     # 建筑设施
+    BLOCK = "街区"          # 地理区域
+    # 语义实体（v3.4新增）
+    FUNCTION = "功能"       # 场所功能用途
+    EVENT = "事件"          # 发生的事件
 
 
 # ===== 关系类型变体映射常量（提取为模块级常量，消除重复） =====
@@ -397,13 +416,18 @@ class EntityRecognitionResult(BaseModel):
 # ===== RE阶段输出模型（v3.2改进：精简版三元组属性） =====
 
 class TripleAttributes(BaseModel):
-    """三元组属性（v3.2精简版：方位+功能关系属性，全部可选）
+    """三元组属性（v3.4精简版：删除联动推荐，开放文本属性）
 
     原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
+
+    v3.4改进：
+    - 删除联动推荐属性（信息价值有限）
+    - 适合人群改为开放文本（枚举无法穷尽人群表达）
+    - 具有限制改为开放文本列表（保留原文时长准确性）
     """
     model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
 
-    # ===== 相对方位关系属性（合并原距离+方向+相邻） =====
+    # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
     距离值: Optional[DistanceValueEnum] = Field(
         default=None,
         description="相对方位关系的距离值：近/中等/远（必须有原文依据，如'附近'→近）"
@@ -412,23 +436,19 @@ class TripleAttributes(BaseModel):
         default=None,
         description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（必须有原文依据）"
     )
-    联动推荐: Optional[bool] = Field(
-        default=None,
-        description="相对方位关系的联动推荐属性（必须有原文依据，如'一起逛'→联动推荐=true）"
-    )
 
-    # ===== 功能关系属性（原承载活动关系） =====
+    # ===== 功能关系属性（v3.4：开放文本） =====
     时段: Optional[str] = Field(
         default=None,
         description="功能的适用时段：周末/晚上/樱花季/春季/夏季等（必须有原文依据）"
     )
-    适合人群: Optional[CrowdNodeEnum] = Field(
+    适合人群: Optional[str] = Field(
         default=None,
-        description="功能的适合人群（必须有原文依据，如'带孩子来'→亲子）"
+        description="功能的适合人群（开放文本，保留原文表达）：带孩子来玩、闺蜜聚会、大学生打卡等（必须有原文依据）"
     )
-    具有限制: Optional[List[LimitNodeEnum]] = Field(
+    具有限制: Optional[List[str]] = Field(
         default=None,
-        description="功能的限制条件列表（必须有原文依据，如'排队2小时'→排队久）"
+        description="功能的限制条件列表（开放文本，保留原文表达）：排队两小时、停车超级难、需提前预约等（必须有原文依据）"
     )
     情感倾向: Optional[EmotionNodeEnum] = Field(
         default=None,
@@ -498,66 +518,7 @@ class TripleAttributes(BaseModel):
             return DirectionValueEnum(normalized)
         raise ValueError(f"无效的方向值: {v}，有效值为: 东/南/西/北/东北/西南/东侧/西侧/对面/旁边")
 
-    @field_validator('适合人群', mode='before')
-    @classmethod
-    def normalize_crowd(cls, v):
-        """将人群变体映射到标准枚举值"""
-        if v is None:
-            return None
-        if isinstance(v, CrowdNodeEnum):
-            return v
-        # 人群映射（包含变体）
-        crowd_mapping = {
-            '亲子': '亲子/宝妈', '宝妈': '亲子/宝妈', '带孩子': '亲子/宝妈', '亲子/宝妈': '亲子/宝妈',
-            '学生党': '学生党', '学生': '学生党', '大学生': '学生党',
-            '情侣': '情侣', '约会': '情侣',
-            '打工人': '打工人', '上班族': '打工人',
-            '特种兵': '特种兵',
-            '银发族': '银发族', '老人': '银发族', '老年人': '银发族',
-            '宠物主': '宠物主', '带宠物': '宠物主', '遛狗': '宠物主',
-            '独行者': '独行者', '独自': '独行者',
-            '团建': '团建', '聚会': '团建',
-        }
-        normalized = crowd_mapping.get(str(v))
-        if normalized:
-            return CrowdNodeEnum(normalized)
-        raise ValueError(f"无效的人群值: {v}")
-
-    @field_validator('具有限制', mode='before')
-    @classmethod
-    def normalize_limits(cls, v):
-        """将限制变体映射到标准枚举值列表"""
-        if v is None:
-            return None
-        if isinstance(v, list) and all(isinstance(item, LimitNodeEnum) for item in v):
-            return v
-        # 限制映射
-        limit_mapping = {
-            '需预约': '需预约', '要预约': '需预约', '预约难': '需预约',
-            '排队久': '排队久', '排队': '排队久', '排队很长': '排队久',
-            '停车难': '停车难', '没车位': '停车难', '停车要排队': '停车难',
-            '限流': '限流', '人太多': '限流',
-            '谢绝宠物': '谢绝宠物', '不能带宠物': '谢绝宠物',
-            '只收现金': '只收现金',
-            '时间限制': '时间限制',
-            '人数限制': '人数限制',
-            '消费门槛': '消费门槛', '最低消费': '消费门槛',
-            '季节限制': '季节限制',
-        }
-        if isinstance(v, list):
-            normalized = []
-            for item in v:
-                mapped = limit_mapping.get(str(item))
-                if mapped:
-                    normalized.append(LimitNodeEnum(mapped))
-                else:
-                    raise ValueError(f"无效的限制值: {item}")
-            return normalized
-        # 单个值
-        mapped = limit_mapping.get(str(v))
-        if mapped:
-            return [LimitNodeEnum(mapped)]
-        raise ValueError(f"无效的限制值: {v}")
+    # v3.4删除：normalize_crowd和normalize_limits validator（改为开放文本）
 
     @model_validator(mode='after')
     def validate_other_dimension(self):
@@ -644,6 +605,84 @@ class EvalResultSimplified(BaseModel):
 
 # ===== Label阶段输出模型（v3.3：特征标签开放文本，细分简化） =====
 
+class FunctionEntityAttributes(BaseModel):
+    """功能实体属性（v3.4新增）
+
+    功能实体作为独立实体抽取，不再仅作为三元组Tail。
+    所有属性必须有原文依据，禁止幻觉。
+    """
+    model_config = ConfigDict(extra='forbid')
+
+    功能类型: FunctionEnum = Field(
+        description="功能大类（9种）：餐饮/购物/休闲/社交/观景/住宿/文化/工作/其他"
+    )
+    功能细分: Optional[str] = Field(
+        default=None,
+        description="功能细分描述：咖啡厅、火锅、书店、手工艺体验等（必须有原文依据）"
+    )
+    适合时段: Optional[str] = Field(
+        default=None,
+        description="功能适用时段：周末、晚上、樱花季、春季等（必须有原文依据）"
+    )
+    适合人群: Optional[str] = Field(
+        default=None,
+        description="适合人群（开放文本，保留原文表达）：带孩子来玩、闺蜜聚会、大学生打卡等（必须有原文依据）"
+    )
+    具有限制: Optional[List[str]] = Field(
+        default=None,
+        description="限制条件（开放文本列表，保留原文表达）：排队两小时、停车超级难、需提前预约等（必须有原文依据）"
+    )
+    情感倾向: Optional[EmotionNodeEnum] = Field(
+        default=None,
+        description="功能体验情感：正面/中性/负面（必须有原文依据）"
+    )
+    推荐指数: Optional[RatingNodeEnum] = Field(
+        default=None,
+        description="功能推荐程度：超推/推荐/一般/不推荐（必须有原文依据）"
+    )
+    evidence: Optional[str] = Field(
+        default=None,
+        description="原文依据"
+    )
+
+
+class EventEntityAttributes(BaseModel):
+    """事件实体属性（v3.4新增）
+
+    事件实体作为独立实体抽取，不再仅作为三元组Tail。
+    所有属性必须有原文依据，禁止幻觉。
+    """
+    model_config = ConfigDict(extra='forbid')
+
+    事件类别: EventCategoryEnum = Field(
+        description="事件类别（7种）：自然事件/人文事件/商业活动/社会事件/业态变更/停业关闭/其他"
+    )
+    事件状态: Optional[EventStateEnum] = Field(
+        default=None,
+        description="事件当前状态：正在进行/已结束/计划中/周期性（必须有原文依据）"
+    )
+    发生时间: Optional[str] = Field(
+        default=None,
+        description="事件发生时间：每年3月、樱花季、2024年等（必须有原文依据）"
+    )
+    详细描述: Optional[str] = Field(
+        default=None,
+        description="事件详细描述：樱花盛开、店铺倒闭、施工改造等（必须有原文依据）"
+    )
+    情感倾向: Optional[EmotionNodeEnum] = Field(
+        default=None,
+        description="事件情感：正面/中性/负面（必须有原文依据）"
+    )
+    关联场所: Optional[str] = Field(
+        default=None,
+        description="事件发生的场所（从三元组推断）"
+    )
+    evidence: Optional[str] = Field(
+        default=None,
+        description="原文依据"
+    )
+
+
 class EntityAttributes(BaseModel):
     """实体属性（v3.3改进）
 
@@ -683,16 +722,16 @@ class EntityAttributes(BaseModel):
 
 
 class RelationAttributes(BaseModel):
-    """关系属性（v3.2精简版：与TripleAttributes保持一致）
+    """关系属性（v3.4精简版：删除联动推荐，开放文本属性）
 
-    根据 Schema v3.2，关系属性包括：
-    - 相对方位关系属性：距离值、方向值、联动推荐
-    - 功能关系属性：时段、适合人群、具有限制、情感倾向
+    根据 Schema v3.4，关系属性包括：
+    - 相对方位关系属性：距离值、方向值（删除联动推荐）
+    - 功能关系属性：时段、适合人群（开放文本）、具有限制（开放文本列表）、情感倾向
     - 对比关系属性：维度
 
     所有属性可选，语料中出现才标注。
     """
-    # ===== 相对方位关系属性（合并原相邻+距离+方向） =====
+    # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
     距离值: Optional[DistanceValueEnum] = Field(
         default=None,
         description="相对方位关系的距离值：近/中等/远（语料中出现才标注）"
@@ -701,23 +740,20 @@ class RelationAttributes(BaseModel):
         default=None,
         description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（语料中出现才标注）"
     )
-    联动推荐: Optional[bool] = Field(
-        default=None,
-        description="相对方位关系的联动推荐属性（语料中出现才标注）"
-    )
+    # v3.4删除：联动推荐属性（信息价值有限）
 
-    # ===== 功能关系属性（原承载活动关系） =====
+    # ===== 功能关系属性（v3.4：开放文本） =====
     时段: Optional[str] = Field(
         default=None,
         description="功能的适用时段：周末/晚上/樱花季等（语料中出现才标注）"
     )
-    适合人群: Optional[CrowdNodeEnum] = Field(
+    适合人群: Optional[str] = Field(
         default=None,
-        description="功能的适合人群（语料中出现才标注）"
+        description="功能的适合人群（开放文本，保留原文表达）：带孩子来玩、闺蜜聚会等（语料中出现才标注）"
     )
-    具有限制: Optional[List[LimitNodeEnum]] = Field(
+    具有限制: Optional[List[str]] = Field(
         default=None,
-        description="功能的限制条件列表（语料中出现才标注）"
+        description="功能的限制条件（开放文本列表）：排队两小时、停车超级难等（语料中出现才标注）"
     )
     情感倾向: Optional[EmotionNodeEnum] = Field(
         default=None,
@@ -971,12 +1007,24 @@ FEATURE_TAGS = FEATURE_TAGS_REFERENCE
 # ===== 联合抽取模型（P9新增） =====
 
 class JointEntity(BaseModel):
-    """联合抽取的单个实体"""
+    """联合抽取的单个实体（v3.4扩展版）
+
+    v3.4改进：实体类型扩展为6种（新增功能、事件）
+    """
     name: str = Field(description="实体名称")
-    type: str = Field(description="实体类型：道路/POI/建筑物/街区")
-    category: str = Field(description="细分类别")
+    type: EntityTypeEnum = Field(description="实体类型：道路/POI/建筑物/街区/功能/事件")
+    category: Optional[str] = Field(default=None, description="细分类别")
     aliases: List[str] = Field(default_factory=list, description="别名/简称")
     evidence: str = Field(description="原文依据")
+    # v3.4新增：功能实体和事件实体属性
+    function_attrs: Optional[FunctionEntityAttributes] = Field(
+        default=None,
+        description="功能实体属性（仅当type=功能时有效）"
+    )
+    event_attrs: Optional[EventEntityAttributes] = Field(
+        default=None,
+        description="事件实体属性（仅当type=事件时有效）"
+    )
 
 
 class JointTriple(BaseModel):
