@@ -57,6 +57,12 @@ from .schemas import (
     SelfCheckFilterResult, SelfCheckNormalizeResult,
     # P10新增：批量LLM调用模型
     BatchCorpusResult, BatchExtractionResult, BatchSelfCheckResult,
+    # P15新增：批量前置节点模型
+    BatchFilterItemResult, BatchFilterResult,
+    BatchNormalizeItemResult, BatchNormalizeResult,
+    BatchQAScaffoldItemResult, BatchQAScaffoldResult,
+    # P15新增：批量Self-Check节点模型
+    BatchSelfCheckQACorpusResult, BatchSelfCheckQAResult,
     # P10新增：QA导师模型
     ApprovalStatusEnum, ApprovalFeedback, NodeApprovalResult, QAApprovalResult,
     MentorGuidance, QAMentorScaffoldResult,
@@ -85,6 +91,12 @@ from .prompts import (
     SELF_CHECK_FILTER_PROMPT, SELF_CHECK_NORMALIZE_PROMPT,
     # P10新增：批量LLM调用提示词
     BATCH_JOINT_PROMPT, BATCH_SELF_CHECK_PROMPT,
+    # P15新增：批量预处理提示词
+    BATCH_FILTER_PROMPT, BATCH_NORMALIZE_PROMPT, BATCH_QA_SCAFFOLD_PROMPT,
+    # P15新增：批量Self-Check提示词
+    BATCH_SELF_CHECK_QA_PROMPT,
+    # P15新增：批量Eval提示词
+    BATCH_EVAL_PROMPT,
     # P10新增：QA导师模式提示词
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     # P11新增：实体对齐提示词
@@ -101,6 +113,10 @@ from .prompts import (
     format_entity_hints, format_relation_hints, format_context_dependencies,
     # P10新增：批量格式化函数
     format_batch_corpus, format_batch_results_for_check, format_cross_corpus_aliases,
+    # P15新增：批量QA校验格式化函数
+    format_batch_qa_results_for_check, format_corpus_texts_for_check,
+    # P15新增：批量Eval格式化函数
+    format_batch_triples_for_eval,
     # P10新增：QA导师格式化函数
     format_mentor_guidance, format_feedbacks_for_revision, format_feedback_summary, format_joint_for_approval,
     format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
@@ -139,6 +155,17 @@ from .nodes import (
     create_batch_joint_extraction_node,
     create_batch_self_check_node,
     process_corpus_batch_with_llm,
+    # P15新增：批量预处理节点
+    create_batch_filter_node,
+    create_batch_normalize_node,
+    create_batch_qa_scaffold_node,
+    process_batch_preprocessing,
+    # P15新增：批量Self-Check节点
+    create_batch_self_check_qa_node,
+    # P15新增：批量Eval节点
+    create_batch_eval_node,
+    # P15新增：批量Self-Check-Eval节点
+    create_batch_self_check_eval_node,
     # P10新增：QA导师节点
     create_qa_mentor_node,
     create_qa_approval_node,
@@ -219,6 +246,14 @@ __all__ = [
     "DimensionScore", "ImprovementAction", "SelfCheckJointResultV2",
     "SelfCheckFilterResult", "SelfCheckNormalizeResult",
     "BatchCorpusResult", "BatchExtractionResult", "BatchSelfCheckResult",
+    # P15新增：批量前置节点模型
+    "BatchFilterItemResult", "BatchFilterResult",
+    "BatchNormalizeItemResult", "BatchNormalizeResult",
+    "BatchQAScaffoldItemResult", "BatchQAScaffoldResult",
+    # P15新增：批量Self-Check节点模型
+    "BatchSelfCheckQACorpusResult", "BatchSelfCheckQAResult",
+    # P15新增：批量Eval节点模型
+    "BatchEvalCorpusResult", "BatchEvalResult",
     "ApprovalStatusEnum", "ApprovalFeedback", "NodeApprovalResult", "QAApprovalResult",
     "MentorGuidance", "QAMentorScaffoldResult",
     "EntityCandidate", "EntityAlignmentItem", "EntityAlignmentResult",
@@ -233,6 +268,12 @@ __all__ = [
     "SELF_CHECK_EVAL_PROMPT", "SELF_CHECK_LABEL_PROMPT",
     "SELF_CHECK_FILTER_PROMPT", "SELF_CHECK_NORMALIZE_PROMPT",
     "BATCH_JOINT_PROMPT", "BATCH_SELF_CHECK_PROMPT",
+    # P15新增：批量预处理提示词
+    "BATCH_FILTER_PROMPT", "BATCH_NORMALIZE_PROMPT", "BATCH_QA_SCAFFOLD_PROMPT",
+    # P15新增：批量Self-Check提示词
+    "BATCH_SELF_CHECK_QA_PROMPT",
+    # P15新增：批量Eval提示词
+    "BATCH_EVAL_PROMPT",
     "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
     "ENTITY_ALIGNMENT_PROMPT",
 
@@ -251,6 +292,10 @@ __all__ = [
     "format_entities", "format_triples",
     "format_entity_hints", "format_relation_hints", "format_context_dependencies",
     "format_batch_corpus", "format_batch_results_for_check", "format_cross_corpus_aliases",
+    # P15新增：批量QA校验格式化函数
+    "format_batch_qa_results_for_check", "format_corpus_texts_for_check",
+    # P15新增：批量Eval格式化函数
+    "format_batch_triples_for_eval",
     "format_mentor_guidance", "format_feedbacks_for_revision", "format_feedback_summary", "format_joint_for_approval",
     "format_eval_for_approval", "format_label_for_approval", "format_revision_feedbacks", "format_reflection_for_approval",
     "format_alignment_candidates", "format_alignment_result_for_output",
@@ -272,6 +317,13 @@ __all__ = [
     "create_self_check_filter_node", "create_self_check_normalize_node",
     "create_batch_joint_extraction_node", "create_batch_self_check_node",
     "process_corpus_batch_with_llm",
+    # P15新增：批量预处理节点
+    "create_batch_filter_node", "create_batch_normalize_node", "create_batch_qa_scaffold_node",
+    "process_batch_preprocessing",
+    # P15新增：批量Self-Check节点
+    "create_batch_self_check_qa_node",
+    # P15新增：批量Eval节点
+    "create_batch_eval_node",
     "create_qa_mentor_node", "create_qa_approval_node", "create_revision_joint_node",
     "create_entity_alignment_node",
     # P13新增：优化版节点

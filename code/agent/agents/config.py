@@ -105,8 +105,8 @@ class ExtractionConfig:
     """是否使用联合抽取模式（默认True，一次推理同时抽取实体和关系）"""
 
     # ===== 二次检查配置（P9新增） =====
-    enable_full_self_check: bool = False
-    """是否启用所有节点二次检查（QA、Joint、Eval、Label）"""
+    enable_full_self_check: bool = True
+    """是否启用所有节点二次检查（QA、Joint、Eval、Label）- P15修改：默认启用"""
 
     enable_reflexion: bool = True
     """是否启用Reflexion反思机制（仅在联合抽取模式下有效）"""
@@ -245,7 +245,7 @@ class ExtractionConfig:
             qa_scaffold_min_text_length=get_int("QA_SCAFFOLD_MIN_TEXT_LENGTH", 20),
             # P9新增参数
             use_joint_extraction=get_bool("USE_JOINT_EXTRACTION", True),
-            enable_full_self_check=get_bool("ENABLE_FULL_SELF_CHECK", False),
+            enable_full_self_check=get_bool("ENABLE_FULL_SELF_CHECK", True),  # P15修改：默认启用
             enable_reflexion=get_bool("ENABLE_REFLEXION", True),
             reflexion_max_retries=get_int("REFLEXION_MAX_RETRIES", 3),
             # P9新增：Filter/Normalize二次检查（可选）
@@ -300,7 +300,7 @@ class ExtractionConfig:
             qa_scaffold_min_text_length=config_dict.get("qa_scaffold_min_text_length", 20),
             # P9新增参数
             use_joint_extraction=config_dict.get("use_joint_extraction", True),
-            enable_full_self_check=config_dict.get("enable_full_self_check", False),
+            enable_full_self_check=config_dict.get("enable_full_self_check", True),  # P15修改：默认启用
             enable_reflexion=config_dict.get("enable_reflexion", True),
             reflexion_max_retries=config_dict.get("reflexion_max_retries", 3),
             # P9新增：Filter/Normalize二次检查（可选）

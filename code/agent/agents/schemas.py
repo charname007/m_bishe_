@@ -60,6 +60,51 @@ class EntityTypeEnum(str, Enum):
     EVENT = "事件"  # 发生的事件
 
 
+# ===== 实体类型变体映射常量（P15修复：处理LLM输出英文成员名） =====
+
+ENTITY_TYPE_VARIANT_MAPPING: Dict[str, str] = {
+    # 英文成员名 -> 中文标准值（LLM可能输出英文）
+    "ROAD": "道路",
+    "POI": "POI",
+    "BUILDING": "建筑物",
+    "BLOCK": "街区",
+    "FUNCTION": "功能",
+    "EVENT": "事件",
+    # 中文标准值自映射
+    "道路": "道路",
+    "建筑物": "建筑物",
+    "街区": "街区",
+    "功能": "功能",
+    "事件": "事件",
+}
+
+
+def normalize_entity_type(v: Any) -> EntityTypeEnum:
+    """
+    将实体类型变体映射到标准枚举值（P15修复）
+
+    Args:
+        v: 输入的实体类型（可以是枚举值、英文成员名或中文值）
+
+    Returns:
+        EntityTypeEnum: 标准化的实体类型枚举
+
+    Raises:
+        ValueError: 输入为空或无法映射到有效实体类型
+    """
+    if v is None:
+        raise ValueError("type 不能为空")
+    if isinstance(v, EntityTypeEnum):
+        return v
+    normalized = ENTITY_TYPE_VARIANT_MAPPING.get(str(v))
+    if normalized:
+        return EntityTypeEnum(normalized)
+    raise ValueError(
+        f"无效的实体类型: {v}，有效值为6种预定义实体类型："
+        f"道路/POI/建筑物/街区/功能/事件"
+    )
+
+
 # ===== 关系类型变体映射常量（提取为模块级常量，消除重复） =====
 
 RELATION_VARIANT_MAPPING: Dict[str, str] = {
@@ -1239,6 +1284,12 @@ class JointEntity(BaseModel):
         default=None, description="事件实体属性（仅当type=事件时有效）"
     )
 
+    @field_validator("type", mode="before")
+    @classmethod
+    def normalize_type(cls, v):
+        """将实体类型变体映射到标准枚举值（P15修复：处理英文成员名）"""
+        return normalize_entity_type(v)
+
 
 class JointTriple(BaseModel):
     """联合抽取的单个三元组（v3.2精简版：8个关系，强类型属性）"""
@@ -1522,6 +1573,106 @@ class SelfCheckNormalizeResult(BaseModel):
 # ===== P10新增：批量LLM调用模型 =====
 
 
+# ===== P15新增：批量前置节点模型 =====
+# 注意：批量处理需要 corpus_id 字段来关联结果，但原始单条 schema 没有 corpus_id
+# 所以需要创建专门的批量处理 item schema
+
+
+class BatchFilterItemResult(BaseModel):
+    """批量筛选单条结果 - 包含 corpus_id 以关联原语料"""
+
+    corpus_id: str = Field(description="语料ID")
+    is_valid: bool = Field(default=True, description="是否包含有价值的地理信息")
+    skip_reason: Optional[str] = Field(default=None, description="跳过原因")
+    confidence: str = Field(default="medium", description="判断置信度")
+    has_geo_entity: bool = Field(default=False, description="是否提及地理实体")
+    has_spatial_relation: bool = Field(default=False, description="是否涉及空间关系")
+    geo_entity_hint: Optional[str] = Field(default=None, description="地理实体提示")
+    is_non_wuhan_region: bool = Field(default=False, description="是否非武汉地区")
+    region_hint: Optional[str] = Field(default=None, description="地区提示")
+
+
+class BatchNormalizeItemResult(BaseModel):
+    """批量归一化单条结果 - 包含 corpus_id"""
+
+    corpus_id: str = Field(description="语料ID")
+    normalized_text: str = Field(description="归一化后的文本")
+    aliases: Dict[str, str] = Field(
+        default_factory=dict, description="别名映射: {'简称': '全称'}"
+    )
+    confidence: str = Field(default="medium", description="置信度")
+
+
+class BatchQAScaffoldItemResult(BaseModel):
+    """批量QA脚手架单条结果 - 包含 corpus_id"""
+
+    corpus_id: str = Field(description="语料ID")
+    qa_pairs: List[QAPair] = Field(default_factory=list, description="5W1H问答对")
+    entity_hints: List[str] = Field(default_factory=list, description="实体提示")
+    relation_hints: List[str] = Field(default_factory=list, description="关系提示")
+    context_dependencies: List[str] = Field(
+        default_factory=list, description="上下文依赖"
+    )
+    overall_confidence: str = Field(default="medium", description="置信度")
+
+
+class BatchFilterResult(BaseModel):
+    """批量筛选结果 - 一次LLM调用处理多条语料的筛选判断"""
+
+    results: List[BatchFilterItemResult] = Field(
+        default_factory=list, description="每条语料的筛选结果列表"
+    )
+    overall_confidence: str = Field(
+        default="medium", description="整体置信度: high/medium/low"
+    )
+    batch_size: int = Field(default=0, description="处理的语料数量")
+
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def compute_batch_size(cls, v, info):
+        if "results" in info.data:
+            return len(info.data["results"])
+        return v or 0
+
+
+class BatchNormalizeResult(BaseModel):
+    """批量归一化结果 - 一次LLM调用处理多条语料的归一化"""
+
+    results: List[BatchNormalizeItemResult] = Field(
+        default_factory=list, description="每条语料的归一化结果列表"
+    )
+    overall_confidence: str = Field(
+        default="medium", description="整体置信度: high/medium/low"
+    )
+    batch_size: int = Field(default=0, description="处理的语料数量")
+
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def compute_batch_size(cls, v, info):
+        if "results" in info.data:
+            return len(info.data["results"])
+        return v or 0
+
+
+class BatchQAScaffoldResult(BaseModel):
+    """批量QA脚手架结果 - 一次LLM调用处理多条语料的QA脚手架构建"""
+
+    results: List[BatchQAScaffoldItemResult] = Field(
+        default_factory=list, description="每条语料的QA脚手架结果列表"
+    )
+    overall_confidence: str = Field(
+        default="medium", description="整体置信度: high/medium/low"
+    )
+    batch_size: int = Field(default=0, description="处理的语料数量")
+
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def compute_batch_size(cls, v, info):
+        if "results" in info.data:
+            return len(info.data["results"])
+        return v or 0
+
+
 # P15修复：批量抽取使用JointEntity作为实体输出结构
 class BatchCorpusResult(BaseModel):
     """单条语料的批量抽取结果（P15修复：使用JointEntity强类型）"""
@@ -1605,6 +1756,97 @@ class BatchSelfCheckResult(BaseModel):
     fallback_to_single: bool = Field(
         default=False, description="是否建议退化为单条处理"
     )
+
+
+# ===== P15新增：批量Self-Check节点Schema =====
+
+
+class BatchSelfCheckQACorpusResult(BaseModel):
+    """单条语料的QA校验结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    verified_qa_pairs: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验通过的QA问答对"
+    )
+    rejected_qa_pairs: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验失败的QA问答对"
+    )
+    entity_coverage: str = Field(
+        default="medium", description="实体覆盖度: high/medium/low"
+    )
+    relation_coverage: str = Field(
+        default="medium", description="关系覆盖度: high/medium/low"
+    )
+    confidence: str = Field(default="medium", description="校验置信度")
+
+
+class BatchSelfCheckQAResult(BaseModel):
+    """批量QA脚手架校验结果"""
+
+    verified_results: List[BatchSelfCheckQACorpusResult] = Field(
+        default_factory=list, description="校验通过的语料QA结果"
+    )
+    rejected_results: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验失败的语料（QA质量过低）"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新批量生成QA")
+    retry_reason: str = Field(default="", description="重试原因")
+
+
+# ===== P15新增：批量Eval节点Schema =====
+
+
+class BatchEvalCorpusResult(BaseModel):
+    """单条语料的评估结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    scores: List[Dict[str, Any]] = Field(
+        default_factory=list, description="三元组评分列表"
+    )
+    eval_passed: bool = Field(default=True, description="评估是否通过")
+    corrected_triples: List[Dict[str, Any]] = Field(
+        default_factory=list, description="修正后的三元组"
+    )
+    confidence: str = Field(default="medium", description="评估置信度")
+
+
+class BatchEvalResult(BaseModel):
+    """批量评估结果"""
+
+    batch_eval_results: List[BatchEvalCorpusResult] = Field(
+        default_factory=list, description="批量评估结果"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
+
+
+# ===== P15新增：批量Self-Check-Eval节点Schema =====
+
+
+class BatchSelfCheckEvalCorpusResult(BaseModel):
+    """单条语料的评估校验结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    verified_triples: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验通过的三元组"
+    )
+    score_consistency: str = Field(
+        default="medium", description="评分一致性: high/medium/low"
+    )
+    confidence: str = Field(default="medium", description="校验置信度")
+
+
+class BatchSelfCheckEvalResult(BaseModel):
+    """批量评估结果校验"""
+
+    verified_results: List[BatchSelfCheckEvalCorpusResult] = Field(
+        default_factory=list, description="校验通过的语料评估结果"
+    )
+    rejected_results: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验失败的语料"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新评估")
 
 
 # ===== QA导师架构模型（P10新增） =====

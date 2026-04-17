@@ -1,6 +1,7 @@
 """
 PostgreSQL 关系数据库客户端
 """
+
 import json
 import psycopg2
 from psycopg2.extras import execute_values
@@ -12,14 +13,13 @@ from loguru import logger
 class PostgresClient:
     """PostgreSQL客户端"""
 
-    def __init__(self, host: str, port: int, database: str,
-                 user: str, password: str):
+    def __init__(self, host: str, port: int, database: str, user: str, password: str):
         self.conn_params = {
             "host": host,
             "port": port,
             "database": database,
             "user": user,
-            "password": password
+            "password": password,
         }
         self.conn = None
         self.connect()
@@ -110,9 +110,15 @@ class PostgresClient:
             """)
 
             # 创建索引
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_batch ON entities(batch_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_triples_batch ON triples(batch_id)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_batch ON entities(batch_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_triples_batch ON triples(batch_id)"
+            )
 
             # 添加新列（如果不存在）- 兼容旧表结构
             # triples 表新增 relation_type 和 relation_subtype 列
@@ -123,10 +129,12 @@ class PostgresClient:
                 AND column_name IN ('relation_type', 'relation_subtype')
             """)
             existing_columns = [row[0] for row in cur.fetchall()]
-            if 'relation_type' not in existing_columns:
+            if "relation_type" not in existing_columns:
                 cur.execute("ALTER TABLE triples ADD COLUMN relation_type VARCHAR(50)")
-            if 'relation_subtype' not in existing_columns:
-                cur.execute("ALTER TABLE triples ADD COLUMN relation_subtype VARCHAR(50)")
+            if "relation_subtype" not in existing_columns:
+                cur.execute(
+                    "ALTER TABLE triples ADD COLUMN relation_subtype VARCHAR(50)"
+                )
 
             # extraction_batches 表新增 neo4j_sync 和 error_message 列
             cur.execute("""
@@ -136,10 +144,14 @@ class PostgresClient:
                 AND column_name IN ('neo4j_sync', 'error_message')
             """)
             batch_columns = [row[0] for row in cur.fetchall()]
-            if 'neo4j_sync' not in batch_columns:
-                cur.execute("ALTER TABLE extraction_batches ADD COLUMN neo4j_sync BOOLEAN DEFAULT FALSE")
-            if 'error_message' not in batch_columns:
-                cur.execute("ALTER TABLE extraction_batches ADD COLUMN error_message TEXT")
+            if "neo4j_sync" not in batch_columns:
+                cur.execute(
+                    "ALTER TABLE extraction_batches ADD COLUMN neo4j_sync BOOLEAN DEFAULT FALSE"
+                )
+            if "error_message" not in batch_columns:
+                cur.execute(
+                    "ALTER TABLE extraction_batches ADD COLUMN error_message TEXT"
+                )
 
             # entities 表新增 attrs 列
             cur.execute("""
@@ -162,61 +174,81 @@ class PostgresClient:
                 cur.execute("ALTER TABLE triples ADD COLUMN relation_attrs JSONB")
 
             # 创建 JSONB 索引（用于属性查询优化）
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_attrs ON entities USING GIN (attrs)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_triples_relation_attrs ON triples USING GIN (relation_attrs)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_attrs ON entities USING GIN (attrs)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_triples_relation_attrs ON triples USING GIN (relation_attrs)"
+            )
 
             self.conn.commit()
             logger.debug("PostgreSQL表结构创建完成")
 
-    def insert_batch(self, batch_id: str, corpus_count: int,
-                     worker_count: int) -> bool:
+    def insert_batch(self, batch_id: str, corpus_count: int, worker_count: int) -> bool:
         """插入批次记录"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO extraction_batches (batch_id, corpus_count, worker_count, status)
                 VALUES (%s, %s, %s, %s)
-            """, (batch_id, corpus_count, worker_count, "processing"))
+            """,
+                (batch_id, corpus_count, worker_count, "processing"),
+            )
             self.conn.commit()
             return True
 
     def update_batch_status(self, batch_id: str, status: str):
         """更新批次状态"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE extraction_batches
                 SET status = %s, completed_at = %s
                 WHERE batch_id = %s
-            """, (status, datetime.now(), batch_id))
+            """,
+                (status, datetime.now(), batch_id),
+            )
             self.conn.commit()
 
-    def update_batch_status_with_error(self, batch_id: str, status: str, error_message: str = None):
+    def update_batch_status_with_error(
+        self, batch_id: str, status: str, error_message: str = None
+    ):
         """更新批次状态并记录错误信息"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE extraction_batches
                 SET status = %s, completed_at = %s, error_message = %s
                 WHERE batch_id = %s
-            """, (status, datetime.now(), error_message, batch_id))
+            """,
+                (status, datetime.now(), error_message, batch_id),
+            )
             self.conn.commit()
 
     def update_neo4j_sync_status(self, batch_id: str, synced: bool):
         """更新 Neo4j 同步状态"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE extraction_batches
                 SET neo4j_sync = %s
                 WHERE batch_id = %s
-            """, (synced, batch_id))
+            """,
+                (synced, batch_id),
+            )
             self.conn.commit()
 
     def get_batch_status(self, batch_id: str) -> Optional[Dict]:
         """获取批次状态详情"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT status, neo4j_sync, error_message, created_at, completed_at
                 FROM extraction_batches
                 WHERE batch_id = %s
-            """, (batch_id,))
+            """,
+                (batch_id,),
+            )
             row = cur.fetchone()
             if row:
                 return {
@@ -224,7 +256,7 @@ class PostgresClient:
                     "neo4j_sync": row[1],
                     "error_message": row[2],
                     "created_at": row[3],
-                    "completed_at": row[4]
+                    "completed_at": row[4],
                 }
             return None
 
@@ -243,16 +275,22 @@ class PostgresClient:
                     e.get("aliases", []),
                     e.get("occurrence_count", 1),
                     e.get("corpus_ids", []),
-                    json.dumps(e.get("attrs", {}), ensure_ascii=False)  # 新增 attrs 字段
+                    json.dumps(
+                        e.get("attrs", {}), ensure_ascii=False
+                    ),  # 新增 attrs 字段
                 )
                 for e in entities
             ]
 
-            execute_values(cur, """
+            execute_values(
+                cur,
+                """
                 INSERT INTO entities
                 (batch_id, name, type, category, aliases, occurrence_count, corpus_ids, attrs)
                 VALUES %s
-            """, data)
+            """,
+                data,
+            )
 
             self.conn.commit()
             logger.info(f"插入 {len(entities)} 个实体")
@@ -278,29 +316,35 @@ class PostgresClient:
                     t.get("relation_type", ""),
                     t.get("relation_subtype", ""),
                     t.get("corpus_ids", []),
-                    json.dumps(t.get("relation_attrs", {}), ensure_ascii=False)  # 新增 relation_attrs 字段
+                    json.dumps(
+                        t.get("relation_attrs", {}), ensure_ascii=False
+                    ),  # 新增 relation_attrs 字段
                 )
                 for t in triples
             ]
 
-            execute_values(cur, """
+            execute_values(
+                cur,
+                """
                 INSERT INTO triples
                 (batch_id, head_entity, relation, tail_entity, evidence,
                  sem_score, fac_score, con_score, passed_eval, relation_type, relation_subtype, corpus_ids, relation_attrs)
                 VALUES %s
-            """, data)
+            """,
+                data,
+            )
 
             self.conn.commit()
             logger.info(f"插入 {len(triples)} 个三元组")
             return len(triples)
 
-    def insert_corpus_sources(self, batch_id: str,
-                              corpus_states: List[Any]) -> int:
+    def insert_corpus_sources(self, batch_id: str, corpus_states: List[Any]) -> int:
         """插入语料来源"""
         with self.conn.cursor() as cur:
             for state in corpus_states:
                 # 使用 .get() 防止 KeyError，兼容失败语料
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO corpus_sources
                     (corpus_id, batch_id, raw_text, entities, triples)
                     VALUES (%s, %s, %s, %s, %s)
@@ -309,13 +353,15 @@ class PostgresClient:
                         raw_text = EXCLUDED.raw_text,
                         entities = EXCLUDED.entities,
                         triples = EXCLUDED.triples
-                """, (
-                    state.get("corpus_id", "unknown"),
-                    batch_id,
-                    state.get("raw_text", ""),
-                    json.dumps(state.get("entities", {}), ensure_ascii=False),
-                    json.dumps(state.get("triples", []), ensure_ascii=False)
-                ))
+                """,
+                    (
+                        state.get("corpus_id", "unknown"),
+                        batch_id,
+                        state.get("raw_text", ""),
+                        json.dumps(state.get("entities", {}), ensure_ascii=False),
+                        json.dumps(state.get("triples", []), ensure_ascii=False),
+                    ),
+                )
 
             self.conn.commit()
             return len(corpus_states)
@@ -323,18 +369,21 @@ class PostgresClient:
     def query_entities(self, batch_id: str) -> List[Dict]:
         """查询批次实体"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT name, type, category, aliases, occurrence_count
                 FROM entities
                 WHERE batch_id = %s
-            """, (batch_id,))
+            """,
+                (batch_id,),
+            )
             return [
                 {
                     "name": row[0],
                     "type": row[1],
                     "category": row[2],
                     "aliases": row[3],
-                    "occurrence_count": row[4]
+                    "occurrence_count": row[4],
                 }
                 for row in cur.fetchall()
             ]
@@ -342,18 +391,21 @@ class PostgresClient:
     def query_triples(self, batch_id: str) -> List[Dict]:
         """查询批次三元组"""
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT head_entity, relation, tail_entity, evidence, passed_eval
                 FROM triples
                 WHERE batch_id = %s
-            """, (batch_id,))
+            """,
+                (batch_id,),
+            )
             return [
                 {
                     "head": row[0],
                     "relation": row[1],
                     "tail": row[2],
                     "evidence": row[3],
-                    "passed_eval": row[4]
+                    "passed_eval": row[4],
                 }
                 for row in cur.fetchall()
             ]
@@ -361,16 +413,15 @@ class PostgresClient:
     def get_stats(self, batch_id: str) -> Dict:
         """获取批次统计"""
         with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM entities WHERE batch_id = %s", (batch_id,))
+            cur.execute(
+                "SELECT COUNT(*) FROM entities WHERE batch_id = %s", (batch_id,)
+            )
             entity_count = cur.fetchone()[0]
 
             cur.execute("SELECT COUNT(*) FROM triples WHERE batch_id = %s", (batch_id,))
             triple_count = cur.fetchone()[0]
 
-            return {
-                "entity_count": entity_count,
-                "triple_count": triple_count
-            }
+            return {"entity_count": entity_count, "triple_count": triple_count}
 
     def fetch_corpus_for_extraction(
         self,
@@ -379,7 +430,7 @@ class PostgresClient:
         id_column: str = "note_id",
         limit: int = 100,
         offset: int = 0,
-        where_clause: Optional[str] = None
+        where_clause: Optional[str] = None,
     ) -> List[Dict]:
         """
         分页读取语料用于知识图谱抽取
@@ -414,7 +465,7 @@ class PostgresClient:
         self,
         table_name: str = "xiaohongshu_notes",
         text_column: str = "desc_cleaned",
-        where_clause: Optional[str] = None
+        where_clause: Optional[str] = None,
     ) -> int:
         """
         统计待处理语料总数
@@ -436,7 +487,9 @@ class PostgresClient:
 
     # ===== P12新增：实体对齐相关方法 =====
 
-    def insert_new_geo_entity(self, entity: Dict, embedding: List[float] = None) -> Optional[str]:
+    def insert_new_geo_entity(
+        self, entity: Dict, embedding: List[float] = None
+    ) -> Optional[str]:
         """
         将新实体插入 geo_entity_names 表（来自小红书抽取）
 
@@ -464,15 +517,18 @@ class PostgresClient:
                 type_ = entity.get("type", "poi")
                 # P15修复：确保 type_ 是纯字符串，避免格式化问题
                 type_ = str(type_) if type_ else "poi"
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT entity_id FROM geo_entity_names
                     WHERE type = %s
                     ORDER BY entity_id DESC
                     LIMIT 1
-                """, (type_,))
+                """,
+                    (type_,),
+                )
                 row = cur.fetchone()
                 if row and row[0]:
-                    match = re.search(r'(\d+)$', row[0])
+                    match = re.search(r"(\d+)$", row[0])
                     max_num = int(match.group(1)) if match else 0
                 else:
                     max_num = 0
@@ -484,34 +540,42 @@ class PostgresClient:
             # P15修复：确保所有参数都是纯字符串，避免格式化问题
             # P15修复：移除 aliases 和 source 列（表结构中不存在）
             entity_name = str(entity["name"]) if entity.get("name") else ""
-            entity_type_str = str(entity.get("type", "poi")) if entity.get("type") else "poi"
-            cur.execute("""
+            entity_type_str = (
+                str(entity.get("type", "poi")) if entity.get("type") else "poi"
+            )
+            cur.execute(
+                """
                 INSERT INTO geo_entity_names
                 (entity_id, name, type, longitude, latitude, embedding)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (entity_id) DO NOTHING
                 RETURNING entity_id
-            """, (
-                entity_id,
-                entity_name,
-                entity_type_str,
-                entity.get("longitude"),
-                entity.get("latitude"),
-                embedding,  # embedding向量
-            ))
+            """,
+                (
+                    entity_id,
+                    entity_name,
+                    entity_type_str,
+                    entity.get("longitude"),
+                    entity.get("latitude"),
+                    embedding,  # embedding向量
+                ),
+            )
 
             row = cur.fetchone()
             if row and row[0]:
                 self.conn.commit()
-                logger.info(f"[Postgres] 创建新geo_entity: {entity_id} - {entity['name']}")
+                logger.info(
+                    f"[Postgres] 创建新geo_entity: {entity_id} - {entity['name']}"
+                )
                 return row[0]
             else:
                 # entity_id 已存在，尝试生成新的
                 self.conn.rollback()
                 return None
 
-    def batch_insert_new_geo_entities(self, entities: List[Dict],
-                                        embeddings: List[List[float]] = None) -> Dict:
+    def batch_insert_new_geo_entities(
+        self, entities: List[Dict], embeddings: List[List[float]] = None
+    ) -> Dict:
         """
         批量插入新实体到 geo_entity_names
 
@@ -536,3 +600,149 @@ class PostgresClient:
                 logger.error(f"插入实体失败 {entity['name']}: {e}")
 
         return {"created": len(created_ids), "entity_ids": created_ids}
+
+    # ===== 社交媒体语料批处理相关方法 =====
+
+    def ensure_corpus_status_columns(self, table_name: str):
+        """确保语料表有状态追踪字段"""
+        with self.conn.cursor() as cur:
+            # 检查并添加 status 列
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = CURRENT_SCHEMA()
+                AND column_name = 'status'
+            """,
+                (table_name,),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"
+                )
+
+            # 检查并添加 batch_id 列
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = CURRENT_SCHEMA()
+                AND column_name = 'batch_id'
+            """,
+                (table_name,),
+            )
+            if not cur.fetchone():
+                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN batch_id VARCHAR(50)")
+
+            # 检查并添加 error_message 列
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = CURRENT_SCHEMA()
+                AND column_name = 'error_message'
+            """,
+                (table_name,),
+            )
+            if not cur.fetchone():
+                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN error_message TEXT")
+
+            # 检查并添加 processed_at 列
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = CURRENT_SCHEMA()
+                AND column_name = 'processed_at'
+            """,
+                (table_name,),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN processed_at TIMESTAMP"
+                )
+
+            self.conn.commit()
+            logger.info(f"[Postgres] 已确保表 {table_name} 的状态字段")
+
+    def get_corpus_status_stats(self, table_name: str) -> Dict:
+        """获取语料状态统计"""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT status, COUNT(*) as count
+                FROM {table_name}
+                GROUP BY status
+            """)
+            stats = {row[0]: row[1] for row in cur.fetchall()}
+            # 确保所有状态都有
+            for status in ["pending", "processing", "completed", "error"]:
+                if status not in stats:
+                    stats[status] = 0
+            return stats
+
+    def get_pending_corpus(
+        self,
+        table_name: str,
+        text_column: str,
+        id_column: str,
+        time_column: str,
+        limit: int,
+    ) -> List[Dict]:
+        """获取待处理的语料"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {id_column}, {text_column}, {time_column}
+                FROM {table_name}
+                WHERE status = 'pending' OR status IS NULL
+                ORDER BY {time_column} DESC NULLS LAST
+                LIMIT %s
+            """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                {"id": row[0], "text": row[1] or "", "time": row[2]}
+                for row in rows
+                if row[1] and len(str(row[1]).strip()) > 0
+            ]
+
+    def update_corpus_status(
+        self, table_name: str, corpus_ids: List[str], status: str, batch_id: str = None
+    ):
+        """更新语料状态"""
+        if not corpus_ids:
+            return
+        with self.conn.cursor() as cur:
+            id_column = self._get_id_column(table_name)
+            cur.execute(
+                f"""
+                UPDATE {table_name}
+                SET status = %s, batch_id = %s, processed_at = %s
+                WHERE {id_column} = ANY(%s)
+            """,
+                (status, batch_id, datetime.now(), corpus_ids),
+            )
+            self.conn.commit()
+
+    def mark_corpus_error(
+        self, table_name: str, corpus_id: str, error_message: str, batch_id: str = None
+    ):
+        """标记语料处理错误"""
+        with self.conn.cursor() as cur:
+            id_column = self._get_id_column(table_name)
+            cur.execute(
+                f"""
+                UPDATE {table_name}
+                SET status = 'error', batch_id = %s, error_message = %s, processed_at = %s
+                WHERE {id_column} = %s
+            """,
+                (batch_id, error_message, datetime.now(), corpus_id),
+            )
+            self.conn.commit()
+
+    def _get_id_column(self, table_name: str) -> str:
+        """获取表的主键列名"""
+        # 常见表的主键映射
+        id_columns = {
+            "social_media_notes_sampled": "note_id",
+            "xiaohongshu_notes": "note_id",
+            "weibo_posts": "post_id",
+        }
+        return id_columns.get(table_name, "id")

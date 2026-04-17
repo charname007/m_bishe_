@@ -1,0 +1,3 @@
+Shape: (2, 768)
+First embedding sample: [-0.4577247  -0.15946464  0.79840356  0.16288866  0.02383964]
+All texts encoded successfully!

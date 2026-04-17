@@ -2081,6 +2081,162 @@ BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+# ===== P15新增：批量Self-Check-QA提示词 =====
+
+BATCH_SELF_CHECK_QA_SYSTEM = """你是一位"批量QA脚手架校验专家"，负责同时校验多条语料的QA Scaffold结果。
+你的任务是：
+1. 校验每条语料的QA问答质量
+2. 检查实体/关系覆盖度
+3. 决定哪些语料需要重新生成QA
+"""
+
+BATCH_SELF_CHECK_QA_USER = """## 校验任务
+
+请校验以下批量QA脚手架结果：
+
+### 1. QA质量评估（每条语料）
+- **问答一致性**：问答内容是否与原文一致？
+- **维度完整性**：5W1H维度是否覆盖关键信息？
+- **实体覆盖度**：QA是否识别了所有关键地理实体？
+
+### 2. 整体质量评估
+- 如果多数语料QA质量低，建议重新批量生成QA
+- 如果只有少数语料有问题，将其标记为rejected
+
+---
+
+## 待校验QA结果
+
+{batch_qa_results}
+
+## 原始文本
+
+{corpus_texts}
+
+---
+
+## 输出要求
+
+请输出：
+1. `verified_results`: 校验通过的语料QA结果（包含corpus_id, verified_qa_pairs, entity_coverage, relation_coverage, confidence）
+2. `rejected_results`: 校验失败的语料（包含corpus_id, reason）
+3. `overall_confidence`: 批量整体置信度
+4. `retry_suggested`: 是否建议重新批量生成QA
+
+输出JSON格式。
+"""
+
+BATCH_SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_SELF_CHECK_QA_SYSTEM),
+        ("human", BATCH_SELF_CHECK_QA_USER),
+    ]
+)
+
+
+# ===== P15新增：批量Eval提示词 =====
+
+BATCH_EVAL_SYSTEM = """你是一位"批量三元组评估专家"，负责同时评估多条语料的三元组质量。
+你的任务是：
+1. 对每条语料的三元组进行评分（SEM语义、FAC事实、CON置信度）
+2. 判断三元组是否需要修正
+3. 决定每条语料的评估是否通过
+"""
+
+BATCH_EVAL_USER = """## 评估任务
+
+请评估以下批量三元组：
+
+### 评分标准（每条语料）
+- **SEM（语义合理性）**: 1-5分，三元组语义是否合理
+- **FAC（事实准确性）**: 1-5分，是否有原文依据
+- **CON（置信度）**: 1-5分，整体抽取置信度
+
+### 通过阈值
+- 平均分≥3.5: 通过
+- 平均分<3.5: 需修正或不通过
+
+---
+
+## 待评估三元组
+
+{batch_triples}
+
+## 原始文本
+
+{corpus_texts}
+
+---
+
+## 输出要求
+
+请输出：
+1. `batch_eval_results`: 每条语料的评估结果（包含corpus_id, scores, eval_passed, corrected_triples, confidence）
+2. `overall_confidence`: 批量整体置信度
+
+输出JSON格式。
+"""
+
+BATCH_EVAL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_EVAL_SYSTEM),
+        ("human", BATCH_EVAL_USER),
+    ]
+)
+
+
+# ===== P15新增：批量Self-Check-Eval提示词 =====
+
+BATCH_SELF_CHECK_EVAL_SYSTEM = """你是一位"批量评估结果校验专家"，负责同时校验多条语料的评估结果。
+你的任务是：
+1. 验证评分合理性
+2. 检查三元组是否应该通过评估
+3. 决定哪些语料需要重新评估
+"""
+
+BATCH_SELF_CHECK_EVAL_USER = """## 校验任务
+
+请校验以下批量评估结果：
+
+### 1. 评分一致性检查（每条语料）
+- 评分是否与三元组质量匹配？
+- 是否存在评分过高（幻觉三元组得高分）或过低（正确三元组得低分）？
+
+### 2. 通过判定验证
+- eval_passed=true的三元组是否真的应该通过？
+- eval_passed=false的三元组是否有修正机会？
+
+---
+
+## 待校验评估结果
+
+{batch_eval_results}
+
+## 原始文本
+
+{corpus_texts}
+
+---
+
+## 输出要求
+
+请输出：
+1. `verified_results`: 校验通过的语料评估结果（包含corpus_id, verified_triples, score_consistency, confidence）
+2. `rejected_results`: 校验失败的语料（包含corpus_id, reason）
+3. `overall_confidence`: 批量整体置信度
+4. `retry_suggested`: 是否建议重新评估
+
+输出JSON格式。
+"""
+
+BATCH_SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_SELF_CHECK_EVAL_SYSTEM),
+        ("human", BATCH_SELF_CHECK_EVAL_USER),
+    ]
+)
+
+
 # ===== 批量处理辅助函数 =====
 
 
@@ -2131,6 +2287,72 @@ def format_cross_corpus_aliases(aliases: List[Dict]) -> str:
         canonical = a.get("canonical", "")
         corpus_ids = a.get("corpus_ids", [])
         lines.append(f"- '{raw}' → '{canonical}' (来源: {', '.join(corpus_ids[:3])})")
+    return "\n".join(lines)
+
+
+def format_batch_qa_results_for_check(batch_qa_results: Dict, corpus_texts: Dict) -> str:
+    """格式化批量QA结果用于校验（P15新增）"""
+    if not batch_qa_results:
+        return "(无QA结果)"
+    lines = []
+    for corpus_id, qa_data in batch_qa_results.items():
+        qa_pairs = qa_data.get("qa_pairs", [])
+        entity_hints = qa_data.get("entity_hints", [])
+        relation_hints = qa_data.get("relation_hints", [])
+        confidence = qa_data.get("confidence", "medium")
+
+        # 格式化QA问答对
+        qa_str = ""
+        if qa_pairs:
+            qa_str = ", ".join([f"Q:{q.get('question','')} A:{q.get('answer','')}" for q in qa_pairs[:3]])
+
+        # 格式化实体提示
+        entity_str = ""
+        if entity_hints:
+            entity_str = ", ".join([e.get("name", "") for e in entity_hints[:3]])
+
+        lines.append(
+            f"- [{corpus_id}] 置信度:{confidence}\n"
+            f"  QA问答: {qa_str}\n"
+            f"  实体提示: {entity_str}\n"
+            f"  关系提示数: {len(relation_hints)}"
+        )
+    return "\n".join(lines)
+
+
+def format_corpus_texts_for_check(corpus_texts: Dict) -> str:
+    """格式化语料文本用于校验（P15新增）"""
+    if not corpus_texts:
+        return "(无文本)"
+    lines = []
+    for corpus_id, text in corpus_texts.items():
+        # 截断长文本
+        text_preview = text[:200] if len(text) > 200 else text
+        lines.append(f"- [{corpus_id}] {text_preview}")
+    return "\n".join(lines)
+
+
+def format_batch_triples_for_eval(batch_extraction_results: Dict) -> str:
+    """格式化批量三元组用于评估（P15新增）"""
+    if not batch_extraction_results:
+        return "(无三元组)"
+    lines = []
+    for corpus_id, data in batch_extraction_results.items():
+        triples = data.get("triples", [])
+        confidence = data.get("confidence", "medium")
+
+        if triples:
+            triple_str = ", ".join(
+                [
+                    f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
+                    for t in triples
+                ]
+            )
+            lines.append(
+                f"- [{corpus_id}] 置信度:{confidence}\n  三元组: {triple_str}"
+            )
+        else:
+            lines.append(f"- [{corpus_id}] 无三元组")
     return "\n".join(lines)
 
 

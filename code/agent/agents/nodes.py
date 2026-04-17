@@ -6,6 +6,7 @@ P3改进：支持 StreamWriter 流式输出
 P5改进：添加 Filter 筛选节点
 P6改进：添加 Normalize 归一化节点，NER/RE/Eval 节点优先使用归一化文本
 """
+
 import asyncio
 import json
 import math
@@ -20,11 +21,20 @@ from langgraph.types import StreamWriter
 
 from loguru import logger
 
-from .state import CorpusState, KGState, PhaseEnum, StepEnum, DEFAULT_MAX_RETRIES, RELATION_TYPES, DEFAULT_ENTITY_DICT
+from .state import (
+    CorpusState,
+    KGState,
+    PhaseEnum,
+    StepEnum,
+    DEFAULT_MAX_RETRIES,
+    RELATION_TYPES,
+    DEFAULT_ENTITY_DICT,
+)
 from .config import ExtractionConfig
 
 
 # ===== P15新增：枚举值提取工具函数 =====
+
 
 def extract_enum_value(enum_or_value: Any) -> Any:
     """
@@ -43,7 +53,7 @@ def extract_enum_value(enum_or_value: Any) -> Any:
         >>> extract_enum_value('位于')
         '位于'
     """
-    if hasattr(enum_or_value, 'value'):
+    if hasattr(enum_or_value, "value"):
         return enum_or_value.value
     return enum_or_value
 
@@ -78,8 +88,13 @@ from .schemas import (
     SelfCheckNERResult,
     SelfCheckREResult,
     # P9新增：联合抽取和所有Self-Check模型
-    JointEntity, JointTriple, JointExtractionResult,
-    SelfCheckJointResult, SelfCheckQAResult, SelfCheckEvalResult, SelfCheckLabelResult,
+    JointEntity,
+    JointTriple,
+    JointExtractionResult,
+    SelfCheckJointResult,
+    SelfCheckQAResult,
+    SelfCheckEvalResult,
+    SelfCheckLabelResult,
     # P12新增：Self-Check增强版模型
     SelfCheckJointResultV2,
     # v3.4新增：关系属性映射常量
@@ -89,35 +104,67 @@ from .prompts import (
     FILTER_PROMPT,  # P5新增
     NORMALIZE_PROMPT,  # P6新增
     QA_SCAFFOLD_PROMPT,  # P8新增
-    NER_PROMPT, RE_PROMPT, EVAL_PROMPT_1, EVAL_PROMPT_2,
-    EVAL_PROMPT_SIMPLIFIED, LABEL_PROMPT,
-    SELF_CHECK_NER_PROMPT, SELF_CHECK_RE_PROMPT,
-    format_entities, format_triples, format_verified_entities, format_retry_hint,
-    format_entity_hints, format_relation_hints, format_context_dependencies,  # P8新增
+    NER_PROMPT,
+    RE_PROMPT,
+    EVAL_PROMPT_1,
+    EVAL_PROMPT_2,
+    EVAL_PROMPT_SIMPLIFIED,
+    LABEL_PROMPT,
+    SELF_CHECK_NER_PROMPT,
+    SELF_CHECK_RE_PROMPT,
+    format_entities,
+    format_triples,
+    format_verified_entities,
+    format_retry_hint,
+    format_entity_hints,
+    format_relation_hints,
+    format_context_dependencies,  # P8新增
     # P9新增：联合抽取和所有Self-Check提示词
-    JOINT_NER_RE_PROMPT, JOINT_NER_RE_PROMPT_V2,  # P12新增：改进版提示词
-    SELF_CHECK_JOINT_PROMPT, SELF_CHECK_JOINT_PROMPT_V2,  # P12新增：改进版提示词
-    SELF_CHECK_QA_PROMPT, SELF_CHECK_EVAL_PROMPT, SELF_CHECK_LABEL_PROMPT,
-    format_joint_entities, format_joint_triples, format_qa_pairs_for_check, format_eval_scores_for_check,
+    JOINT_NER_RE_PROMPT,
+    JOINT_NER_RE_PROMPT_V2,  # P12新增：改进版提示词
+    SELF_CHECK_JOINT_PROMPT,
+    SELF_CHECK_JOINT_PROMPT_V2,  # P12新增：改进版提示词
+    SELF_CHECK_QA_PROMPT,
+    SELF_CHECK_EVAL_PROMPT,
+    SELF_CHECK_LABEL_PROMPT,
+    format_joint_entities,
+    format_joint_triples,
+    format_qa_pairs_for_check,
+    format_eval_scores_for_check,
     format_reflection_history,
     # P10新增：QA导师提示词和格式化函数
-    QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
-    format_mentor_guidance, format_feedbacks_for_revision, format_feedback_summary, format_joint_for_approval,
-    format_eval_for_approval, format_label_for_approval, format_revision_feedbacks, format_reflection_for_approval,
+    QA_MENTOR_PROMPT,
+    QA_APPROVAL_PROMPT,
+    REVISION_JOINT_PROMPT,
+    format_mentor_guidance,
+    format_feedbacks_for_revision,
+    format_feedback_summary,
+    format_joint_for_approval,
+    format_eval_for_approval,
+    format_label_for_approval,
+    format_revision_feedbacks,
+    format_reflection_for_approval,
     # P14新增：导师查询提示词
     MENTOR_QUERY_PROMPT,
     # P11新增：实体对齐提示词和格式化函数
-    ENTITY_ALIGNMENT_PROMPT, format_alignment_candidates, format_alignment_result_for_output,
+    ENTITY_ALIGNMENT_PROMPT,
+    format_alignment_candidates,
+    format_alignment_result_for_output,
     # P12新增：四维度评分格式化函数
-    format_dimension_scores, format_improvement_strategy,
+    format_dimension_scores,
+    format_improvement_strategy,
     # P13新增：优化版提示词（RISEN/CARE/TIDD-EC框架）
-    JOINT_NER_RE_PROMPT_V3, FILTER_PROMPT_V2, RE_PROMPT_V2, LABEL_PROMPT_V2,
+    JOINT_NER_RE_PROMPT_V3,
+    FILTER_PROMPT_V2,
+    RE_PROMPT_V2,
+    LABEL_PROMPT_V2,
     SELF_CHECK_JOINT_PROMPT_V3,
     assemble_optimized_joint_prompt,
 )
 
 
 # ===== Filter 筛选节点（P5新增） =====
+
 
 def create_filter_node(llm: Any):
     """
@@ -133,16 +180,18 @@ def create_filter_node(llm: Any):
 
     async def filter_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 0: 文本筛选"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Filter] 筛选语料: {corpus_id}")
 
         # 发送进度事件
-        writer({
-            "step": "filter",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始文本筛选"
-        })
+        writer(
+            {
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始文本筛选",
+            }
+        )
 
         try:
             # 调用 LLM 进行筛选判断（使用 OutputParser）
@@ -161,19 +210,21 @@ def create_filter_node(llm: Any):
             )
 
             # 发送完成事件（包含新字段）
-            writer({
-                "step": "filter",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "is_valid": result.is_valid,
-                "confidence": result.confidence,
-                "skip_reason": result.skip_reason,
-                "has_geo_entity": result.has_geo_entity,
-                "has_spatial_relation": result.has_spatial_relation,
-                "geo_entity_hint": result.geo_entity_hint,
-                "is_non_wuhan_region": result.is_non_wuhan_region,
-                "region_hint": result.region_hint
-            })
+            writer(
+                {
+                    "step": "filter",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "is_valid": result.is_valid,
+                    "confidence": result.confidence,
+                    "skip_reason": result.skip_reason,
+                    "has_geo_entity": result.has_geo_entity,
+                    "has_spatial_relation": result.has_spatial_relation,
+                    "geo_entity_hint": result.geo_entity_hint,
+                    "is_non_wuhan_region": result.is_non_wuhan_region,
+                    "region_hint": result.region_hint,
+                }
+            )
 
             # 根据筛选结果决定下一步
             if result.is_valid:
@@ -188,12 +239,14 @@ def create_filter_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Filter] 失败: {e}")
-            writer({
-                "step": "filter",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "filter",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             # 筛选失败时默认继续处理（保守策略）
             return {
                 "filter_result": {
@@ -215,6 +268,7 @@ def create_filter_node(llm: Any):
 
 # ===== Normalize 归一化节点（P6新增） =====
 
+
 def create_normalize_node(llm: Any):
     """
     创建 Normalize 归一化节点
@@ -229,16 +283,18 @@ def create_normalize_node(llm: Any):
 
     async def normalize_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 0.5: 文本归一化"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Normalize] 归一化语料: {corpus_id}")
 
         # 发送进度事件
-        writer({
-            "step": "normalize",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始文本归一化"
-        })
+        writer(
+            {
+                "step": "normalize",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始文本归一化",
+            }
+        )
 
         try:
             # 使用原始文本进行归一化（使用 OutputParser）
@@ -255,15 +311,17 @@ def create_normalize_node(llm: Any):
             )
 
             # 发送完成事件
-            writer({
-                "step": "normalize",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "normalized_text": result.normalized_text,
-                "normalizations_count": len(result.normalizations),
-                "confidence": result.confidence,
-                "has_changes": result.has_changes
-            })
+            writer(
+                {
+                    "step": "normalize",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "normalized_text": result.normalized_text,
+                    "normalizations_count": len(result.normalizations),
+                    "confidence": result.confidence,
+                    "has_changes": result.has_changes,
+                }
+            )
 
             # 输出归一化结果
             # normalized_text 供后续 NER/RE 节点使用
@@ -275,12 +333,14 @@ def create_normalize_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Normalize] 失败: {e}")
-            writer({
-                "step": "normalize",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "normalize",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             # 归一化失败时使用原始文本继续处理（保守策略）
             return {
                 "normalize_result": {
@@ -300,14 +360,16 @@ def create_normalize_node(llm: Any):
 
 # ===== Step 0.7: QA Scaffold 节点（P8新增） =====
 
+
 def create_qa_scaffold_node(llm: Any):
     """创建QA脚手架节点 - 5W1H问答扩展构建语义脚手架"""
     from .schemas import QAScaffoldResult
+
     parser = PydanticOutputParser(pydantic_object=QAScaffoldResult)
 
     async def qa_scaffold_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 0.7: 5W1H问答扩展，构建语义脚手架"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
 
         # 使用归一化后的文本（如果有的话）
         text_for_processing = get_text_for_processing(state)
@@ -315,16 +377,20 @@ def create_qa_scaffold_node(llm: Any):
         logger.info(f"[QA_Scaffold] 处理语料: {corpus_id}")
 
         # 发送进度事件
-        writer({
-            "step": "qa_scaffold",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始构建语义脚手架"
-        })
+        writer(
+            {
+                "step": "qa_scaffold",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始构建语义脚手架",
+            }
+        )
 
         try:
             # 调用LLM生成QA脚手架
-            prompt_text = QA_SCAFFOLD_PROMPT.invoke({"normalized_text": text_for_processing})
+            prompt_text = QA_SCAFFOLD_PROMPT.invoke(
+                {"normalized_text": text_for_processing}
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: QAScaffoldResult = parser.parse(response.content)
@@ -336,16 +402,18 @@ def create_qa_scaffold_node(llm: Any):
             )
 
             # 发送完成事件
-            writer({
-                "step": "qa_scaffold",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "qa_count": len(result.qa_pairs),
-                "entity_hints": result.entity_hints,
-                "relation_hints": result.relation_hints,
-                "confidence": result.overall_confidence,
-                "semantic_summary": result.semantic_summary
-            })
+            writer(
+                {
+                    "step": "qa_scaffold",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "qa_count": len(result.qa_pairs),
+                    "entity_hints": result.entity_hints,
+                    "relation_hints": result.relation_hints,
+                    "confidence": result.overall_confidence,
+                    "semantic_summary": result.semantic_summary,
+                }
+            )
 
             # 根据结果决定下一步
             if result.should_skip_detailed_extraction:
@@ -370,12 +438,14 @@ def create_qa_scaffold_node(llm: Any):
         except Exception as e:
             logger.error(f"[QA_Scaffold] 处理失败: {e}")
             # 保守策略：失败时继续处理
-            writer({
-                "step": "qa_scaffold",
-                "corpus_id": corpus_id,
-                "status": "failed",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "qa_scaffold",
+                    "corpus_id": corpus_id,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            )
             return {
                 "qa_scaffold_result": {},
                 "semantic_summary": "",
@@ -390,22 +460,25 @@ def create_qa_scaffold_node(llm: Any):
 
 # ===== 单条语料处理节点（四步骤工作流） =====
 
+
 def create_ner_node(llm: Any):
     """创建NER节点"""
     parser = PydanticOutputParser(pydantic_object=EntityRecognitionResult)
 
     async def ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 1: 命名实体识别"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[NER] 处理语料: {corpus_id}")
 
         # P3改进：发送进度事件
-        writer({
-            "step": "ner",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始命名实体识别"
-        })
+        writer(
+            {
+                "step": "ner",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始命名实体识别",
+            }
+        )
 
         try:
             # P6改进：优先使用归一化文本
@@ -417,31 +490,42 @@ def create_ner_node(llm: Any):
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = NER_PROMPT.invoke({
-                "raw_text": text_for_processing,
-                "entity_hints": format_entity_hints(qa_entity_hints),
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+            prompt_text = NER_PROMPT.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entity_hints": format_entity_hints(qa_entity_hints),
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: EntityRecognitionResult = parser.parse(response.content)
 
-            entity_count = len(result.道路) + len(result.POI) + len(result.建筑物) + len(result.街区)
+            entity_count = (
+                len(result.道路)
+                + len(result.POI)
+                + len(result.建筑物)
+                + len(result.街区)
+            )
             logger.debug(f"[NER] 结果: {result}")
 
             # P3改进：发送完成事件
-            writer({
-                "step": "ner",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "entity_count": entity_count,
-                "entities": {
-                    "道路": result.道路,
-                    "POI": result.POI,
-                    "建筑物": result.建筑物,
-                    "街区": result.街区,
+            writer(
+                {
+                    "step": "ner",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "entity_count": entity_count,
+                    "entities": {
+                        "道路": result.道路,
+                        "POI": result.POI,
+                        "建筑物": result.建筑物,
+                        "街区": result.街区,
+                    },
                 }
-            })
+            )
 
             return {
                 "entities": {
@@ -455,12 +539,14 @@ def create_ner_node(llm: Any):
         except Exception as e:
             logger.error(f"[NER] 失败: {e}")
             # P3改进：发送错误事件
-            writer({
-                "step": "ner",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "ner",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                 "error": str(e),
@@ -476,27 +562,31 @@ def create_re_node(llm: Any):
 
     async def re_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 2: 关系抽取"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[RE] 处理语料: {corpus_id}")
 
         # P3改进：发送进度事件
-        writer({
-            "step": "re",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始关系抽取"
-        })
+        writer(
+            {
+                "step": "re",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始关系抽取",
+            }
+        )
 
         # 检查是否有实体
         total_entities = sum(len(v) for v in state["entities"].values())
         if total_entities == 0:
             logger.debug(f"[RE] 无实体，跳过")
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "skipped",
-                "reason": "无实体"
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "skipped",
+                    "reason": "无实体",
+                }
+            )
             return {"current_step": StepEnum.EVAL, "triples": []}
 
         try:
@@ -508,12 +598,16 @@ def create_re_node(llm: Any):
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = RE_PROMPT.invoke({
-                "raw_text": text_for_processing,
-                "entities": format_entities(state["entities"]),
-                "relation_hints": format_relation_hints(qa_relation_hints),
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+            prompt_text = RE_PROMPT.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entities": format_entities(state["entities"]),
+                    "relation_hints": format_relation_hints(qa_relation_hints),
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: RelationExtractionResult = parser.parse(response.content)
@@ -525,7 +619,9 @@ def create_re_node(llm: Any):
                     "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence or "",
-                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},  # TripleAttributes转字典
+                    "attributes": t.attributes.model_dump(exclude_none=True)
+                    if t.attributes
+                    else {},  # TripleAttributes转字典
                 }
                 for t in result.triples
             ]
@@ -533,24 +629,28 @@ def create_re_node(llm: Any):
             logger.debug(f"[RE] 结果: {len(triples)}个三元组")
 
             # P3改进：发送完成事件
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "triple_count": len(triples),
-                "triples": triples
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "triple_count": len(triples),
+                    "triples": triples,
+                }
+            )
 
             return {"triples": triples, "current_step": StepEnum.EVAL}
         except Exception as e:
             logger.error(f"[RE] 失败: {e}")
             # P3改进：发送错误事件
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {"triples": [], "error": str(e), "current_step": StepEnum.EVAL}
 
     return re_node
@@ -570,10 +670,12 @@ def create_eval_1_node(llm: Any):
 
         try:
             # 使用 OutputParser 进行结构化输出
-            prompt_text = EVAL_PROMPT_1.invoke({
-                "triples": state["triples"],
-                "raw_text": state["raw_text"],
-            })
+            prompt_text = EVAL_PROMPT_1.invoke(
+                {
+                    "triples": state["triples"],
+                    "raw_text": state["raw_text"],
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: EvalResultFirst = parser.parse(response.content)
@@ -629,28 +731,34 @@ def create_eval_2_node(llm: Any):
 
         try:
             # 使用 OutputParser 进行结构化输出
-            prompt_text = EVAL_PROMPT_2.invoke({
-                "previous_scores": state["eval_scores"],
-                "raw_text": state["raw_text"],
-            })
+            prompt_text = EVAL_PROMPT_2.invoke(
+                {
+                    "previous_scores": state["eval_scores"],
+                    "raw_text": state["raw_text"],
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: EvalResultSecond = parser.parse(response.content)
 
             # 更新评分
-            final_scores = [
-                {
-                    "triple": {
-                        "head": s.triple.head,
-                        "relation": s.triple.relation,
-                        "tail": s.triple.tail,
-                    },
-                    "SEM": s.SEM,
-                    "FAC": s.FAC,
-                    "CON": s.CON,
-                }
-                for s in result.final_scores
-            ] if result.final_scores else state["eval_scores"]
+            final_scores = (
+                [
+                    {
+                        "triple": {
+                            "head": s.triple.head,
+                            "relation": s.triple.relation,
+                            "tail": s.triple.tail,
+                        },
+                        "SEM": s.SEM,
+                        "FAC": s.FAC,
+                        "CON": s.CON,
+                    }
+                    for s in result.final_scores
+                ]
+                if result.final_scores
+                else state["eval_scores"]
+            )
 
             # 创建评分查找字典
             score_map = {}
@@ -669,7 +777,9 @@ def create_eval_2_node(llm: Any):
             # 应用修正
             correction_mapping = {}
             if result.need_correction and result.corrections:
-                corrected_triples, correction_mapping = apply_corrections(state["triples"], result.corrections)
+                corrected_triples, correction_mapping = apply_corrections(
+                    state["triples"], result.corrections
+                )
             else:
                 corrected_triples = state["triples"]
 
@@ -691,16 +801,26 @@ def create_eval_2_node(llm: Any):
                 triple["fac_score"] = scores_for_triple.get("fac_score", 0)
                 triple["con_score"] = scores_for_triple.get("con_score", 0)
                 # 计算该三元组的平均评分并设置 passed_eval
-                avg_triple_score = (triple["sem_score"] + triple["fac_score"] + triple["con_score"]) / 3
-                triple["passed_eval"] = avg_triple_score >= passed_threshold if avg_triple_score > 0 else False
+                avg_triple_score = (
+                    triple["sem_score"] + triple["fac_score"] + triple["con_score"]
+                ) / 3
+                triple["passed_eval"] = (
+                    avg_triple_score >= passed_threshold
+                    if avg_triple_score > 0
+                    else False
+                )
 
             # 计算平均评分判断是否通过
-            avg_score = sum(
-                s["SEM"] + s["FAC"] + s["CON"]
-                for s in final_scores
-            ) / (len(final_scores) * 3) if final_scores else 0
+            avg_score = (
+                sum(s["SEM"] + s["FAC"] + s["CON"] for s in final_scores)
+                / (len(final_scores) * 3)
+                if final_scores
+                else 0
+            )
 
-            logger.debug(f"[Eval2] 平均评分: {avg_score}, 需修正: {result.need_correction}")
+            logger.debug(
+                f"[Eval2] 平均评分: {avg_score}, 需修正: {result.need_correction}"
+            )
 
             return {
                 "eval_scores": final_scores,
@@ -721,7 +841,9 @@ def create_eval_2_node(llm: Any):
 
 
 # P2改进：规则校验函数（不依赖 LLM）
-def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -> List[Dict]:
+def rule_based_validation(
+    triples: List[Dict], entities: Dict[str, List[str]]
+) -> List[Dict]:
     """
     规则校验三元组（不依赖 LLM）
 
@@ -745,8 +867,12 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
         relation = triple.get("relation", "")
 
         # 规则1：实体存在性检查（宽松匹配，允许别名）
-        head_valid = any(head in e or e in head for e in all_entities) if head else False
-        tail_valid = any(tail in e or e in tail for e in all_entities) if tail else False
+        head_valid = (
+            any(head in e or e in head for e in all_entities) if head else False
+        )
+        tail_valid = (
+            any(tail in e or e in tail for e in all_entities) if tail else False
+        )
 
         # 规则2：关系类型有效性
         relation_valid = relation in VALID_RELATIONS
@@ -756,7 +882,9 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
         logic_valid = True  # 默认通过，后续可扩展
 
         # 记录校验结果
-        triple["_rule_valid"] = head_valid and tail_valid and relation_valid and logic_valid
+        triple["_rule_valid"] = (
+            head_valid and tail_valid and relation_valid and logic_valid
+        )
         triple["_rule_issues"] = []
         if not head_valid:
             triple["_rule_issues"].append(f"头实体'{head}'未在NER结果中")
@@ -770,7 +898,9 @@ def rule_based_validation(triples: List[Dict], entities: Dict[str, List[str]]) -
     return validated_triples
 
 
-def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_query: bool = False):
+def create_eval_simplified_node(
+    llm: Any, eval_threshold: float = 3.5, enable_query: bool = False
+):
     """
     P2改进：创建简化的单次评估节点
     P3改进：支持 StreamWriter 流式输出
@@ -782,25 +912,29 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
 
     async def eval_simplified_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 3: 简化评估（单次LLM调用 + 规则校验）"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Eval] 处理语料: {corpus_id}")
 
         # P3改进：发送进度事件
-        writer({
-            "step": "eval",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始三元组评估"
-        })
+        writer(
+            {
+                "step": "eval",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始三元组评估",
+            }
+        )
 
         if not state["triples"]:
             logger.debug(f"[Eval] 无三元组，跳过评估")
-            writer({
-                "step": "eval",
-                "corpus_id": corpus_id,
-                "status": "skipped",
-                "reason": "无三元组"
-            })
+            writer(
+                {
+                    "step": "eval",
+                    "corpus_id": corpus_id,
+                    "status": "skipped",
+                    "reason": "无三元组",
+                }
+            )
             return {
                 "eval_scores": [],
                 "corrected_triples": [],
@@ -822,19 +956,25 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
             if mentor_response:
                 integrated_summary = mentor_response.get("clarification", "")
                 if integrated_summary:
-                    semantic_summary = f"{semantic_summary}\n导师澄清: {integrated_summary}"
+                    semantic_summary = (
+                        f"{semantic_summary}\n导师澄清: {integrated_summary}"
+                    )
                 logger.info(f"[Eval] 使用导师更新的语义理解")
 
             # 格式化三元组用于提示词
             triples_text = format_triples(state["triples"])
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = EVAL_PROMPT_SIMPLIFIED.invoke({
-                "triples": triples_text,
-                "raw_text": text_for_processing,
-                "semantic_summary": semantic_summary or "(无语义摘要)",
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+            prompt_text = EVAL_PROMPT_SIMPLIFIED.invoke(
+                {
+                    "triples": triples_text,
+                    "raw_text": text_for_processing,
+                    "semantic_summary": semantic_summary or "(无语义摘要)",
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: EvalResultSimplified = parser.parse(response.content)
@@ -856,24 +996,34 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
 
             # 应用 LLM 修正（如果有）
             if result.need_correction and result.corrections:
-                corrected_triples = apply_llm_corrections(state["triples"], result.corrections)
+                corrected_triples = apply_llm_corrections(
+                    state["triples"], result.corrections
+                )
             else:
                 corrected_triples = list(state["triples"])
 
             # P15调试：检查 attributes 是否保留
-            corpus_id_debug = state.get('corpus_id', 'unknown')
+            corpus_id_debug = state.get("corpus_id", "unknown")
             for t in corrected_triples[:3]:
-                rel = t.get('relation')
-                attrs = t.get('attributes', {})
-                logger.debug(f"[Eval-Debug] corpus={corpus_id_debug}: <{t.get('head')}, {rel} (type={type(rel).__name__}), {t.get('tail')}> attributes={attrs}")
+                rel = t.get("relation")
+                attrs = t.get("attributes", {})
+                logger.debug(
+                    f"[Eval-Debug] corpus={corpus_id_debug}: <{t.get('head')}, {rel} (type={type(rel).__name__}), {t.get('tail')}> attributes={attrs}"
+                )
 
             # P2改进：规则校验（不依赖 LLM）
-            corrected_triples = rule_based_validation(corrected_triples, state["entities"])
+            corrected_triples = rule_based_validation(
+                corrected_triples, state["entities"]
+            )
 
             # 将评分写入三元组
             score_map = {}
             for s in scores:
-                key = (s["triple"]["head"], s["triple"]["relation"], s["triple"]["tail"])
+                key = (
+                    s["triple"]["head"],
+                    s["triple"]["relation"],
+                    s["triple"]["tail"],
+                )
                 score_map[key] = s
 
             for triple in corrected_triples:
@@ -884,29 +1034,38 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
                 triple["con_score"] = score_data.get("CON", 3)
 
                 # 综合评分和规则校验结果
-                avg_score = (triple["sem_score"] + triple["fac_score"] + triple["con_score"]) / 3
+                avg_score = (
+                    triple["sem_score"] + triple["fac_score"] + triple["con_score"]
+                ) / 3
                 rule_valid = triple.get("_rule_valid", True)
                 triple["passed_eval"] = avg_score >= eval_threshold and rule_valid
 
             # 计算整体通过率
-            passed_count = sum(1 for t in corrected_triples if t.get("passed_eval", False))
+            passed_count = sum(
+                1 for t in corrected_triples if t.get("passed_eval", False)
+            )
             overall_passed = passed_count > 0 if corrected_triples else True
 
-            logger.debug(f"[Eval] 评分完成: {len(scores)}个三元组, {passed_count}个通过, 规则校验已应用")
+            logger.debug(
+                f"[Eval] 评分完成: {len(scores)}个三元组, {passed_count}个通过, 规则校验已应用"
+            )
 
             # P3改进：发送完成事件
-            writer({
-                "step": "eval",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "triple_count": len(corrected_triples),
-                "passed_count": passed_count,
-                "eval_passed": overall_passed
-            })
+            writer(
+                {
+                    "step": "eval",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "triple_count": len(corrected_triples),
+                    "passed_count": passed_count,
+                    "eval_passed": overall_passed,
+                }
+            )
 
             # P14新增：困惑检测（如果启用了查询功能）
             if enable_query:
                 from .prompts import detect_eval_confusion
+
                 query_count = state.get("query_count", 0)
                 max_queries = state.get("max_queries", 2)
 
@@ -917,14 +1076,18 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
                     }
                     confusion = detect_eval_confusion(eval_result, dict(state))
                     if confusion:
-                        logger.info(f"[Eval] 检测到困惑，请求导师帮助: {confusion['query_type']}")
-                        writer({
-                            "step": "eval",
-                            "corpus_id": corpus_id,
-                            "status": "needs_mentor_help",
-                            "query_type": confusion["query_type"],
-                            "query_content": confusion["query_content"],
-                        })
+                        logger.info(
+                            f"[Eval] 检测到困惑，请求导师帮助: {confusion['query_type']}"
+                        )
+                        writer(
+                            {
+                                "step": "eval",
+                                "corpus_id": corpus_id,
+                                "status": "needs_mentor_help",
+                                "query_type": confusion["query_type"],
+                                "query_content": confusion["query_content"],
+                            }
+                        )
 
                         return {
                             "eval_scores": scores,
@@ -948,14 +1111,18 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
         except Exception as e:
             logger.error(f"[Eval] 失败: {e}")
             # P3改进：发送错误事件
-            writer({
-                "step": "eval",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "eval",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             # 失败时仍应用规则校验
-            fallback_triples = rule_based_validation(state["triples"], state["entities"])
+            fallback_triples = rule_based_validation(
+                state["triples"], state["entities"]
+            )
             return {
                 "eval_scores": [],
                 "corrected_triples": fallback_triples,
@@ -968,7 +1135,9 @@ def create_eval_simplified_node(llm: Any, eval_threshold: float = 3.5, enable_qu
     return eval_simplified_node
 
 
-def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) -> List[Dict]:
+def apply_llm_corrections(
+    original_triples: List[Dict], corrections: List[Any]
+) -> List[Dict]:
     """应用 LLM 返回的修正
 
     P15修复：保留原 triple 的 attributes 字段（防止 relation_attrs 丢失）
@@ -976,7 +1145,11 @@ def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) 
     corrected = list(original_triples)
 
     for correction in corrections:
-        original_key = (correction.original.head, correction.original.relation, correction.original.tail)
+        original_key = (
+            correction.original.head,
+            correction.original.relation,
+            correction.original.tail,
+        )
 
         # 查找原 triple 以获取其 attributes
         original_attrs = {}
@@ -992,7 +1165,7 @@ def apply_llm_corrections(original_triples: List[Dict], corrections: List[Any]) 
             "relation": correction.corrected.relation,
             "tail": correction.corrected.tail,
             "evidence": original_evidence,  # 保留原 evidence
-            "attributes": original_attrs,   # P15修复：保留原 attributes
+            "attributes": original_attrs,  # P15修复：保留原 attributes
         }
 
         for i, triple in enumerate(corrected):
@@ -1012,16 +1185,18 @@ def create_label_node(llm: Any, enable_query: bool = False):
 
     async def label_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 4: 属性标注"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Label] 处理语料: {corpus_id}")
 
         # P3改进：发送进度事件
-        writer({
-            "step": "label",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始属性标注"
-        })
+        writer(
+            {
+                "step": "label",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始属性标注",
+            }
+        )
 
         # 收集所有实体名称
         all_entities = []
@@ -1030,15 +1205,17 @@ def create_label_node(llm: Any, enable_query: bool = False):
 
         if not all_entities:
             logger.debug(f"[Label] 无实体，跳过")
-            writer({
-                "step": "label",
-                "corpus_id": corpus_id,
-                "status": "skipped",
-                "reason": "无实体"
-            })
+            writer(
+                {
+                    "step": "label",
+                    "corpus_id": corpus_id,
+                    "status": "skipped",
+                    "reason": "无实体",
+                }
+            )
             return {
                 "needs_mentor_help": False,  # P14新增
-                "current_step": StepEnum.DONE
+                "current_step": StepEnum.DONE,
             }
 
         try:
@@ -1063,14 +1240,16 @@ def create_label_node(llm: Any, enable_query: bool = False):
                 logger.info(f"[Label] 使用导师更新的提示")
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = LABEL_PROMPT.invoke({
-                "entities": all_entities,
-                "relations": format_triples(state["corrected_triples"]),
-                "raw_text": text_for_processing,
-                "semantic_summary": semantic_summary or "(无语义摘要)",
-                "entity_hints": format_entity_hints(qa_entity_hints),
-                "relation_hints": format_relation_hints(qa_relation_hints),
-            })
+            prompt_text = LABEL_PROMPT.invoke(
+                {
+                    "entities": all_entities,
+                    "relations": format_triples(state["corrected_triples"]),
+                    "raw_text": text_for_processing,
+                    "semantic_summary": semantic_summary or "(无语义摘要)",
+                    "entity_hints": format_entity_hints(qa_entity_hints),
+                    "relation_hints": format_relation_hints(qa_relation_hints),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: LabelResult = parser.parse(response.content)
@@ -1093,34 +1272,45 @@ def create_label_node(llm: Any, enable_query: bool = False):
                 normalized_key = normalize_relation_key(key)
                 if normalized_key:
                     # 提取关系类型
-                    relation_type = normalized_key.split(", ")[1].strip() if ", " in normalized_key else ""
+                    relation_type = (
+                        normalized_key.split(", ")[1].strip()
+                        if ", " in normalized_key
+                        else ""
+                    )
 
                     # 动态过滤：根据RELATION_ATTRS_MAP获取允许的属性列表
                     allowed_attrs = RELATION_ATTRS_MAP.get(relation_type, [])
                     # 使用model_dump获取所有非空属性
                     attrs_dict = attrs.model_dump(exclude_none=True)
                     # 仅保留允许的属性
-                    filtered_attrs = {k: v for k, v in attrs_dict.items() if k in allowed_attrs}
+                    filtered_attrs = {
+                        k: v for k, v in attrs_dict.items() if k in allowed_attrs
+                    }
 
                     relation_attrs[normalized_key] = filtered_attrs
                 else:
                     # 无法解析时保留原始 key
                     relation_attrs[key] = {}
 
-            logger.debug(f"[Label] 完成: {len(entity_attrs)}个实体, {len(relation_attrs)}个关系")
+            logger.debug(
+                f"[Label] 完成: {len(entity_attrs)}个实体, {len(relation_attrs)}个关系"
+            )
 
             # P3改进：发送完成事件
-            writer({
-                "step": "label",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "entity_count": len(entity_attrs),
-                "relation_count": len(relation_attrs)
-            })
+            writer(
+                {
+                    "step": "label",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "entity_count": len(entity_attrs),
+                    "relation_count": len(relation_attrs),
+                }
+            )
 
             # P14新增：困惑检测（如果启用了查询功能）
             if enable_query:
                 from .prompts import detect_label_confusion
+
                 query_count = state.get("query_count", 0)
                 max_queries = state.get("max_queries", 2)
 
@@ -1131,14 +1321,18 @@ def create_label_node(llm: Any, enable_query: bool = False):
                     }
                     confusion = detect_label_confusion(label_result, dict(state))
                     if confusion:
-                        logger.info(f"[Label] 检测到困惑，请求导师帮助: {confusion['query_type']}")
-                        writer({
-                            "step": "label",
-                            "corpus_id": corpus_id,
-                            "status": "needs_mentor_help",
-                            "query_type": confusion["query_type"],
-                            "query_content": confusion["query_content"],
-                        })
+                        logger.info(
+                            f"[Label] 检测到困惑，请求导师帮助: {confusion['query_type']}"
+                        )
+                        writer(
+                            {
+                                "step": "label",
+                                "corpus_id": corpus_id,
+                                "status": "needs_mentor_help",
+                                "query_type": confusion["query_type"],
+                                "query_content": confusion["query_content"],
+                            }
+                        )
 
                         return {
                             "entity_attrs": entity_attrs,
@@ -1159,12 +1353,14 @@ def create_label_node(llm: Any, enable_query: bool = False):
         except Exception as e:
             logger.error(f"[Label] 失败: {e}")
             # P3改进：发送错误事件
-            writer({
-                "step": "label",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "label",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "entity_attrs": {},
                 "relation_attrs": {},
@@ -1177,6 +1373,7 @@ def create_label_node(llm: Any, enable_query: bool = False):
 
 
 # ===== 辅助函数 =====
+
 
 def normalize_relation_key(key: str) -> Optional[str]:
     """
@@ -1195,13 +1392,13 @@ def normalize_relation_key(key: str) -> Optional[str]:
     # 尝试匹配格式: <A, 关系, B> 或 A, 关系, B
     # 使用正则提取三个部分
     # 格式1: <A, 关系, B>
-    match = re.match(r'^<\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+?)\s*>$', key)
+    match = re.match(r"^<\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+?)\s*>$", key)
     if match:
         head, relation, tail = match.groups()
         return f"<{head.strip()}, {relation.strip()}, {tail.strip()}>"
 
     # 格式2: A, 关系, B (没有尖括号)
-    parts = [p.strip() for p in key.split(',')]
+    parts = [p.strip() for p in key.split(",")]
     if len(parts) == 3:
         return f"<{parts[0]}, {parts[1]}, {parts[2]}>"
 
@@ -1244,7 +1441,7 @@ def apply_corrections(original_triples: List[Dict], corrections: List[Any]) -> t
             "relation": correction.corrected.relation,
             "tail": correction.corrected.tail,
             "evidence": original_evidence,  # 保留原 evidence
-            "attributes": original_attrs,   # P15修复：保留原 attributes
+            "attributes": original_attrs,  # P15修复：保留原 attributes
         }
         new_key = (new_triple["head"], new_triple["relation"], new_triple["tail"])
 
@@ -1265,6 +1462,7 @@ def apply_corrections(original_triples: List[Dict], corrections: List[Any]) -> t
 
 
 # ===== 分布式处理节点 =====
+
 
 def create_coordinator_node(corpus_per_worker: int = 10, max_workers: int = 10):
     """创建调度器节点"""
@@ -1290,7 +1488,9 @@ def create_coordinator_node(corpus_per_worker: int = 10, max_workers: int = 10):
             partitions[worker_id] = corpus_list[start_idx:end_idx]
             active_workers.append(worker_id)
 
-        logger.info(f"[Coordinator] 创建 {worker_count} 个Worker, 每个处理 {actual_corpus_per_worker} 条语料, 共 {corpus_count} 条")
+        logger.info(
+            f"[Coordinator] 创建 {worker_count} 个Worker, 每个处理 {actual_corpus_per_worker} 条语料, 共 {corpus_count} 条"
+        )
 
         return {
             "worker_count": worker_count,
@@ -1317,7 +1517,9 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
             for corpus_state in worker_result["results"]:
                 # 跳过有错误的结果
                 if corpus_state.get("error"):
-                    logger.warning(f"[Aggregator] 跳过错误语料: {corpus_state.get('corpus_id')}")
+                    logger.warning(
+                        f"[Aggregator] 跳过错误语料: {corpus_state.get('corpus_id')}"
+                    )
                     continue
 
                 corpus_id = corpus_state.get("corpus_id", "unknown")
@@ -1326,12 +1528,16 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 entities = corpus_state.get("entities", {})
                 for entity_type, names in entities.items():
                     for name in names:
-                        all_entities.append({
-                            "name": name,
-                            "type": entity_type,
-                            "corpus_id": corpus_id,
-                            "attrs": corpus_state.get("entity_attrs", {}).get(name, {}),
-                        })
+                        all_entities.append(
+                            {
+                                "name": name,
+                                "type": entity_type,
+                                "corpus_id": corpus_id,
+                                "attrs": corpus_state.get("entity_attrs", {}).get(
+                                    name, {}
+                                ),
+                            }
+                        )
 
                 # 收集三元组，并写入relation_attrs
                 relation_attrs = corpus_state.get("relation_attrs", {})
@@ -1347,27 +1553,44 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                 # - 发生事件：无关系属性（属性在事件实体上）
 
                 for triple in corrected_triples:
+                    # P15修复：如果 triple 是 Pydantic 对象（JointTriple），先转换为字典
+                    if hasattr(triple, "model_dump"):
+                        triple = triple.model_dump(mode="json")
                     triple["_corpus_id"] = corpus_id
                     # 查找关系属性（使用标准格式）
-                    triple_key = f"<{triple['head']}, {triple['relation']}, {triple['tail']}>"
+                    triple_key = (
+                        f"<{triple['head']}, {triple['relation']}, {triple['tail']}>"
+                    )
 
                     # P15调试：打印 triple 的 attributes 字段状态
                     triple_attrs = triple.get("attributes", {})
                     triple_relation_attrs = triple.get("relation_attrs", {})
                     # 如果关系类型有属性映射但 triple 没有 attributes，记录警告
                     relation_raw = triple.get("relation", "")
-                    relation_str = extract_enum_value(relation_raw) if hasattr(relation_raw, 'value') else str(relation_raw)
+                    relation_str = (
+                        extract_enum_value(relation_raw)
+                        if hasattr(relation_raw, "value")
+                        else str(relation_raw)
+                    )
                     expected_fields = RELATION_ATTRS_MAP.get(relation_str, [])
                     if expected_fields and not triple_attrs:
-                        logger.warning(f"[Aggregator-Missing] {triple_key}: relation={relation_str}, expected_fields={expected_fields}, but attributes={triple_attrs}")
+                        logger.warning(
+                            f"[Aggregator-Missing] {triple_key}: relation={relation_str}, expected_fields={expected_fields}, but attributes={triple_attrs}"
+                        )
                     elif triple_attrs:
-                        logger.debug(f"[Aggregator-Found] {triple_key}: relation={relation_str}, attributes={triple_attrs}")
+                        logger.debug(
+                            f"[Aggregator-Found] {triple_key}: relation={relation_str}, attributes={triple_attrs}"
+                        )
 
                     # 尝试多种 key 格式查找（优先从 Label node 输出查找）
                     attrs = (
-                        relation_attrs.get(triple_key) or
-                        relation_attrs.get(f"{triple['head']}, {triple['relation']}, {triple['tail']}") or
-                        relation_attrs.get(f"<{triple['head']},{triple['relation']},{triple['tail']}>")
+                        relation_attrs.get(triple_key)
+                        or relation_attrs.get(
+                            f"{triple['head']}, {triple['relation']}, {triple['tail']}"
+                        )
+                        or relation_attrs.get(
+                            f"<{triple['head']},{triple['relation']},{triple['tail']}>"
+                        )
                     )
 
                     # P15修复：如果 Label node 没有输出 relation_attrs，检查 triple 本身是否已有
@@ -1381,7 +1604,11 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                         # 根据关系类型选择对应的属性集（Schema v3.2）
                         relation_raw = triple.get("relation", "")
                         # P15修复：确保 relation 是字符串（RELATION_ATTRS_MAP 的 key 是字符串）
-                        relation = extract_enum_value(relation_raw) if hasattr(relation_raw, 'value') else str(relation_raw)
+                        relation = (
+                            extract_enum_value(relation_raw)
+                            if hasattr(relation_raw, "value")
+                            else str(relation_raw)
+                        )
                         attr_fields = RELATION_ATTRS_MAP.get(relation, [])
                         # 提取该关系类型的有效属性
                         triple["relation_attrs"] = {
@@ -1392,12 +1619,16 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     all_triples.append(triple)
 
         # 实体去重
-        unique_entities, aliases = deduplicate_entities(all_entities, similarity_threshold)
+        unique_entities, aliases = deduplicate_entities(
+            all_entities, similarity_threshold
+        )
 
         # 三元组去重
         unique_triples = deduplicate_triples(all_triples)
 
-        logger.info(f"[Aggregator] 完成: {len(unique_entities)}个实体, {len(unique_triples)}个三元组")
+        logger.info(
+            f"[Aggregator] 完成: {len(unique_entities)}个实体, {len(unique_triples)}个三元组"
+        )
 
         return {
             "aggregated_entities": unique_entities,
@@ -1450,9 +1681,7 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
         return similar
 
     def find_abbreviation_candidates(
-        name: str,
-        name_len: int,
-        length_index: Dict[int, List[str]]
+        name: str, name_len: int, length_index: Dict[int, List[str]]
     ) -> List[str]:
         """查找可能的简称别名（跨 block，但同类型）"""
         candidates = []
@@ -1535,15 +1764,17 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
                 if other_names:
                     aliases[standard_name] = other_names
 
-                unique_entities.append({
-                    "name": standard_name,
-                    "type": entity_type,
-                    "category": entity_attrs.get("细分", ""),
-                    "aliases": other_names,
-                    "occurrence_count": len(occurrences),
-                    "corpus_ids": list(set(o["corpus_id"] for o in occurrences)),
-                    "attrs": entity_attrs,
-                })
+                unique_entities.append(
+                    {
+                        "name": standard_name,
+                        "type": entity_type,
+                        "category": entity_attrs.get("细分", ""),
+                        "aliases": other_names,
+                        "occurrence_count": len(occurrences),
+                        "corpus_ids": list(set(o["corpus_id"] for o in occurrences)),
+                        "attrs": entity_attrs,
+                    }
+                )
 
     return unique_entities, aliases
 
@@ -1583,20 +1814,26 @@ def deduplicate_triples(triples: List[Dict]) -> List[Dict]:
         key = (triple["head"], triple["relation"], triple["tail"])
         if key not in seen:
             seen.add(key)
-            unique_triples.append({
-                "head": triple["head"],
-                "relation": triple["relation"],
-                "tail": triple["tail"],
-                "evidence": triple.get("evidence", ""),
-                "corpus_ids": [triple.get("_corpus_id", "")],
-                "sem_score": triple.get("sem_score", 0),
-                "fac_score": triple.get("fac_score", 0),
-                "con_score": triple.get("con_score", 0),
-                "passed_eval": triple.get("passed_eval", False),  # 默认 False 更安全
-                "relation_type": triple.get("relation_type", ""),
-                "relation_subtype": triple.get("relation_subtype", ""),
-                "relation_attrs": triple.get("relation_attrs", {}),  # P15修复：保留关系属性
-            })
+            unique_triples.append(
+                {
+                    "head": triple["head"],
+                    "relation": triple["relation"],
+                    "tail": triple["tail"],
+                    "evidence": triple.get("evidence", ""),
+                    "corpus_ids": [triple.get("_corpus_id", "")],
+                    "sem_score": triple.get("sem_score", 0),
+                    "fac_score": triple.get("fac_score", 0),
+                    "con_score": triple.get("con_score", 0),
+                    "passed_eval": triple.get(
+                        "passed_eval", False
+                    ),  # 默认 False 更安全
+                    "relation_type": triple.get("relation_type", ""),
+                    "relation_subtype": triple.get("relation_subtype", ""),
+                    "relation_attrs": triple.get(
+                        "relation_attrs", {}
+                    ),  # P15修复：保留关系属性
+                }
+            )
         else:
             # 更新corpus_ids
             for t in unique_triples:
@@ -1609,6 +1846,7 @@ def deduplicate_triples(triples: List[Dict]) -> List[Dict]:
 
 
 # ===== Self-Check 节点（二次对话验证）=====
+
 
 def create_self_check_ner_node(llm: Any):
     """
@@ -1624,17 +1862,19 @@ def create_self_check_ner_node(llm: Any):
 
     async def self_check_ner_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 3.5a: 实体校验"""
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
         logger.info(f"[Self-Check-NER] 校验语料: {corpus_id}, 重试次数: {retry_count}")
 
-        writer({
-            "step": "self_check_ner",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始实体校验",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_ner",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始实体校验",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             # P6改进：优先使用归一化文本
@@ -1646,17 +1886,21 @@ def create_self_check_ner_node(llm: Any):
             semantic_summary = state.get("semantic_summary", "")
 
             # 构建重试提示（如有）
-            problem_entities = state.get('problem_entities', [])
+            problem_entities = state.get("problem_entities", [])
             retry_hint = format_retry_hint(problem_entities, [])
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = SELF_CHECK_NER_PROMPT.invoke({
-                "raw_text": text_for_processing,
-                "entities": format_entities(state["entities"]),
-                "retry_hint": retry_hint,
-                "semantic_summary": semantic_summary or "(无语义摘要)",
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+            prompt_text = SELF_CHECK_NER_PROMPT.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entities": format_entities(state["entities"]),
+                    "retry_hint": retry_hint,
+                    "semantic_summary": semantic_summary or "(无语义摘要)",
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckNERResult = parser.parse(response.content)
@@ -1667,15 +1911,17 @@ def create_self_check_ner_node(llm: Any):
             # 提取问题实体（供重试参考）
             missing_names = [e.name for e in result.missing_entities]
 
-            writer({
-                "step": "self_check_ner",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "verified_count": len(result.verified_entities),
-                "missing_count": len(result.missing_entities),
-                "normalization_count": len(result.entity_normalizations),
-                "confidence": result.overall_confidence
-            })
+            writer(
+                {
+                    "step": "self_check_ner",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "verified_count": len(result.verified_entities),
+                    "missing_count": len(result.missing_entities),
+                    "normalization_count": len(result.entity_normalizations),
+                    "confidence": result.overall_confidence,
+                }
+            )
 
             return {
                 "self_check_ner_result": result.model_dump(),
@@ -1687,12 +1933,14 @@ def create_self_check_ner_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-NER] 失败: {e}")
-            writer({
-                "step": "self_check_ner",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_ner",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_ner_result": {},
                 "error": str(e),
@@ -1716,22 +1964,26 @@ def create_self_check_re_node(llm: Any):
 
     async def self_check_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Step 3.5b: 三元组校验"""
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
-        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
-        logger.info(f"[Self-Check-RE] 校验语料: {corpus_id}, 重试次数: {retry_count}/{max_retries}")
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
+        max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+        logger.info(
+            f"[Self-Check-RE] 校验语料: {corpus_id}, 重试次数: {retry_count}/{max_retries}"
+        )
 
-        writer({
-            "step": "self_check_re",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始三元组校验",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_re",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始三元组校验",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             # 构建重试提示（如有）
-            problem_triples = state.get('problem_triples', [])
+            problem_triples = state.get("problem_triples", [])
             retry_hint = format_retry_hint([], problem_triples)
 
             # P8改进：获取 QA Scaffold 上下文
@@ -1739,30 +1991,35 @@ def create_self_check_re_node(llm: Any):
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
             # 获取已校验实体
-            verified_entities = state.get('final_entities', [])
-            ner_result = state.get('self_check_ner_result', {})
-            if ner_result and 'verified_entities' in ner_result:
-                verified_entities = ner_result['verified_entities']
+            verified_entities = state.get("final_entities", [])
+            ner_result = state.get("self_check_ner_result", {})
+            if ner_result and "verified_entities" in ner_result:
+                verified_entities = ner_result["verified_entities"]
 
             # P6改进：优先使用归一化文本
             text_for_processing = get_text_for_processing(state)
 
             # 使用 OutputParser 进行结构化输出
-            prompt_text = SELF_CHECK_RE_PROMPT.invoke({
-                "raw_text": text_for_processing,
-                "triples": format_triples(state.get("triples", [])),  # RE 输出
-                "verified_entities": format_verified_entities(verified_entities),
-                "retry_hint": retry_hint,
-                "semantic_summary": semantic_summary or "(无语义摘要)",
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+            prompt_text = SELF_CHECK_RE_PROMPT.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "triples": format_triples(state.get("triples", [])),  # RE 输出
+                    "verified_entities": format_verified_entities(verified_entities),
+                    "retry_hint": retry_hint,
+                    "semantic_summary": semantic_summary or "(无语义摘要)",
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckREResult = parser.parse(response.content)
 
             # 应用修正，生成 corrected_triples（供 Eval 使用）
             corrected_triples = _apply_triple_corrections_for_self_check(
-                state.get("triples", []), result  # RE 输出
+                state.get("triples", []),
+                result,  # RE 输出
             )
 
             # 提取问题三元组（供重试参考）
@@ -1771,58 +2028,64 @@ def create_self_check_re_node(llm: Any):
                     "head": t.head,
                     "relation": t.relation,
                     "tail": t.tail,
-                    "reason": t.reason
+                    "reason": t.reason,
                 }
                 for t in result.rejected_triples
             ]
 
             # 计算整体置信度
             overall_confidence = _calculate_overall_confidence(
-                state.get('self_check_ner_result', {}),
-                result.model_dump()
+                state.get("self_check_ner_result", {}), result.model_dump()
             )
 
             # 判断是否需要重试
-            retry_count = state.get('retry_count', 0) + 1  # 每次进入 Self-Check 计数
+            retry_count = state.get("retry_count", 0) + 1  # 每次进入 Self-Check 计数
             needs_retry = _should_trigger_retry(
-                result, retry_count, max_retries, state.get('self_check_ner_result', {})
+                result, retry_count, max_retries, state.get("self_check_ner_result", {})
             )
 
-            writer({
-                "step": "self_check_re",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "verified_count": len(result.verified_triples),
-                "rejected_count": len(result.rejected_triples),
-                "corrected_count": len(result.corrected_triples),
-                "confidence": overall_confidence,
-                "needs_retry": needs_retry
-            })
+            writer(
+                {
+                    "step": "self_check_re",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "verified_count": len(result.verified_triples),
+                    "rejected_count": len(result.rejected_triples),
+                    "corrected_count": len(result.corrected_triples),
+                    "confidence": overall_confidence,
+                    "needs_retry": needs_retry,
+                }
+            )
 
             return {
                 "self_check_re_result": result.model_dump(),
                 "corrected_triples": corrected_triples,  # 输出给 Eval 使用
-                "final_triples": corrected_triples,      # 同时保留 final_triples 兼容
+                "final_triples": corrected_triples,  # 同时保留 final_triples 兼容
                 "problem_triples": problem_triples_list,
                 "verification_confidence": overall_confidence,
                 "retry_count": retry_count,
-                "needs_review": overall_confidence == "low" or retry_count >= max_retries,
+                "needs_review": overall_confidence == "low"
+                or retry_count >= max_retries,
                 "current_step": StepEnum.EVAL,  # 默认值，实际由路由决定
             }
 
         except Exception as e:
             logger.error(f"[Self-Check-RE] 失败: {e}")
-            writer({
-                "step": "self_check_re",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_re",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_re_result": {},
                 "corrected_triples": state.get("triples", []),  # 失败时保留原 triples
                 "error": str(e),
-                "retry_count": min(state.get('retry_count', 0) + 1, max_retries),  # 确保不超过上限
+                "retry_count": min(
+                    state.get("retry_count", 0) + 1, max_retries
+                ),  # 确保不超过上限
                 "retry_suggested": True,  # 异常时建议重试
                 "current_step": StepEnum.EVAL,
             }
@@ -1832,9 +2095,9 @@ def create_self_check_re_node(llm: Any):
 
 # ===== Self-Check 辅助函数 =====
 
+
 def _apply_entity_normalizations(
-    original_entities: Dict[str, List[str]],
-    result: SelfCheckNERResult
+    original_entities: Dict[str, List[str]], result: SelfCheckNERResult
 ) -> List[Dict]:
     """应用实体归一化，生成 final_entities"""
     final_entities = []
@@ -1859,8 +2122,7 @@ def _apply_entity_normalizations(
 
 
 def _apply_triple_corrections_for_self_check(
-    original_triples: List[Dict],
-    result: SelfCheckREResult
+    original_triples: List[Dict], result: SelfCheckREResult
 ) -> List[Dict]:
     """应用三元组修正
 
@@ -1914,10 +2176,7 @@ def _apply_triple_corrections_for_self_check(
     return final_triples
 
 
-def _calculate_overall_confidence(
-    ner_result: Dict,
-    re_result: Dict
-) -> str:
+def _calculate_overall_confidence(ner_result: Dict, re_result: Dict) -> str:
     """计算整体置信度"""
     ner_conf = ner_result.get("overall_confidence", "medium")
     re_conf = re_result.get("overall_confidence", "medium")
@@ -1936,10 +2195,7 @@ def _calculate_overall_confidence(
 
 
 def _should_trigger_retry(
-    re_result: SelfCheckREResult,
-    retry_count: int,
-    max_retries: int,
-    ner_result: Dict
+    re_result: SelfCheckREResult, retry_count: int, max_retries: int, ner_result: Dict
 ) -> bool:
     """
     判断是否需要触发重抽
@@ -1973,6 +2229,7 @@ def _should_trigger_retry(
 
 # ===== P9新增：联合抽取节点 =====
 
+
 def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
     """
     创建联合抽取节点
@@ -1988,15 +2245,17 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
     async def joint_ner_re_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """Joint NER + RE: 一次推理同时抽取实体和关系"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Joint_NER_RE] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "joint_ner_re",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始联合抽取"
-        })
+        writer(
+            {
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始联合抽取",
+            }
+        )
 
         try:
             # 使用归一化文本
@@ -2028,20 +2287,31 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
             # 调用 LLM
             # P12改进：使用改进版提示词（含反向验证+反面示例）
-            prompt_text = JOINT_NER_RE_PROMPT_V2.invoke({
-                "raw_text": text_for_processing,
-                "entity_hints": format_entity_hints(qa_entity_hints),
-                "relation_hints": format_relation_hints(qa_relation_hints),
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-                "mentor_guidance": format_mentor_guidance(mentor_guidance),
-            })
+            prompt_text = JOINT_NER_RE_PROMPT_V2.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entity_hints": format_entity_hints(qa_entity_hints),
+                    "relation_hints": format_relation_hints(qa_relation_hints),
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                    "mentor_guidance": format_mentor_guidance(mentor_guidance),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: JointExtractionResult = parser.parse(response.content)
 
             # 转换为现有格式（兼容后续节点）
             # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
+            entities_dict = {
+                "道路": [],
+                "POI": [],
+                "建筑物": [],
+                "街区": [],
+                "功能": [],
+                "事件": [],
+            }
             # P15修复：创建功能实体和事件实体详细列表
             function_entities_list = []
             event_entities_list = []
@@ -2053,17 +2323,23 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
                 # P15修复：功能实体和事件实体需要保存完整属性
                 if entity_type == "功能" and e.function_attrs:
-                    function_entities_list.append({
-                        "name": e.name,
-                        "evidence": e.evidence,
-                        "function_attrs": e.function_attrs.model_dump(exclude_none=True),
-                    })
+                    function_entities_list.append(
+                        {
+                            "name": e.name,
+                            "evidence": e.evidence,
+                            "function_attrs": e.function_attrs.model_dump(
+                                exclude_none=True
+                            ),
+                        }
+                    )
                 elif entity_type == "事件" and e.event_attrs:
-                    event_entities_list.append({
-                        "name": e.name,
-                        "evidence": e.evidence,
-                        "event_attrs": e.event_attrs.model_dump(exclude_none=True),
-                    })
+                    event_entities_list.append(
+                        {
+                            "name": e.name,
+                            "evidence": e.evidence,
+                            "event_attrs": e.event_attrs.model_dump(exclude_none=True),
+                        }
+                    )
 
             triples_list = [
                 {
@@ -2071,49 +2347,66 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
                     "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
-                    "attributes": t.attributes.model_dump(exclude_none=True, mode='json') if t.attributes else {},  # P15修复：mode='json' 转换 Enum 为字符串
+                    "confidence": extract_enum_value(
+                        t.confidence
+                    ),  # P15改进：使用工具函数
+                    "attributes": t.attributes.model_dump(
+                        exclude_none=True, mode="json"
+                    )
+                    if t.attributes
+                    else {},  # P15修复：mode='json' 转换 Enum 为字符串
                 }
                 for t in result.triples
             ]
 
             # P15调试：确认 triples_list 的 relation 类型
             for t_item in triples_list[:3]:
-                rel = t_item.get('relation')
-                logger.debug(f"[Joint_NER_RE-Debug] corpus={corpus_id}: <{t_item.get('head')}, {rel} (type={type(rel).__name__}), {t_item.get('tail')}>")
+                rel = t_item.get("relation")
+                logger.debug(
+                    f"[Joint_NER_RE-Debug] corpus={corpus_id}: <{t_item.get('head')}, {rel} (type={type(rel).__name__}), {t_item.get('tail')}>"
+                )
 
             logger.info(
                 f"[Joint_NER_RE] 完成: {len(result.entities)}个实体, "
                 f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
             )
 
-            writer({
-                "step": "joint_ner_re",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "entity_count": len(result.entities),
-                "triple_count": len(result.triples),
-                "confidence": result.overall_confidence
-            })
+            writer(
+                {
+                    "step": "joint_ner_re",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "entity_count": len(result.entities),
+                    "triple_count": len(result.triples),
+                    "confidence": result.overall_confidence,
+                }
+            )
 
             # P14新增：困惑检测（如果启用了查询功能）
             if enable_query:
                 from .prompts import detect_extraction_confusion
+
                 query_count = state.get("query_count", 0)
                 max_queries = state.get("max_queries", 2)
 
                 # 检测困惑（限制查询次数防止无限循环）
                 if query_count < max_queries:
-                    confusion = detect_extraction_confusion(result.model_dump(), dict(state))
+                    confusion = detect_extraction_confusion(
+                        result.model_dump(), dict(state)
+                    )
                     if confusion:
-                        logger.info(f"[Joint_NER_RE] 检测到困惑，请求导师帮助: {confusion['query_type']}")
-                        writer({
-                            "step": "joint_ner_re",
-                            "corpus_id": corpus_id,
-                            "status": "needs_mentor_help",
-                            "query_type": confusion["query_type"],
-                            "query_content": confusion["query_content"],
-                        })
+                        logger.info(
+                            f"[Joint_NER_RE] 检测到困惑，请求导师帮助: {confusion['query_type']}"
+                        )
+                        writer(
+                            {
+                                "step": "joint_ner_re",
+                                "corpus_id": corpus_id,
+                                "status": "needs_mentor_help",
+                                "query_type": confusion["query_type"],
+                                "query_content": confusion["query_content"],
+                            }
+                        )
 
                         return {
                             "entities": entities_dict,
@@ -2143,14 +2436,23 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
         except Exception as e:
             logger.error(f"[Joint_NER_RE] 失败: {e}")
-            writer({
-                "step": "joint_ner_re",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "joint_ner_re",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
-                "entities": {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []},
+                "entities": {
+                    "道路": [],
+                    "POI": [],
+                    "建筑物": [],
+                    "街区": [],
+                    "功能": [],
+                    "事件": [],
+                },
                 "triples": [],
                 "error": str(e),
                 "needs_mentor_help": False,
@@ -2161,6 +2463,7 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
 
 
 # ===== P9新增：Self-Check-Joint节点（含Reflexion） =====
+
 
 def create_self_check_joint_node(llm: Any):
     """
@@ -2174,17 +2477,21 @@ def create_self_check_joint_node(llm: Any):
     parser = PydanticOutputParser(pydantic_object=SelfCheckJointResult)
 
     async def self_check_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
-        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
-        logger.info(f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}")
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
+        max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+        logger.info(
+            f"[Self-Check-Joint] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}"
+        )
 
-        writer({
-            "step": "self_check_joint",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
@@ -2194,17 +2501,21 @@ def create_self_check_joint_node(llm: Any):
             previous_reflection = format_reflection_history(reflection_history)
 
             # P12改进：使用增强版提示词（四维度校验+结构化反思）
-            prompt_text = SELF_CHECK_JOINT_PROMPT_V2.invoke({
-                "raw_text": text,
-                "entities": format_joint_entities(
-                    state.get("joint_extraction_result", {}).get("entities", [])
-                ),
-                "triples": format_joint_triples(state.get("triples", [])),
-                "semantic_summary": state.get("semantic_summary", ""),
-                "context_dependencies": format_context_dependencies(state.get("qa_context_dependencies", [])),
-                "previous_reflection": previous_reflection,
-                "improvement_attempts": state.get("improvement_strategy", ""),
-            })
+            prompt_text = SELF_CHECK_JOINT_PROMPT_V2.invoke(
+                {
+                    "raw_text": text,
+                    "entities": format_joint_entities(
+                        state.get("joint_extraction_result", {}).get("entities", [])
+                    ),
+                    "triples": format_joint_triples(state.get("triples", [])),
+                    "semantic_summary": state.get("semantic_summary", ""),
+                    "context_dependencies": format_context_dependencies(
+                        state.get("qa_context_dependencies", [])
+                    ),
+                    "previous_reflection": previous_reflection,
+                    "improvement_attempts": state.get("improvement_strategy", ""),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckJointResult = parser.parse(response.content)
@@ -2218,14 +2529,16 @@ def create_self_check_joint_node(llm: Any):
             )
             logger.info(f"[Self-Check-Joint] 反思: {result.reflection_text[:100]}...")
 
-            writer({
-                "step": "self_check_joint",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "confidence": result.overall_confidence,
-                "reflection": result.reflection_text[:200],
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_joint",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "confidence": result.overall_confidence,
+                    "reflection": result.reflection_text[:200],
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             return {
                 "self_check_joint_result": result.model_dump(),
@@ -2240,12 +2553,14 @@ def create_self_check_joint_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-Joint] 失败: {e}")
-            writer({
-                "step": "self_check_joint",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_joint",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_joint_result": {},
                 "error": str(e),
@@ -2259,6 +2574,7 @@ def create_self_check_joint_node(llm: Any):
 
 # ===== P9新增：Self-Check-QA节点 =====
 
+
 def create_self_check_qa_node(llm: Any):
     """
     创建QA脚手架校验节点
@@ -2271,29 +2587,39 @@ def create_self_check_qa_node(llm: Any):
     parser = PydanticOutputParser(pydantic_object=SelfCheckQAResult)
 
     async def self_check_qa_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
         logger.info(f"[Self-Check-QA] 校验语料: {corpus_id}, 重试: {retry_count}")
 
-        writer({
-            "step": "self_check_qa",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_qa",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
 
             qa_result = state.get("qa_scaffold_result", {})
 
-            prompt_text = SELF_CHECK_QA_PROMPT.invoke({
-                "raw_text": text,
-                "qa_pairs": format_qa_pairs_for_check(qa_result.get("qa_pairs", [])),
-                "entity_hints": format_entity_hints(qa_result.get("entity_hints", [])),
-                "relation_hints": format_relation_hints(qa_result.get("relation_hints", [])),
-                "semantic_summary": qa_result.get("semantic_summary", ""),
-            })
+            prompt_text = SELF_CHECK_QA_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "qa_pairs": format_qa_pairs_for_check(
+                        qa_result.get("qa_pairs", [])
+                    ),
+                    "entity_hints": format_entity_hints(
+                        qa_result.get("entity_hints", [])
+                    ),
+                    "relation_hints": format_relation_hints(
+                        qa_result.get("relation_hints", [])
+                    ),
+                    "semantic_summary": qa_result.get("semantic_summary", ""),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckQAResult = parser.parse(response.content)
@@ -2303,14 +2629,16 @@ def create_self_check_qa_node(llm: Any):
                 f"relation_coverage={result.relation_coverage}, retry={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_qa",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "entity_coverage": result.entity_coverage,
-                "relation_coverage": result.relation_coverage,
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_qa",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "entity_coverage": result.entity_coverage,
+                    "relation_coverage": result.relation_coverage,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             return {
                 "self_check_qa_result": result.model_dump(),
@@ -2322,12 +2650,14 @@ def create_self_check_qa_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-QA] 失败: {e}")
-            writer({
-                "step": "self_check_qa",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_qa",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             # 失败时继续到联合抽取
             return {
                 "self_check_qa_result": {},
@@ -2339,6 +2669,7 @@ def create_self_check_qa_node(llm: Any):
 
 
 # ===== P9新增：Self-Check-Eval节点 =====
+
 
 def create_self_check_eval_node(llm: Any):
     """
@@ -2352,26 +2683,34 @@ def create_self_check_eval_node(llm: Any):
     parser = PydanticOutputParser(pydantic_object=SelfCheckEvalResult)
 
     async def self_check_eval_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
         logger.info(f"[Self-Check-Eval] 校验语料: {corpus_id}, 重试: {retry_count}")
 
-        writer({
-            "step": "self_check_eval",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_eval",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
 
-            prompt_text = SELF_CHECK_EVAL_PROMPT.invoke({
-                "raw_text": text,
-                "eval_scores": format_eval_scores_for_check(state.get("eval_scores", [])),
-                "corrected_triples": format_triples(state.get("corrected_triples", [])),
-                "eval_passed": state.get("eval_passed", False),
-            })
+            prompt_text = SELF_CHECK_EVAL_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "eval_scores": format_eval_scores_for_check(
+                        state.get("eval_scores", [])
+                    ),
+                    "corrected_triples": format_triples(
+                        state.get("corrected_triples", [])
+                    ),
+                    "eval_passed": state.get("eval_passed", False),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckEvalResult = parser.parse(response.content)
@@ -2381,13 +2720,15 @@ def create_self_check_eval_node(llm: Any):
                 f"retry={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_eval",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "score_consistency": result.score_consistency,
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_eval",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "score_consistency": result.score_consistency,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             return {
                 "self_check_eval_result": result.model_dump(),
@@ -2399,12 +2740,14 @@ def create_self_check_eval_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-Eval] 失败: {e}")
-            writer({
-                "step": "self_check_eval",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_eval",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_eval_result": {},
                 "error": str(e),
@@ -2415,6 +2758,7 @@ def create_self_check_eval_node(llm: Any):
 
 
 # ===== P9新增：Self-Check-Label节点 =====
+
 
 def create_self_check_label_node(llm: Any):
     """
@@ -2428,16 +2772,18 @@ def create_self_check_label_node(llm: Any):
     parser = PydanticOutputParser(pydantic_object=SelfCheckLabelResult)
 
     async def self_check_label_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
         logger.info(f"[Self-Check-Label] 校验语料: {corpus_id}, 重试: {retry_count}")
 
-        writer({
-            "step": "self_check_label",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_label",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
@@ -2446,19 +2792,29 @@ def create_self_check_label_node(llm: Any):
             relation_attrs = state.get("relation_attrs", {})
 
             # 格式化属性用于提示词
-            entity_attrs_str = "\n".join(
-                [f"- {name}: {attrs}" for name, attrs in entity_attrs.items()]
-            ) if entity_attrs else "(无实体属性)"
+            entity_attrs_str = (
+                "\n".join(
+                    [f"- {name}: {attrs}" for name, attrs in entity_attrs.items()]
+                )
+                if entity_attrs
+                else "(无实体属性)"
+            )
 
-            relation_attrs_str = "\n".join(
-                [f"- {key}: {attrs}" for key, attrs in relation_attrs.items()]
-            ) if relation_attrs else "(无关系属性)"
+            relation_attrs_str = (
+                "\n".join(
+                    [f"- {key}: {attrs}" for key, attrs in relation_attrs.items()]
+                )
+                if relation_attrs
+                else "(无关系属性)"
+            )
 
-            prompt_text = SELF_CHECK_LABEL_PROMPT.invoke({
-                "raw_text": text,
-                "entity_attrs": entity_attrs_str,
-                "relation_attrs": relation_attrs_str,
-            })
+            prompt_text = SELF_CHECK_LABEL_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "entity_attrs": entity_attrs_str,
+                    "relation_attrs": relation_attrs_str,
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckLabelResult = parser.parse(response.content)
@@ -2468,13 +2824,15 @@ def create_self_check_label_node(llm: Any):
                 f"retry={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_label",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "attr_completeness": result.attr_completeness,
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_label",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "attr_completeness": result.attr_completeness,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             # 如果校验通过，更新属性为校验后的版本
             if result.verified_entity_attrs:
@@ -2494,12 +2852,14 @@ def create_self_check_label_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-Label] 失败: {e}")
-            writer({
-                "step": "self_check_label",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_label",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_label_result": {},
                 "error": str(e),
@@ -2510,6 +2870,7 @@ def create_self_check_label_node(llm: Any):
 
 
 # ===== P9新增：Self-Check-Filter节点（可选） =====
+
 
 def create_self_check_filter_node(llm: Any):
     """
@@ -2527,30 +2888,36 @@ def create_self_check_filter_node(llm: Any):
     parser = PydanticOutputParser(pydantic_object=SelfCheckFilterResult)
 
     async def self_check_filter_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
         logger.info(f"[Self-Check-Filter] 校验语料: {corpus_id}, 重试: {retry_count}")
 
-        writer({
-            "step": "self_check_filter",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_filter",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = state.get("raw_text", "")
             filter_result = state.get("filter_result", {})
 
-            prompt_text = SELF_CHECK_FILTER_PROMPT.invoke({
-                "raw_text": text,
-                "is_valid": filter_result.get("is_valid", True),
-                "confidence": filter_result.get("confidence", "medium"),
-                "skip_reason": filter_result.get("skip_reason", ""),
-                "has_geo_entity": filter_result.get("has_geo_entity", False),
-                "has_spatial_relation": filter_result.get("has_spatial_relation", False),
-                "geo_entity_hint": filter_result.get("geo_entity_hint", ""),
-            })
+            prompt_text = SELF_CHECK_FILTER_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "is_valid": filter_result.get("is_valid", True),
+                    "confidence": filter_result.get("confidence", "medium"),
+                    "skip_reason": filter_result.get("skip_reason", ""),
+                    "has_geo_entity": filter_result.get("has_geo_entity", False),
+                    "has_spatial_relation": filter_result.get(
+                        "has_spatial_relation", False
+                    ),
+                    "geo_entity_hint": filter_result.get("geo_entity_hint", ""),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckFilterResult = parser.parse(response.content)
@@ -2560,14 +2927,16 @@ def create_self_check_filter_node(llm: Any):
                 f"false_negative={result.false_negative_detected}, retry={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_filter",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "verified_is_valid": result.verified_is_valid,
-                "false_negative_detected": result.false_negative_detected,
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_filter",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "verified_is_valid": result.verified_is_valid,
+                    "false_negative_detected": result.false_negative_detected,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             # 如果检测到误筛，更新filter_result
             updated_filter_result = {}
@@ -2587,21 +2956,27 @@ def create_self_check_filter_node(llm: Any):
 
             return {
                 "self_check_filter_result": result.model_dump(),
-                "filter_result": updated_filter_result if updated_filter_result else state.get("filter_result", {}),
+                "filter_result": updated_filter_result
+                if updated_filter_result
+                else state.get("filter_result", {}),
                 "retry_count": retry_count + 1,
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
-                "current_step": StepEnum.NORMALIZE if result.verified_is_valid else StepEnum.DONE,
+                "current_step": StepEnum.NORMALIZE
+                if result.verified_is_valid
+                else StepEnum.DONE,
             }
 
         except Exception as e:
             logger.error(f"[Self-Check-Filter] 失败: {e}")
-            writer({
-                "step": "self_check_filter",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_filter",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_filter_result": {},
                 "error": str(e),
@@ -2612,6 +2987,7 @@ def create_self_check_filter_node(llm: Any):
 
 
 # ===== P9新增：Self-Check-Normalize节点（可选） =====
+
 
 def create_self_check_normalize_node(llm: Any):
     """
@@ -2628,30 +3004,42 @@ def create_self_check_normalize_node(llm: Any):
 
     parser = PydanticOutputParser(pydantic_object=SelfCheckNormalizeResult)
 
-    async def self_check_normalize_node(state: CorpusState, writer: StreamWriter) -> Dict:
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
-        logger.info(f"[Self-Check-Normalize] 校验语料: {corpus_id}, 重试: {retry_count}")
+    async def self_check_normalize_node(
+        state: CorpusState, writer: StreamWriter
+    ) -> Dict:
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
+        logger.info(
+            f"[Self-Check-Normalize] 校验语料: {corpus_id}, 重试: {retry_count}"
+        )
 
-        writer({
-            "step": "self_check_normalize",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_normalize",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             raw_text = state.get("raw_text", "")
             normalize_result = state.get("normalize_result", {})
 
-            prompt_text = SELF_CHECK_NORMALIZE_PROMPT.invoke({
-                "raw_text": raw_text,
-                "normalized_text": normalize_result.get("normalized_text", ""),
-                "confidence": normalize_result.get("confidence", "medium"),
-                "has_changes": normalize_result.get("has_changes", False),
-                "preserved_semantics": normalize_result.get("preserved_semantics", True),
-                "normalizations": format_normalizations_for_check(normalize_result.get("normalizations", [])),
-            })
+            prompt_text = SELF_CHECK_NORMALIZE_PROMPT.invoke(
+                {
+                    "raw_text": raw_text,
+                    "normalized_text": normalize_result.get("normalized_text", ""),
+                    "confidence": normalize_result.get("confidence", "medium"),
+                    "has_changes": normalize_result.get("has_changes", False),
+                    "preserved_semantics": normalize_result.get(
+                        "preserved_semantics", True
+                    ),
+                    "normalizations": format_normalizations_for_check(
+                        normalize_result.get("normalizations", [])
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckNormalizeResult = parser.parse(response.content)
@@ -2661,13 +3049,15 @@ def create_self_check_normalize_node(llm: Any):
                 f"info_added={result.info_added}, retry={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_normalize",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "semantics_preserved": result.semantics_preserved,
-                "retry_suggested": result.retry_suggested
-            })
+            writer(
+                {
+                    "step": "self_check_normalize",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "semantics_preserved": result.semantics_preserved,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             # 如果语义丢失或添加了信息，使用原文
             updated_normalized_text = result.verified_normalized_text
@@ -2686,12 +3076,14 @@ def create_self_check_normalize_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Self-Check-Normalize] 失败: {e}")
-            writer({
-                "step": "self_check_normalize",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_normalize",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_normalize_result": {},
                 "error": str(e),
@@ -2702,6 +3094,7 @@ def create_self_check_normalize_node(llm: Any):
 
 
 # ===== P10新增：批量LLM调用节点 =====
+
 
 def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
     """
@@ -2719,8 +3112,7 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
     parser = PydanticOutputParser(pydantic_object=BatchExtractionResult)
 
     async def batch_joint_extraction_node(
-        corpus_list: List[Dict],
-        writer: StreamWriter
+        corpus_list: List[Dict], writer: StreamWriter
     ) -> Dict:
         """
         批量联合抽取
@@ -2739,11 +3131,13 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
         batch_size = len(corpus_list)
         logger.info(f"[Batch_Joint] 处理 {batch_size} 条语料")
 
-        writer({
-            "step": "batch_joint",
-            "status": "started",
-            "batch_size": batch_size,
-        })
+        writer(
+            {
+                "step": "batch_joint",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
 
         if batch_size == 0:
             return {
@@ -2761,21 +3155,39 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                 corpus_list_str = format_batch_corpus(corpus_list)
 
                 # 调用LLM
-                prompt_text = BATCH_JOINT_PROMPT.invoke({
-                    "batch_size": batch_size,
-                    "corpus_list": corpus_list_str,
-                })
+                prompt_text = BATCH_JOINT_PROMPT.invoke(
+                    {
+                        "batch_size": batch_size,
+                        "corpus_list": corpus_list_str,
+                    }
+                )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
                 response = await llm.ainvoke(full_prompt)
                 result: BatchExtractionResult = parser.parse(response.content)
 
-                # 转换为字典格式
+                # 转换为字典格式（P15修复：将JointTriple转换为字典，避免后续.get()错误）
                 batch_results = {}
                 for r in result.results:
+                    # 将 JointTriple 对象转换为字典列表
+                    triples_list = [
+                        {
+                            "head": t.head,
+                            "relation": extract_enum_value(t.relation),
+                            "tail": t.tail,
+                            "evidence": t.evidence,
+                            "confidence": extract_enum_value(t.confidence),
+                            "attributes": t.attributes.model_dump(
+                                exclude_none=True, mode="json"
+                            )
+                            if t.attributes
+                            else {},
+                        }
+                        for t in r.triples
+                    ]
                     batch_results[r.corpus_id] = {
                         "entities": r.entities,
-                        "triples": r.triples,
+                        "triples": triples_list,  # 使用转换后的字典列表
                         "confidence": r.confidence,
                         "has_geo_info": r.has_geo_info,
                         "skip_reason": r.skip_reason,
@@ -2787,13 +3199,15 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                     f"置信度: {result.overall_confidence}"
                 )
 
-                writer({
-                    "step": "batch_joint",
-                    "status": "completed",
-                    "batch_size": len(result.results),
-                    "cross_corpus_aliases_count": len(result.cross_corpus_aliases),
-                    "confidence": result.overall_confidence,
-                })
+                writer(
+                    {
+                        "step": "batch_joint",
+                        "status": "completed",
+                        "batch_size": len(result.results),
+                        "cross_corpus_aliases_count": len(result.cross_corpus_aliases),
+                        "confidence": result.overall_confidence,
+                    }
+                )
 
                 return {
                     "batch_results": batch_results,
@@ -2810,12 +3224,14 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                     continue
                 else:
                     logger.error(f"[Batch_Joint] 最终失败: {e}")
-                    writer({
-                        "step": "batch_joint",
-                        "status": "error",
-                        "error": str(e),
-                        "batch_size": batch_size,
-                    })
+                    writer(
+                        {
+                            "step": "batch_joint",
+                            "status": "error",
+                            "error": str(e),
+                            "batch_size": batch_size,
+                        }
+                    )
 
                     # 标记需要fallback为单条处理
                     return {
@@ -2838,14 +3254,16 @@ def create_batch_self_check_node(llm: Any):
     3. 决定是否需要重试或fallback
     """
     from .schemas import BatchSelfCheckResult
-    from .prompts import BATCH_SELF_CHECK_PROMPT, format_batch_results_for_check, format_cross_corpus_aliases
+    from .prompts import (
+        BATCH_SELF_CHECK_PROMPT,
+        format_batch_results_for_check,
+        format_cross_corpus_aliases,
+    )
 
     parser = PydanticOutputParser(pydantic_object=BatchSelfCheckResult)
 
     async def batch_self_check_node(
-        batch_results: Dict,
-        cross_corpus_aliases: List[Dict],
-        writer: StreamWriter
+        batch_results: Dict, cross_corpus_aliases: List[Dict], writer: StreamWriter
     ) -> Dict:
         """
         批量校验
@@ -2866,11 +3284,13 @@ def create_batch_self_check_node(llm: Any):
         """
         logger.info(f"[Batch_Self_Check] 校验 {len(batch_results)} 条语料结果")
 
-        writer({
-            "step": "batch_self_check",
-            "status": "started",
-            "batch_size": len(batch_results),
-        })
+        writer(
+            {
+                "step": "batch_self_check",
+                "status": "started",
+                "batch_size": len(batch_results),
+            }
+        )
 
         if not batch_results:
             return {
@@ -2884,17 +3304,18 @@ def create_batch_self_check_node(llm: Any):
         try:
             # 格式化输入
             results_list = [
-                {"corpus_id": cid, **data}
-                for cid, data in batch_results.items()
+                {"corpus_id": cid, **data} for cid, data in batch_results.items()
             ]
             results_str = format_batch_results_for_check(results_list)
             aliases_str = format_cross_corpus_aliases(cross_corpus_aliases)
 
             # 调用LLM
-            prompt_text = BATCH_SELF_CHECK_PROMPT.invoke({
-                "batch_results": results_str,
-                "cross_corpus_aliases": aliases_str,
-            })
+            prompt_text = BATCH_SELF_CHECK_PROMPT.invoke(
+                {
+                    "batch_results": results_str,
+                    "cross_corpus_aliases": aliases_str,
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
@@ -2907,32 +3328,38 @@ def create_batch_self_check_node(llm: Any):
                 f"单条fallback: {result.fallback_to_single}"
             )
 
-            writer({
-                "step": "batch_self_check",
-                "status": "completed",
-                "verified_count": len(result.verified_results),
-                "rejected_count": len(result.rejected_results),
-                "retry_suggested": result.retry_suggested,
-                "fallback_to_single": result.fallback_to_single,
-            })
+            writer(
+                {
+                    "step": "batch_self_check",
+                    "status": "completed",
+                    "verified_count": len(result.verified_results),
+                    "rejected_count": len(result.rejected_results),
+                    "retry_suggested": result.retry_suggested,
+                    "fallback_to_single": result.fallback_to_single,
+                }
+            )
 
             return {
-                "verified_results": [r.model_dump() for r in result.verified_results],
+                "verified_results": [
+                    r.model_dump(mode="json") for r in result.verified_results
+                ],
                 "rejected_results": result.rejected_results,
                 "verified_aliases": result.verified_aliases,
                 "rejected_aliases": result.rejected_aliases,
-                "batch_self_check_result": result.model_dump(),
+                "batch_self_check_result": result.model_dump(mode="json"),
                 "retry_suggested": result.retry_suggested,
                 "fallback_to_single": result.fallback_to_single,
             }
 
         except Exception as e:
             logger.error(f"[Batch_Self_Check] 失败: {e}")
-            writer({
-                "step": "batch_self_check",
-                "status": "error",
-                "error": str(e),
-            })
+            writer(
+                {
+                    "step": "batch_self_check",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
 
             # 校验失败时，保守策略：全部通过但标记低置信度
             return {
@@ -2949,7 +3376,477 @@ def create_batch_self_check_node(llm: Any):
     return batch_self_check_node
 
 
+# ===== P15新增：批量Self-Check-QA节点 =====
+
+
+def create_batch_self_check_qa_node(llm: Any):
+    """
+    创建批量QA脚手架校验节点
+
+    职责：
+    1. 校验批量QA脚手架结果的质量
+    2. 检查实体/关系覆盖度
+    3. 决定哪些语料需要重新生成QA
+
+    Args:
+        llm: LLM实例
+
+    Returns:
+        batch_self_check_qa_node 函数
+    """
+    from .schemas import BatchSelfCheckQAResult
+    from .prompts import (
+        BATCH_SELF_CHECK_QA_PROMPT,
+        format_batch_qa_results_for_check,
+        format_corpus_texts_for_check,
+    )
+
+    parser = PydanticOutputParser(pydantic_object=BatchSelfCheckQAResult)
+
+    async def batch_self_check_qa_node(
+        batch_qa_results: Dict, corpus_texts: Dict, writer: StreamWriter
+    ) -> Dict:
+        """
+        批量QA脚手架校验
+
+        Args:
+            batch_qa_results: {corpus_id: {qa_pairs, entity_hints, relation_hints, confidence}}
+            corpus_texts: {corpus_id: text} 原始文本
+            writer: StreamWriter
+
+        Returns:
+            {
+                "verified_results": [{corpus_id, verified_qa_pairs, entity_coverage, confidence}],
+                "rejected_results": [{corpus_id, reason}],
+                "overall_confidence": "high/medium/low",
+                "retry_suggested": False,
+            }
+        """
+        batch_size = len(batch_qa_results)
+        logger.info(f"[Batch_Self_Check_QA] 校验 {batch_size} 条语料QA结果")
+
+        writer(
+            {
+                "step": "batch_self_check_qa",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_qa_results:
+            logger.info("[Batch_Self_Check_QA] 无QA结果，返回空")
+            return {
+                "verified_results": [],
+                "rejected_results": [],
+                "overall_confidence": "medium",
+                "retry_suggested": False,
+            }
+
+        try:
+            # 格式化输入
+            qa_results_str = format_batch_qa_results_for_check(batch_qa_results, corpus_texts)
+            texts_str = format_corpus_texts_for_check(corpus_texts)
+
+            # 调用LLM
+            prompt_text = BATCH_SELF_CHECK_QA_PROMPT.invoke(
+                {
+                    "batch_qa_results": qa_results_str,
+                    "corpus_texts": texts_str,
+                }
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchSelfCheckQAResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Batch_Self_Check_QA] 完成: 通过 {len(result.verified_results)} 条, "
+                f"拒绝 {len(result.rejected_results)} 条, "
+                f"整体置信度: {result.overall_confidence}, "
+                f"重试建议: {result.retry_suggested}"
+            )
+
+            writer(
+                {
+                    "step": "batch_self_check_qa",
+                    "status": "completed",
+                    "verified_count": len(result.verified_results),
+                    "rejected_count": len(result.rejected_results),
+                    "overall_confidence": result.overall_confidence,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
+
+            return {
+                "verified_results": [r.model_dump(mode="json") for r in result.verified_results],
+                "rejected_results": result.rejected_results,
+                "batch_self_check_qa_result": result.model_dump(mode="json"),
+                "overall_confidence": result.overall_confidence,
+                "retry_suggested": result.retry_suggested,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Self_Check_QA] 失败: {e}")
+            writer(
+                {
+                    "step": "batch_self_check_qa",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
+
+            # 校验失败时，保守策略：全部通过但标记低置信度
+            return {
+                "verified_results": [
+                    {
+                        "corpus_id": cid,
+                        "verified_qa_pairs": qa_data.get("qa_pairs", []),
+                        "entity_coverage": "low",
+                        "relation_coverage": "low",
+                        "confidence": "low",
+                    }
+                    for cid, qa_data in batch_qa_results.items()
+                ],
+                "rejected_results": [],
+                "overall_confidence": "low",
+                "retry_suggested": False,
+            }
+
+    return batch_self_check_qa_node
+
+
+# ===== P15新增：批量Eval节点 =====
+
+
+def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
+    """
+    创建批量评估节点
+
+    职责：
+    1. 对批量三元组进行评分（SEM、FAC、CON）
+    2. 判断是否需要修正
+    3. 决定每条语料的评估是否通过
+
+    Args:
+        llm: LLM实例
+        eval_threshold: 评估通过阈值（默认3.5）
+
+    Returns:
+        batch_eval_node 函数
+    """
+    from .schemas import BatchEvalResult
+    from .prompts import (
+        BATCH_EVAL_PROMPT,
+        format_batch_triples_for_eval,
+        format_corpus_texts_for_check,
+    )
+
+    parser = PydanticOutputParser(pydantic_object=BatchEvalResult)
+
+    async def batch_eval_node(
+        batch_extraction_results: Dict, corpus_texts: Dict, writer: StreamWriter
+    ) -> Dict:
+        """
+        批量评估
+
+        Args:
+            batch_extraction_results: {corpus_id: {entities, triples, confidence}}
+            corpus_texts: {corpus_id: text} 原始文本
+            writer: StreamWriter
+
+        Returns:
+            {
+                "batch_eval_results": {corpus_id: {scores, eval_passed, corrected_triples}},
+                "overall_confidence": "high/medium/low",
+            }
+        """
+        batch_size = len(batch_extraction_results)
+        logger.info(f"[Batch_Eval] 评估 {batch_size} 条语料")
+
+        writer(
+            {
+                "step": "batch_eval",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_extraction_results:
+            logger.info("[Batch_Eval] 无结果，返回空")
+            return {
+                "batch_eval_results": {},
+                "overall_confidence": "medium",
+            }
+
+        # 检查是否有语料无三元组，直接标记为通过
+        no_triple_corpus = []
+        has_triple_corpus = {}
+        for corpus_id, data in batch_extraction_results.items():
+            if not data.get("triples"):
+                no_triple_corpus.append(corpus_id)
+            else:
+                has_triple_corpus[corpus_id] = data
+
+        # 无三元组的语料直接通过
+        no_triple_results = {
+            corpus_id: {
+                "scores": [],
+                "eval_passed": True,
+                "corrected_triples": [],
+                "confidence": "low",
+            }
+            for corpus_id in no_triple_corpus
+        }
+
+        if not has_triple_corpus:
+            logger.info("[Batch_Eval] 所有语料无三元组")
+            writer(
+                {
+                    "step": "batch_eval",
+                    "status": "completed",
+                    "batch_size": batch_size,
+                    "all_no_triples": True,
+                }
+            )
+            return {
+                "batch_eval_results": no_triple_results,
+                "overall_confidence": "low",
+            }
+
+        try:
+            # 格式化输入
+            triples_str = format_batch_triples_for_eval(has_triple_corpus)
+            texts_str = format_corpus_texts_for_check(
+                {cid: corpus_texts.get(cid, "") for cid in has_triple_corpus}
+            )
+
+            # 调用LLM
+            prompt_text = BATCH_EVAL_PROMPT.invoke(
+                {
+                    "batch_triples": triples_str,
+                    "corpus_texts": texts_str,
+                }
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchEvalResult = parser.parse(response.content)
+
+            # 转换为字典格式
+            eval_results_dict = {}
+            for r in result.batch_eval_results:
+                eval_results_dict[r.corpus_id] = {
+                    "scores": r.scores,
+                    "eval_passed": r.eval_passed,
+                    "corrected_triples": r.corrected_triples,
+                    "confidence": r.confidence,
+                }
+
+            # 合并无三元组的结果
+            all_results = {**no_triple_results, **eval_results_dict}
+
+            logger.info(
+                f"[Batch_Eval] 完成: {len(all_results)} 条语料, "
+                f"整体置信度: {result.overall_confidence}"
+            )
+
+            writer(
+                {
+                    "step": "batch_eval",
+                    "status": "completed",
+                    "batch_size": len(all_results),
+                    "overall_confidence": result.overall_confidence,
+                }
+            )
+
+            return {
+                "batch_eval_results": all_results,
+                "batch_eval_result": result.model_dump(mode="json"),
+                "overall_confidence": result.overall_confidence,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Eval] 失败: {e}")
+            writer(
+                {
+                    "step": "batch_eval",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
+
+            # 评估失败时，保守策略：全部通过但标记低置信度
+            fallback_results = {
+                corpus_id: {
+                    "scores": [],
+                    "eval_passed": True,
+                    "corrected_triples": [],
+                    "confidence": "low",
+                }
+                for corpus_id in batch_extraction_results
+            }
+            return {
+                "batch_eval_results": fallback_results,
+                "overall_confidence": "low",
+            }
+
+    return batch_eval_node
+
+
+# ===== P15新增：批量Self-Check-Eval节点 =====
+
+
+def create_batch_self_check_eval_node(llm: Any):
+    """
+    创建批量评估校验节点
+
+    职责：
+    1. 校验批量评估结果的质量
+    2. 检查评分一致性
+    3. 决定哪些语料需要重新评估
+
+    Args:
+        llm: LLM实例
+
+    Returns:
+        batch_self_check_eval_node 函数
+    """
+    from .schemas import BatchSelfCheckEvalResult
+    from .prompts import (
+        BATCH_SELF_CHECK_EVAL_PROMPT,
+        format_corpus_texts_for_check,
+    )
+
+    parser = PydanticOutputParser(pydantic_object=BatchSelfCheckEvalResult)
+
+    async def batch_self_check_eval_node(
+        batch_eval_results: Dict, corpus_texts: Dict, writer: StreamWriter
+    ) -> Dict:
+        """
+        批量评估校验
+
+        Args:
+            batch_eval_results: {corpus_id: {scores, eval_passed, corrected_triples}}
+            corpus_texts: {corpus_id: text} 原始文本
+            writer: StreamWriter
+
+        Returns:
+            {
+                "verified_results": [{corpus_id, verified_triples}],
+                "rejected_results": [{corpus_id, reason}],
+                "overall_confidence": "high/medium/low",
+                "retry_suggested": False,
+            }
+        """
+        batch_size = len(batch_eval_results)
+        logger.info(f"[Batch_Self_Check_Eval] 校验 {batch_size} 条语料评估结果")
+
+        writer(
+            {
+                "step": "batch_self_check_eval",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_eval_results:
+            logger.info("[Batch_Self_Check_Eval] 无评估结果，返回空")
+            return {
+                "verified_results": [],
+                "rejected_results": [],
+                "overall_confidence": "medium",
+                "retry_suggested": False,
+            }
+
+        try:
+            # 格式化输入
+            eval_str = ""
+            for corpus_id, data in batch_eval_results.items():
+                scores = data.get("scores", [])
+                eval_passed = data.get("eval_passed", True)
+                confidence = data.get("confidence", "medium")
+
+                score_str = ""
+                if scores:
+                    score_str = ", ".join(
+                        [
+                            f"<{s.get('triple', {}).get('head', '')},...> SEM:{s.get('SEM', 0)}"
+                            for s in scores[:3]
+                        ]
+                    )
+
+                eval_str += f"- [{corpus_id}] 通过:{eval_passed} 置信度:{confidence}\n  评分: {score_str}\n"
+
+            texts_str = format_corpus_texts_for_check(corpus_texts)
+
+            # 调用LLM
+            prompt_text = BATCH_SELF_CHECK_EVAL_PROMPT.invoke(
+                {
+                    "batch_eval_results": eval_str,
+                    "corpus_texts": texts_str,
+                }
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchSelfCheckEvalResult = parser.parse(response.content)
+
+            logger.info(
+                f"[Batch_Self_Check_Eval] 完成: 通过 {len(result.verified_results)} 条, "
+                f"拒绝 {len(result.rejected_results)} 条, "
+                f"整体置信度: {result.overall_confidence}"
+            )
+
+            writer(
+                {
+                    "step": "batch_self_check_eval",
+                    "status": "completed",
+                    "verified_count": len(result.verified_results),
+                    "rejected_count": len(result.rejected_results),
+                    "overall_confidence": result.overall_confidence,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
+
+            return {
+                "verified_results": [r.model_dump(mode="json") for r in result.verified_results],
+                "rejected_results": result.rejected_results,
+                "batch_self_check_eval_result": result.model_dump(mode="json"),
+                "overall_confidence": result.overall_confidence,
+                "retry_suggested": result.retry_suggested,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Self_Check_Eval] 失败: {e}")
+            writer(
+                {
+                    "step": "batch_self_check_eval",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
+
+            # 校验失败时，保守策略：全部通过但标记低置信度
+            return {
+                "verified_results": [
+                    {
+                        "corpus_id": cid,
+                        "verified_triples": data.get("corrected_triples", []),
+                        "score_consistency": "low",
+                        "confidence": "low",
+                    }
+                    for cid, data in batch_eval_results.items()
+                ],
+                "rejected_results": [],
+                "overall_confidence": "low",
+                "retry_suggested": False,
+            }
+
+    return batch_self_check_eval_node
+
+
 # ===== P10新增：批量处理入口函数 =====
+
 
 async def process_corpus_batch_with_llm(
     llm: Any,
@@ -2997,7 +3894,7 @@ async def process_corpus_batch_with_llm(
 
     # 分批处理（每批batch_llm_size条）
     for i in range(0, len(corpus_list), batch_llm_size):
-        batch_corpus = corpus_list[i:i + batch_llm_size]
+        batch_corpus = corpus_list[i : i + batch_llm_size]
         batch_num = i // batch_llm_size + 1
 
         logger.info(f"[Batch {batch_num}] 处理 {len(batch_corpus)} 条语料")
@@ -3021,7 +3918,9 @@ async def process_corpus_batch_with_llm(
                         "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                         "triples": [],
                         "confidence": "error",
-                        "error": extraction_result.get("fallback_reason", "批量处理失败"),
+                        "error": extraction_result.get(
+                            "fallback_reason", "批量处理失败"
+                        ),
                     }
             continue
 
@@ -3066,6 +3965,7 @@ async def process_corpus_batch_with_llm(
 
 # ===== P10新增：QA导师节点 =====
 
+
 def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
     """
     创建QA导师节点 - 使用强模型进行深度语义分析
@@ -3079,12 +3979,13 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
     P14改进：支持回答后续节点的查询（双向交流）
     """
     from .schemas import QAMentorScaffoldResult, MentorQueryResponse
+
     scaffold_parser = PydanticOutputParser(pydantic_object=QAMentorScaffoldResult)
     query_parser = PydanticOutputParser(pydantic_object=MentorQueryResponse)
 
     async def qa_mentor_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """QA导师节点：深度语义分析 + 导师指导 + 回答查询"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
 
         # P14新增：检查是否有来自后续节点的查询
         mentor_query = state.get("mentor_query")
@@ -3092,15 +3993,19 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
         if mentor_query:
             # ===== 回答查询模式 =====
             query_source = state.get("query_source_node", "unknown")
-            logger.info(f"[QA_Mentor] 回答来自 {query_source} 的查询: {mentor_query.get('query_type')}")
+            logger.info(
+                f"[QA_Mentor] 回答来自 {query_source} 的查询: {mentor_query.get('query_type')}"
+            )
 
-            writer({
-                "step": "qa_mentor",
-                "corpus_id": corpus_id,
-                "status": "answering_query",
-                "query_source": query_source,
-                "query_type": mentor_query.get("query_type"),
-            })
+            writer(
+                {
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "answering_query",
+                    "query_source": query_source,
+                    "query_type": mentor_query.get("query_type"),
+                }
+            )
 
             try:
                 text_for_processing = get_text_for_processing(state)
@@ -3120,17 +4025,23 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 previous_guidance_text = format_mentor_guidance(previous_guidance)
 
                 # 调用导师回答查询
-                prompt_text = MENTOR_QUERY_PROMPT.invoke({
-                    "source_node": query_source,
-                    "query_type": query_type,
-                    "query_content": query_content,
-                    "involved_entities": ", ".join(involved_entities) if involved_entities else "(无)",
-                    "involved_relations": ", ".join(involved_relations) if involved_relations else "(无)",
-                    "current_confidence": current_confidence,
-                    "context": context,
-                    "raw_text": text_for_processing,
-                    "previous_guidance": previous_guidance_text,
-                })
+                prompt_text = MENTOR_QUERY_PROMPT.invoke(
+                    {
+                        "source_node": query_source,
+                        "query_type": query_type,
+                        "query_content": query_content,
+                        "involved_entities": ", ".join(involved_entities)
+                        if involved_entities
+                        else "(无)",
+                        "involved_relations": ", ".join(involved_relations)
+                        if involved_relations
+                        else "(无)",
+                        "current_confidence": current_confidence,
+                        "context": context,
+                        "raw_text": text_for_processing,
+                        "previous_guidance": previous_guidance_text,
+                    }
+                )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{query_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
                 query_result: MentorQueryResponse = query_parser.parse(response.content)
@@ -3140,14 +4051,16 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                     f"建议修改={query_result.suggests_revision}"
                 )
 
-                writer({
-                    "step": "qa_mentor",
-                    "corpus_id": corpus_id,
-                    "status": "query_answered",
-                    "answer": query_result.answer[:100],
-                    "confidence": query_result.response_confidence,
-                    "return_to": query_result.return_to_node,
-                })
+                writer(
+                    {
+                        "step": "qa_mentor",
+                        "corpus_id": corpus_id,
+                        "status": "query_answered",
+                        "answer": query_result.answer[:100],
+                        "confidence": query_result.response_confidence,
+                        "return_to": query_result.return_to_node,
+                    }
+                )
 
                 # 更新指导信息（如果有）
                 updated_guidance = {}
@@ -3157,55 +4070,73 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                     updated_guidance = previous_guidance
 
                 # 返回到发起查询的节点（优先使用导师建议的目标节点）
-                return_to = query_result.return_to_node if query_result.return_to_node else (query_source if query_source else "joint_ner_re")
+                return_to = (
+                    query_result.return_to_node
+                    if query_result.return_to_node
+                    else (query_source if query_source else "joint_ner_re")
+                )
 
                 return {
                     "mentor_response": query_result.model_dump(),
                     "mentor_guidance": updated_guidance,
-                    "qa_entity_hints": query_result.updated_entity_hints or state.get("qa_entity_hints", []),
-                    "qa_relation_hints": query_result.updated_relation_hints or state.get("qa_relation_hints", []),
+                    "qa_entity_hints": query_result.updated_entity_hints
+                    or state.get("qa_entity_hints", []),
+                    "qa_relation_hints": query_result.updated_relation_hints
+                    or state.get("qa_relation_hints", []),
                     "needs_mentor_help": False,  # 已回答，继续处理
                     "query_count": state.get("query_count", 0) + 1,  # 增加查询计数
                     "return_to_node": return_to,
-                    "current_step": getattr(StepEnum, return_to.upper(), StepEnum.JOINT_NER_RE),
+                    "current_step": getattr(
+                        StepEnum, return_to.upper(), StepEnum.JOINT_NER_RE
+                    ),
                 }
 
             except Exception as e:
                 logger.error(f"[QA_Mentor] 回答查询失败: {e}")
-                writer({
-                    "step": "qa_mentor",
-                    "corpus_id": corpus_id,
-                    "status": "query_error",
-                    "error": str(e)
-                })
+                writer(
+                    {
+                        "step": "qa_mentor",
+                        "corpus_id": corpus_id,
+                        "status": "query_error",
+                        "error": str(e),
+                    }
+                )
                 # 查询失败时，返回到原节点继续
                 return {
                     "mentor_response": {},
                     "needs_mentor_help": False,
                     "query_count": state.get("query_count", 0) + 1,
                     "return_to_node": state.get("query_source_node", "joint_ner_re"),
-                    "current_step": getattr(StepEnum, state.get("query_source_node", "joint_ner_re").upper(), StepEnum.JOINT_NER_RE),
+                    "current_step": getattr(
+                        StepEnum,
+                        state.get("query_source_node", "joint_ner_re").upper(),
+                        StepEnum.JOINT_NER_RE,
+                    ),
                 }
 
         else:
             # ===== 初始化指导模式 =====
             logger.info(f"[QA_Mentor] 处理语料: {corpus_id}")
 
-            writer({
-                "step": "qa_mentor",
-                "corpus_id": corpus_id,
-                "status": "started",
-                "message": "开始导师深度分析"
-            })
+            writer(
+                {
+                    "step": "qa_mentor",
+                    "corpus_id": corpus_id,
+                    "status": "started",
+                    "message": "开始导师深度分析",
+                }
+            )
 
             try:
                 # 使用归一化后的文本
                 text_for_processing = get_text_for_processing(state)
 
                 # 调用LLM
-                prompt_text = QA_MENTOR_PROMPT.invoke({
-                    "normalized_text": text_for_processing,
-                })
+                prompt_text = QA_MENTOR_PROMPT.invoke(
+                    {
+                        "normalized_text": text_for_processing,
+                    }
+                )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{scaffold_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
                 result: QAMentorScaffoldResult = scaffold_parser.parse(response.content)
@@ -3217,16 +4148,18 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 )
 
                 # 发送完成事件
-                writer({
-                    "step": "qa_mentor",
-                    "corpus_id": corpus_id,
-                    "status": "completed",
-                    "qa_count": len(result.qa_pairs),
-                    "entity_hints": result.entity_hints,
-                    "relation_hints": result.relation_hints,
-                    "confidence": result.overall_confidence,
-                    "has_mentor_guidance": result.mentor_guidance is not None
-                })
+                writer(
+                    {
+                        "step": "qa_mentor",
+                        "corpus_id": corpus_id,
+                        "status": "completed",
+                        "qa_count": len(result.qa_pairs),
+                        "entity_hints": result.entity_hints,
+                        "relation_hints": result.relation_hints,
+                        "confidence": result.overall_confidence,
+                        "has_mentor_guidance": result.mentor_guidance is not None,
+                    }
+                )
 
                 # 根据结果决定下一步
                 if result.should_skip_detailed_extraction:
@@ -3234,7 +4167,9 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                     return {
                         "qa_scaffold_result": result.model_dump(),
                         "semantic_summary": result.semantic_summary,
-                        "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                        "mentor_guidance": result.mentor_guidance.model_dump()
+                        if result.mentor_guidance
+                        else {},
                         "reasoning_trace": result.reasoning_trace,
                         "qa_entity_hints": result.entity_hints,
                         "qa_relation_hints": result.relation_hints,
@@ -3246,7 +4181,9 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                     return {
                         "qa_scaffold_result": result.model_dump(),
                         "semantic_summary": result.semantic_summary,
-                        "mentor_guidance": result.mentor_guidance.model_dump() if result.mentor_guidance else {},
+                        "mentor_guidance": result.mentor_guidance.model_dump()
+                        if result.mentor_guidance
+                        else {},
                         "reasoning_trace": result.reasoning_trace,
                         "qa_entity_hints": result.entity_hints,
                         "qa_relation_hints": result.relation_hints,
@@ -3257,12 +4194,14 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
 
             except Exception as e:
                 logger.error(f"[QA_Mentor] 处理失败: {e}")
-                writer({
-                    "step": "qa_mentor",
-                    "corpus_id": corpus_id,
-                    "status": "error",
-                    "error": str(e)
-                })
+                writer(
+                    {
+                        "step": "qa_mentor",
+                        "corpus_id": corpus_id,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
                 return {
                     "qa_scaffold_result": {},
                     "semantic_summary": "",
@@ -3296,7 +4235,10 @@ def _build_query_context(state: CorpusState, source_node: str) -> str:
             context_lines.append("当前抽取实体:\n" + "\n".join(entity_lines))
 
         if triples:
-            triple_lines = [f"<{t.get('head')}, {t.get('relation')}, {t.get('tail')}>" for t in triples[:5]]
+            triple_lines = [
+                f"<{t.get('head')}, {t.get('relation')}, {t.get('tail')}>"
+                for t in triples[:5]
+            ]
             context_lines.append("当前抽取三元组:\n" + "\n".join(triple_lines))
 
         if joint_result:
@@ -3314,7 +4256,9 @@ def _build_query_context(state: CorpusState, source_node: str) -> str:
         context_lines.append(f"修正后三元组数: {len(corrected_triples)}")
 
         if corrected_triples:
-            passed_count = sum(1 for t in corrected_triples if t.get("passed_eval", False))
+            passed_count = sum(
+                1 for t in corrected_triples if t.get("passed_eval", False)
+            )
             context_lines.append(f"通过评估数: {passed_count}")
 
     elif source_node == "label":
@@ -3340,22 +4284,29 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
     5. 整合语义脚手架
     """
     from .schemas import QAApprovalResult
+
     parser = PydanticOutputParser(pydantic_object=QAApprovalResult)
 
     async def qa_approval_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """QA审批节点：审批后续节点结果"""
-        corpus_id = state['corpus_id']
-        revision_cycle_count = state.get('revision_cycle_count', 0)
-        max_revision_cycles = state.get('max_revision_cycles', config.max_revision_cycles)
+        corpus_id = state["corpus_id"]
+        revision_cycle_count = state.get("revision_cycle_count", 0)
+        max_revision_cycles = state.get(
+            "max_revision_cycles", config.max_revision_cycles
+        )
 
-        logger.info(f"[QA_Approval] 审批语料: {corpus_id}, 修改轮次: {revision_cycle_count}/{max_revision_cycles}")
+        logger.info(
+            f"[QA_Approval] 审批语料: {corpus_id}, 修改轮次: {revision_cycle_count}/{max_revision_cycles}"
+        )
 
-        writer({
-            "step": "qa_approval",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "revision_cycle": revision_cycle_count
-        })
+        writer(
+            {
+                "step": "qa_approval",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "revision_cycle": revision_cycle_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
@@ -3382,16 +4333,18 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
             reflection_summary = format_reflection_for_approval(state)
 
             # 调用LLM进行审批
-            prompt_text = QA_APPROVAL_PROMPT.invoke({
-                "raw_text": text,
-                "mentor_guidance": format_mentor_guidance(mentor_guidance),
-                "semantic_summary": semantic_summary,
-                "joint_result": format_joint_for_approval(joint_result),
-                "eval_result": format_eval_for_approval(eval_result),
-                "label_result": format_label_for_approval(label_result),
-                "previous_feedbacks": format_revision_feedbacks(revision_feedbacks),
-                "reflection_summary": reflection_summary,
-            })
+            prompt_text = QA_APPROVAL_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "mentor_guidance": format_mentor_guidance(mentor_guidance),
+                    "semantic_summary": semantic_summary,
+                    "joint_result": format_joint_for_approval(joint_result),
+                    "eval_result": format_eval_for_approval(eval_result),
+                    "label_result": format_label_for_approval(label_result),
+                    "previous_feedbacks": format_revision_feedbacks(revision_feedbacks),
+                    "reflection_summary": reflection_summary,
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: QAApprovalResult = parser.parse(response.content)
@@ -3402,15 +4355,17 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
                 f"retry_target_nodes={result.retry_target_nodes}"
             )
 
-            writer({
-                "step": "qa_approval",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "overall_status": result.overall_status.value,
-                "overall_confidence": result.overall_confidence,
-                "retry_suggested": result.retry_suggested,
-                "revision_cycle": revision_cycle_count + 1
-            })
+            writer(
+                {
+                    "step": "qa_approval",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "overall_status": result.overall_status.value,
+                    "overall_confidence": result.overall_confidence,
+                    "retry_suggested": result.retry_suggested,
+                    "revision_cycle": revision_cycle_count + 1,
+                }
+            )
 
             # 收集反馈
             all_feedbacks = state.get("revision_feedbacks", [])
@@ -3436,12 +4391,14 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
 
         except Exception as e:
             logger.error(f"[QA_Approval] 处理失败: {e}")
-            writer({
-                "step": "qa_approval",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "qa_approval",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "qa_approval_result": {},
                 "error": str(e),
@@ -3466,16 +4423,20 @@ def create_revision_joint_node(llm: Any):
 
     async def revision_joint_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """修改联合抽取节点"""
-        corpus_id = state['corpus_id']
-        revision_cycle = state.get('revision_cycle_count', 0)
-        logger.info(f"[Revision_Joint] 修改抽取: {corpus_id}, 修改轮次: {revision_cycle}")
+        corpus_id = state["corpus_id"]
+        revision_cycle = state.get("revision_cycle_count", 0)
+        logger.info(
+            f"[Revision_Joint] 修改抽取: {corpus_id}, 修改轮次: {revision_cycle}"
+        )
 
-        writer({
-            "step": "revision_joint",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "revision_cycle": revision_cycle
-        })
+        writer(
+            {
+                "step": "revision_joint",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "revision_cycle": revision_cycle,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
@@ -3497,23 +4458,34 @@ def create_revision_joint_node(llm: Any):
             previous_triples = state.get("triples", [])
 
             # 调用LLM改进
-            prompt_text = REVISION_JOINT_PROMPT.invoke({
-                "raw_text": text,
-                "feedback_summary": format_feedback_summary(revision_feedbacks, revision_cycle),
-                "feedbacks": format_feedbacks_for_revision(recent_feedbacks),
-                "semantic_summary": semantic_summary,
-                "mentor_guidance": format_mentor_guidance(mentor_guidance),
-                "previous_entities": format_entities(previous_entities),
-                "previous_triples": format_triples(previous_triples),
-                "entity_hints": format_entity_hints(entity_hints),
-                "relation_hints": format_relation_hints(relation_hints),
-            })
+            prompt_text = REVISION_JOINT_PROMPT.invoke(
+                {
+                    "raw_text": text,
+                    "feedback_summary": format_feedback_summary(
+                        revision_feedbacks, revision_cycle
+                    ),
+                    "feedbacks": format_feedbacks_for_revision(recent_feedbacks),
+                    "semantic_summary": semantic_summary,
+                    "mentor_guidance": format_mentor_guidance(mentor_guidance),
+                    "previous_entities": format_entities(previous_entities),
+                    "previous_triples": format_triples(previous_triples),
+                    "entity_hints": format_entity_hints(entity_hints),
+                    "relation_hints": format_relation_hints(relation_hints),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: JointExtractionResult = parser.parse(response.content)
 
             # 转换为现有格式（v3.4扩展版：6种实体类型）
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
+            entities_dict = {
+                "道路": [],
+                "POI": [],
+                "建筑物": [],
+                "街区": [],
+                "功能": [],
+                "事件": [],
+            }
             for e in result.entities:
                 entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
@@ -3525,8 +4497,12 @@ def create_revision_joint_node(llm: Any):
                     "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
-                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                    "confidence": extract_enum_value(
+                        t.confidence
+                    ),  # P15改进：使用工具函数
+                    "attributes": t.attributes.model_dump(exclude_none=True)
+                    if t.attributes
+                    else {},
                 }
                 for t in result.triples
             ]
@@ -3536,14 +4512,16 @@ def create_revision_joint_node(llm: Any):
                 f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
             )
 
-            writer({
-                "step": "revision_joint",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "entity_count": len(result.entities),
-                "triple_count": len(result.triples),
-                "revision_cycle": revision_cycle
-            })
+            writer(
+                {
+                    "step": "revision_joint",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "entity_count": len(result.entities),
+                    "triple_count": len(result.triples),
+                    "revision_cycle": revision_cycle,
+                }
+            )
 
             return {
                 "entities": entities_dict,
@@ -3555,12 +4533,14 @@ def create_revision_joint_node(llm: Any):
 
         except Exception as e:
             logger.error(f"[Revision_Joint] 处理失败: {e}")
-            writer({
-                "step": "revision_joint",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "revision_joint",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "error": str(e),
                 "current_step": StepEnum.EVAL,
@@ -3570,6 +4550,7 @@ def create_revision_joint_node(llm: Any):
 
 
 # ===== P11新增：实体对齐节点 =====
+
 
 def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
     """
@@ -3597,6 +4578,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
     - amap_poi_wgs84（~37000条）：利用pgvector HNSW索引批量查询，避免加载全部到内存
     """
     from .schemas import EntityAlignmentResult, EntityAlignmentItem, EntityCandidate
+
     parser = PydanticOutputParser(pydantic_object=EntityAlignmentItem)
 
     # ===== 函数级缓存（P12性能优化） =====
@@ -3610,8 +4592,10 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
         nonlocal _embedding_model_cache
         if _embedding_model_cache is None:
             import os
-            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像加速
+
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"  # 国内镜像加速
             from sentence_transformers import SentenceTransformer
+
             model_name = config.alignment_embedding_model
             logger.info(f"[Entity_Alignment] 加载嵌入模型: {model_name}")
             _embedding_model_cache = SentenceTransformer(model_name)
@@ -3639,64 +4623,71 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 WHERE embedding IS NOT NULL
             """)
             geo_rows = cur.fetchall()
-        
+
         geo_entities = []
         geo_embeddings = []
         for row in geo_rows:
             entity_id, name, type_, lon, lat, emb_str = row
             if emb_str:
                 import json
+
                 # 解析embedding向量（pgvector返回字符串格式，使用json.loads替代eval）
                 emb_list = json.loads(emb_str) if isinstance(emb_str, str) else emb_str
-                geo_entities.append({
-                    "entity_id": entity_id,
-                    "name": name,
-                    "type": type_ or "",
-                    "longitude": lon,
-                    "latitude": lat,
-                    "source": "geo_entity_names"
-                })
+                geo_entities.append(
+                    {
+                        "entity_id": entity_id,
+                        "name": name,
+                        "type": type_ or "",
+                        "longitude": lon,
+                        "latitude": lat,
+                        "source": "geo_entity_names",
+                    }
+                )
                 geo_embeddings.append(emb_list)
-        
+
         geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
-        logger.info(f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条 (~{len(geo_entities)*768*4/1024/1024:.1f}MB)")
-        
+        logger.info(
+            f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条 (~{len(geo_entities) * 768 * 4 / 1024 / 1024:.1f}MB)"
+        )
+
         return geo_entities, geo_embeddings_np
 
-    def _batch_similarity_search_geo(query_embeddings_np, geo_embeddings_np, geo_entities, top_k):
+    def _batch_similarity_search_geo(
+        query_embeddings_np, geo_embeddings_np, geo_entities, top_k
+    ):
         """
         geo实体批量相似度搜索（内存计算）
-        
+
         参数：
         - query_embeddings_np: (N_query, dim) numpy数组
         - geo_embeddings_np: (N_geo, dim) numpy数组
-        - geo_entities: List[Dict] 
+        - geo_entities: List[Dict]
         - top_k: 每个查询返回的候选数量
-        
+
         返回：
         - candidates_per_query: List[List[Dict]] 每个查询的top_k候选列表
         """
         import numpy as np
-        
+
         if len(geo_embeddings_np) == 0 or len(query_embeddings_np) == 0:
             return [[] for _ in range(len(query_embeddings_np))]
-        
+
         # 归一化向量
         query_norms = np.linalg.norm(query_embeddings_np, axis=1, keepdims=True)
         db_norms = np.linalg.norm(geo_embeddings_np, axis=1, keepdims=True)
-        
+
         query_normalized = query_embeddings_np / (query_norms + 1e-10)
         db_normalized = geo_embeddings_np / (db_norms + 1e-10)
-        
+
         # 计算相似度矩阵 (N_query, N_geo)
         similarity_matrix = np.dot(query_normalized, db_normalized.T)
-        
+
         # 为每个查询选取top_k
         candidates_per_query = []
         for i in range(len(query_embeddings_np)):
             similarities = similarity_matrix[i]
             top_indices = np.argsort(similarities)[-top_k:][::-1]
-            
+
             candidates = []
             for idx in top_indices:
                 sim = float(similarities[idx])
@@ -3704,9 +4695,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 entity["similarity"] = sim
                 entity["db_entity_id"] = entity.pop("entity_id")
                 candidates.append(entity)
-            
+
             candidates_per_query.append(candidates)
-        
+
         return candidates_per_query
 
     def _batch_similarity_search_amap(conn, query_embeddings_list, top_k):
@@ -3732,39 +4723,46 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
         for query_emb in query_embeddings_list:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT id, entity_id, name, type, longitude, latitude, address,
                            1 - (embedding <=> %s::vector) as similarity
                     FROM amap_poi_wgs84
                     WHERE embedding IS NOT NULL
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
-                """, (query_emb, query_emb, top_k))
+                """,
+                    (query_emb, query_emb, top_k),
+                )
                 amap_rows = cur.fetchall()
-            
+
             candidates = []
             for row in amap_rows:
                 # row: (id, entity_id, name, type, longitude, latitude, address, similarity)
                 # entity_id字段存储原始高德ID（如amap_B0FFLCH14H）
                 # neo4j中amap节点的original_id属性存储这个原始高德ID
-                amap_table_id, amap_original_id, name, type_, lon, lat, address, sim = row
-                candidates.append({
-                    "db_entity_id": amap_original_id,  # 直接使用原始高德ID，在neo4j中对应original_id属性
-                    "name": name,
-                    "type": type_ or "",
-                    "similarity": sim,
-                    "longitude": lon,
-                    "latitude": lat,
-                    "address": address,
-                    "source": "amap_poi_wgs84"
-                })
-            
+                amap_table_id, amap_original_id, name, type_, lon, lat, address, sim = (
+                    row
+                )
+                candidates.append(
+                    {
+                        "db_entity_id": amap_original_id,  # 直接使用原始高德ID，在neo4j中对应original_id属性
+                        "name": name,
+                        "type": type_ or "",
+                        "similarity": sim,
+                        "longitude": lon,
+                        "latitude": lat,
+                        "address": address,
+                        "source": "amap_poi_wgs84",
+                    }
+                )
+
             candidates_per_query.append(candidates)
-        
+
         return candidates_per_query
 
     # ===== 函数级缓存（P12性能优化） =====
-# ===== 函数级缓存（P12性能优化） =====
+    # ===== 函数级缓存（P12性能优化） =====
     # 嵌入模型缓存（避免重复加载）
     _embedding_model_cache = None
     # 数据库embedding缓存（避免重复查询）
@@ -3777,8 +4775,10 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
         nonlocal _embedding_model_cache
         if _embedding_model_cache is None:
             import os
-            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 国内镜像加速
+
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"  # 国内镜像加速
             from sentence_transformers import SentenceTransformer
+
             model_name = config.alignment_embedding_model
             logger.info(f"[Entity_Alignment] 加载嵌入模型: {model_name}")
             _embedding_model_cache = SentenceTransformer(model_name)
@@ -3787,7 +4787,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
     def _load_db_embeddings(pg_client):
         """
         预加载数据库中所有实体embedding到内存
-        
+
         返回：
         - geo_entities: List[Dict] 每个包含 entity_id, name, type, longitude, latitude, embedding
         - amap_entities: List[Dict] 每个包含 id, entity_id(原始), name, type, longitude, latitude, address, embedding
@@ -3795,7 +4795,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
         - amap_embeddings_np: numpy数组 (N_amap, dim)
         """
         import numpy as np
-        
+
         # 查询geo_entity_names
         with pg_client.conn.cursor() as cur:
             cur.execute("""
@@ -3804,25 +4804,28 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 WHERE embedding IS NOT NULL
             """)
             geo_rows = cur.fetchall()
-        
+
         geo_entities = []
         geo_embeddings = []
         for row in geo_rows:
             entity_id, name, type_, lon, lat, emb_str = row
             if emb_str:
                 import json
+
                 # 解析embedding向量（pgvector返回字符串格式，使用json.loads替代eval）
                 emb_list = json.loads(emb_str) if isinstance(emb_str, str) else emb_str
-                geo_entities.append({
-                    "entity_id": entity_id,
-                    "name": name,
-                    "type": type_ or "",
-                    "longitude": lon,
-                    "latitude": lat,
-                    "source": "geo_entity_names"
-                })
+                geo_entities.append(
+                    {
+                        "entity_id": entity_id,
+                        "name": name,
+                        "type": type_ or "",
+                        "longitude": lon,
+                        "latitude": lat,
+                        "source": "geo_entity_names",
+                    }
+                )
                 geo_embeddings.append(emb_list)
-        
+
         # 查询amap_poi_wgs84
         with pg_client.conn.cursor() as cur:
             cur.execute("""
@@ -3831,67 +4834,75 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 WHERE embedding IS NOT NULL
             """)
             amap_rows = cur.fetchall()
-        
+
         amap_entities = []
         amap_embeddings = []
         for row in amap_rows:
             amap_id, original_id, name, type_, lon, lat, address, emb_str = row
             if emb_str:
                 emb_list = eval(emb_str) if isinstance(emb_str, str) else emb_str
-                amap_entities.append({
-                    "id": amap_id,
-                    "original_id": original_id,
-                    "name": name,
-                    "type": type_ or "",
-                    "longitude": lon,
-                    "latitude": lat,
-                    "address": address,
-                    "source": "amap_poi_wgs84"
-                })
+                amap_entities.append(
+                    {
+                        "id": amap_id,
+                        "original_id": original_id,
+                        "name": name,
+                        "type": type_ or "",
+                        "longitude": lon,
+                        "latitude": lat,
+                        "address": address,
+                        "source": "amap_poi_wgs84",
+                    }
+                )
                 amap_embeddings.append(emb_list)
-        
+
         # 转换为numpy数组
         geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
-        amap_embeddings_np = np.array(amap_embeddings) if amap_embeddings else np.array([])
-        
-        logger.info(f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条, amap_poi_wgs84: {len(amap_entities)}条")
-        
+        amap_embeddings_np = (
+            np.array(amap_embeddings) if amap_embeddings else np.array([])
+        )
+
+        logger.info(
+            f"[Entity_Alignment] 预加载 geo_entity_names: {len(geo_entities)}条, amap_poi_wgs84: {len(amap_entities)}条"
+        )
+
         return geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np
 
-    def _batch_similarity_search(query_embeddings_np, db_embeddings_np, db_entities, top_k):
+    def _batch_similarity_search(
+        query_embeddings_np, db_embeddings_np, db_entities, top_k
+    ):
         """
         批量相似度搜索（内存计算）
-        
+
         使用cosine similarity: similarity = 1 - cosine_distance
-        
+
         参数：
         - query_embeddings_np: (N_query, dim) numpy数组
         - db_embeddings_np: (N_db, dim) numpy数组
         - db_entities: List[Dict] 数据库实体列表
         - top_k: 每个查询返回的候选数量
-        
+
         返回：
         - candidates_per_query: List[List[Dict]] 每个查询的top_k候选列表
         """
         import numpy as np
-        
+
         if len(db_embeddings_np) == 0 or len(query_embeddings_np) == 0:
             return [[] for _ in range(len(query_embeddings_np))]
-        
+
         # 计算cosine similarity矩阵 (N_query, N_db)
         # cosine_sim = dot(A, B) / (norm(A) * norm(B))
         # 由于embedding通常已归一化，可以直接用 dot 计算相似度
-        
+
         # 归一化query和db向量
         query_norms = np.linalg.norm(query_embeddings_np, axis=1, keepdims=True)
         db_norms = np.linalg.norm(db_embeddings_np, axis=1, keepdims=True)
-        
+
         query_normalized = query_embeddings_np / (query_norms + 1e-10)
         db_normalized = db_embeddings_np / (db_norms + 1e-10)
-        
+
         # 计算相似度矩阵
         similarity_matrix = np.dot(query_normalized, db_normalized.T)  # (N_query, N_db)
-        
+
         # 为每个查询选取top_k
         candidates_per_query = []
         for i in range(len(query_embeddings_np)):
@@ -3901,29 +4912,31 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 top_indices = np.argsort(similarities)[-top_k:][::-1]  # 降序
             else:
                 top_indices = np.argsort(similarities)[::-1]
-            
+
             candidates = []
             for idx in top_indices:
                 sim = float(similarities[idx])
                 entity = db_entities[idx].copy()
                 entity["similarity"] = sim
                 candidates.append(entity)
-            
+
             candidates_per_query.append(candidates)
-        
+
         return candidates_per_query
 
     async def entity_alignment_node(state: CorpusState, writer: StreamWriter) -> Dict:
         """实体对齐节点（批量优化版）"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Entity_Alignment] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "entity_alignment",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "message": "开始实体对齐"
-        })
+        writer(
+            {
+                "step": "entity_alignment",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "message": "开始实体对齐",
+            }
+        )
 
         try:
             # 连接数据库
@@ -3937,16 +4950,22 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             nonlocal _amap_id_base_cache, _db_cache
             if _amap_id_base_cache is None:
                 with pg_client.conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'")
+                    cur.execute(
+                        "SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'"
+                    )
                     geo_poi_count = cur.fetchone()[0]
                     _amap_id_base_cache = geo_poi_count
-                    logger.info(f"[Entity_Alignment] geo_entity_names poi数量: {geo_poi_count}, amap neo4j ID起始: poi_{_amap_id_base_cache + 1}")
+                    logger.info(
+                        f"[Entity_Alignment] geo_entity_names poi数量: {geo_poi_count}, amap neo4j ID起始: poi_{_amap_id_base_cache + 1}"
+                    )
             amap_entity_id_base = _amap_id_base_cache
 
             # 预加载数据库embedding（首次调用时加载，后续使用缓存）
             if _db_cache is None:
                 _db_cache = _load_db_embeddings(pg_client)
-            geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = _db_cache
+            geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = (
+                _db_cache
+            )
 
             # 获取抽取的实体（从joint_extraction_result或entities）
             joint_result = state.get("joint_extraction_result", {})
@@ -3981,7 +5000,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         "new_entities": [],
                         "skipped_entities": [],
                         "overall_alignment_rate": 0.0,
-                        "alignment_confidence": "high"
+                        "alignment_confidence": "high",
                     },
                     "aligned_entity_ids": {},
                     "new_entity_names": [],
@@ -3992,7 +5011,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             model = _get_embedding_model()
 
             # 生成实体嵌入向量（批量）
-            entity_embeddings = model.encode(entity_names, show_progress_bar=False, convert_to_numpy=True)
+            entity_embeddings = model.encode(
+                entity_names, show_progress_bar=False, convert_to_numpy=True
+            )
 
             # 对齐配置
             high_threshold = config.alignment_high_confidence_threshold
@@ -4020,7 +5041,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                 # 合并geo和amap候选
                 candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
-                
+
                 # 为amap候选计算正确的neo4j entity_id
                 for c in candidates:
                     if c.get("source") == "amap_poi_wgs84":
@@ -4040,7 +5061,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                 # 判断对齐状态
                 best_candidate = candidates[0] if candidates else None
-                best_similarity = best_candidate.get("similarity", 0.0) if best_candidate else 0.0
+                best_similarity = (
+                    best_candidate.get("similarity", 0.0) if best_candidate else 0.0
+                )
 
                 alignment_item = {
                     "extracted_name": name,
@@ -4048,30 +5071,38 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                     "candidates": candidates,
                     "best_match": None,
                     "alignment_status": "pending",
-                    "llm_decision": None
+                    "llm_decision": None,
                 }
 
                 # 高置信度：直接匹配
                 if best_similarity >= high_threshold:
                     alignment_item["alignment_status"] = "aligned"
                     alignment_item["best_match"] = best_candidate
-                    alignment_item["llm_decision"] = f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
+                    alignment_item["llm_decision"] = (
+                        f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
+                    )
 
-                    aligned_entities.append({
-                        "name": name,
-                        "db_id": best_candidate["db_entity_id"],
-                        "db_name": best_candidate["name"],
-                        "similarity": best_similarity,
-                        "source": best_candidate["source"]
-                    })
+                    aligned_entities.append(
+                        {
+                            "name": name,
+                            "db_id": best_candidate["db_entity_id"],
+                            "db_name": best_candidate["name"],
+                            "similarity": best_similarity,
+                            "source": best_candidate["source"],
+                        }
+                    )
                     aligned_ids[name] = best_candidate["db_entity_id"]
 
-                    logger.debug(f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})")
+                    logger.debug(
+                        f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})"
+                    )
 
                 # 低置信度：直接跳过（新实体）
                 elif best_similarity < low_threshold:
                     alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
+                    alignment_item["llm_decision"] = (
+                        f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
+                    )
 
                     new_entities.append(name)
 
@@ -4087,30 +5118,49 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         c_formatted["db_name"] = c_formatted.get("name", "")
                         c_formatted["db_type"] = c_formatted.get("type", "")
                         candidates_for_format.append(c_formatted)
-                    
+
                     candidates_text = format_alignment_candidates(candidates_for_format)
 
                     # 调用LLM判断
-                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke({
-                        "extracted_name": name,
-                        "extracted_type": entity_types.get(name, ""),
-                        "raw_text": state.get("raw_text", ""),
-                        "candidates": candidates_text,
-                    })
+                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke(
+                        {
+                            "extracted_name": name,
+                            "extracted_type": entity_types.get(name, ""),
+                            "raw_text": state.get("raw_text", ""),
+                            "candidates": candidates_text,
+                        }
+                    )
 
                     try:
                         response = await llm.ainvoke(prompt_text.messages[1].content)
 
                         # 解析LLM输出
                         import re
-                        status_match = re.search(r'alignment_status[=:]\s*"?(\w+)"?', response.content, re.IGNORECASE)
-                        index_match = re.search(r'best_match_index[=:]\s*(\d+)', response.content, re.IGNORECASE)
-                        decision_match = re.search(r'llm_decision[=:]\s*"([^"]+)"', response.content, re.IGNORECASE)
 
-                        llm_status = status_match.group(1) if status_match else "new_entity"
+                        status_match = re.search(
+                            r'alignment_status[=:]\s*"?(\w+)"?',
+                            response.content,
+                            re.IGNORECASE,
+                        )
+                        index_match = re.search(
+                            r"best_match_index[=:]\s*(\d+)",
+                            response.content,
+                            re.IGNORECASE,
+                        )
+                        decision_match = re.search(
+                            r'llm_decision[=:]\s*"([^"]+)"',
+                            response.content,
+                            re.IGNORECASE,
+                        )
+
+                        llm_status = (
+                            status_match.group(1) if status_match else "new_entity"
+                        )
                         best_index = int(index_match.group(1)) if index_match else -1
-                        llm_decision = decision_match.group(1) if decision_match else "LLM判断"
-                        
+                        llm_decision = (
+                            decision_match.group(1) if decision_match else "LLM判断"
+                        )
+
                         # 验证输出状态
                         VALID_STATUSES = {"aligned", "new_entity", "skip"}
                         if llm_status not in VALID_STATUSES:
@@ -4119,26 +5169,38 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         alignment_item["alignment_status"] = llm_status
                         alignment_item["llm_decision"] = llm_decision
 
-                        if llm_status == "aligned" and best_index >= 0 and best_index < len(candidates):
+                        if (
+                            llm_status == "aligned"
+                            and best_index >= 0
+                            and best_index < len(candidates)
+                        ):
                             best_match = candidates[best_index]
                             alignment_item["best_match"] = best_match
 
-                            aligned_entities.append({
-                                "name": name,
-                                "db_id": best_match["db_entity_id"],
-                                "db_name": best_match["name"],
-                                "similarity": best_match["similarity"],
-                                "source": best_match["source"]
-                            })
+                            aligned_entities.append(
+                                {
+                                    "name": name,
+                                    "db_id": best_match["db_entity_id"],
+                                    "db_name": best_match["name"],
+                                    "similarity": best_match["similarity"],
+                                    "source": best_match["source"],
+                                }
+                            )
                             aligned_ids[name] = best_match["db_entity_id"]
 
-                            logger.debug(f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})")
+                            logger.debug(
+                                f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})"
+                            )
                         else:
                             new_entities.append(name)
-                            logger.debug(f"[Entity_Alignment] {name} -> 新实体 (LLM判断)")
+                            logger.debug(
+                                f"[Entity_Alignment] {name} -> 新实体 (LLM判断)"
+                            )
 
                     except Exception as e:
-                        logger.warning(f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体")
+                        logger.warning(
+                            f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体"
+                        )
                         alignment_item["alignment_status"] = "new_entity"
                         alignment_item["llm_decision"] = f"LLM判断异常，默认为新实体"
                         new_entities.append(name)
@@ -4146,7 +5208,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 else:
                     # 不使用LLM判断，默认为新实体
                     alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = f"中置信度({best_similarity:.3f})，未启用LLM判断"
+                    alignment_item["llm_decision"] = (
+                        f"中置信度({best_similarity:.3f})，未启用LLM判断"
+                    )
                     new_entities.append(name)
 
                 alignment_items.append(alignment_item)
@@ -4158,7 +5222,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             # 将未对齐的新实体写入数据库和neo4j
             created_entity_ids = {}
             if new_entities:
-                logger.info(f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体...")
+                logger.info(
+                    f"[Entity_Alignment] 开始创建 {len(new_entities)} 个新实体..."
+                )
 
                 new_pg_client = None
                 neo4j_client = None
@@ -4169,73 +5235,96 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                     neo4j_config = settings.get_neo4j_config()
                     from kg.neo4j_client import Neo4jClient
+
                     neo4j_client = Neo4jClient(**neo4j_config)
 
                     # 批量生成新实体的embedding
-                    new_embeddings = model.encode(new_entities, show_progress_bar=False, convert_to_numpy=True)
+                    new_embeddings = model.encode(
+                        new_entities, show_progress_bar=False, convert_to_numpy=True
+                    )
 
                     # 准备新实体数据
                     for i, name in enumerate(new_entities):
                         entity_type = entity_types.get(name, "poi")
                         # P15修复：确保 entity_type 是字符串（psycopg2 不接受 Enum 类型）
-                        if hasattr(entity_type, 'value'):
+                        if hasattr(entity_type, "value"):
                             entity_type = entity_type.value
                         entity_type = str(entity_type) if entity_type else "poi"
                         entity_data = {
                             "name": name,
                             "type": entity_type,
                             "aliases": [],
-                            "source": "xiaohongshu"
+                            "source": "xiaohongshu",
                         }
 
                         # 写入Postgres geo_entity_names表
                         pg_entity_id = new_pg_client.insert_new_geo_entity(
-                            entity_data,
-                            new_embeddings[i].tolist()
+                            entity_data, new_embeddings[i].tolist()
                         )
 
                         if pg_entity_id:
                             # 写入Neo4j
-                            neo4j_entity_id = neo4j_client.create_new_geo_entity(entity_data)
+                            neo4j_entity_id = neo4j_client.create_new_geo_entity(
+                                entity_data
+                            )
                             if neo4j_entity_id:
                                 created_entity_ids[name] = neo4j_entity_id
-                                logger.info(f"[Entity_Alignment] 新实体已创建: {name} -> {neo4j_entity_id}")
+                                logger.info(
+                                    f"[Entity_Alignment] 新实体已创建: {name} -> {neo4j_entity_id}"
+                                )
                             else:
                                 # neo4j创建失败，使用postgres的entity_id
                                 created_entity_ids[name] = pg_entity_id
-                                logger.warning(f"[Entity_Alignment] Neo4j创建失败，使用PG ID: {name} -> {pg_entity_id}")
+                                logger.warning(
+                                    f"[Entity_Alignment] Neo4j创建失败，使用PG ID: {name} -> {pg_entity_id}"
+                                )
                         else:
                             logger.warning(f"[Entity_Alignment] 新实体创建失败: {name}")
 
-                    logger.success(f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}")
+                    logger.success(
+                        f"[Entity_Alignment] 新实体创建完成: {len(created_entity_ids)}/{len(new_entities)}"
+                    )
 
                 except Exception as create_error:
                     logger.error(f"[Entity_Alignment] 新实体创建异常: {create_error}")
                     import traceback
+
                     traceback.print_exc()
                 finally:
                     # 确保连接始终关闭（修复连接泄漏bug）
                     if new_pg_client is not None:
                         try:
                             new_pg_client.close()
-                            logger.debug("[Entity_Alignment] 新实体创建PostgresClient连接已关闭")
+                            logger.debug(
+                                "[Entity_Alignment] 新实体创建PostgresClient连接已关闭"
+                            )
                         except Exception as close_error:
-                            logger.warning(f"[Entity_Alignment] 关闭PostgresClient时出错: {close_error}")
+                            logger.warning(
+                                f"[Entity_Alignment] 关闭PostgresClient时出错: {close_error}"
+                            )
                     if neo4j_client is not None:
                         try:
                             neo4j_client.close()
                             logger.debug("[Entity_Alignment] Neo4jClient连接已关闭")
                         except Exception as close_error:
-                            logger.warning(f"[Entity_Alignment] 关闭Neo4jClient时出错: {close_error}")
+                            logger.warning(
+                                f"[Entity_Alignment] 关闭Neo4jClient时出错: {close_error}"
+                            )
 
             # 计算整体对齐率
             total_entities = len(entity_names)
             aligned_count = len(aligned_entities)
-            alignment_rate = aligned_count / total_entities if total_entities > 0 else 0.0
+            alignment_rate = (
+                aligned_count / total_entities if total_entities > 0 else 0.0
+            )
 
             # 统计各来源对齐数量
-            geo_aligned = sum(1 for e in aligned_entities if e.get("source") == "geo_entity_names")
-            amap_aligned = sum(1 for e in aligned_entities if e.get("source") == "amap_poi_wgs84")
+            geo_aligned = sum(
+                1 for e in aligned_entities if e.get("source") == "geo_entity_names"
+            )
+            amap_aligned = sum(
+                1 for e in aligned_entities if e.get("source") == "amap_poi_wgs84"
+            )
 
             # 整体置信度判断
             if alignment_rate >= 0.8:
@@ -4251,18 +5340,20 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 f"(geo:{geo_aligned}, amap:{amap_aligned})"
             )
 
-            writer({
-                "step": "entity_alignment",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "aligned_count": aligned_count,
-                "new_count": len(new_entities),
-                "created_count": len(created_entity_ids),
-                "alignment_rate": alignment_rate,
-                "geo_aligned": geo_aligned,
-                "amap_aligned": amap_aligned,
-                "confidence": overall_confidence
-            })
+            writer(
+                {
+                    "step": "entity_alignment",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "aligned_count": aligned_count,
+                    "new_count": len(new_entities),
+                    "created_count": len(created_entity_ids),
+                    "alignment_rate": alignment_rate,
+                    "geo_aligned": geo_aligned,
+                    "amap_aligned": amap_aligned,
+                    "confidence": overall_confidence,
+                }
+            )
 
             # 合并aligned_ids和created_entity_ids
             all_entity_ids = {**aligned_ids, **created_entity_ids}
@@ -4272,29 +5363,37 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                     "alignment_items": alignment_items,
                     "aligned_entities": aligned_entities,
                     "new_entities": new_entities,
-                    "created_entities": [{"name": k, "entity_id": v} for k, v in created_entity_ids.items()],
+                    "created_entities": [
+                        {"name": k, "entity_id": v}
+                        for k, v in created_entity_ids.items()
+                    ],
                     "skipped_entities": skipped_entities,
                     "overall_alignment_rate": alignment_rate,
                     "alignment_confidence": overall_confidence,
                     "geo_aligned_count": geo_aligned,
                     "amap_aligned_count": amap_aligned,
-                    "created_count": len(created_entity_ids)
+                    "created_count": len(created_entity_ids),
                 },
                 "aligned_entity_ids": all_entity_ids,  # 包含已对齐和新创建的实体ID
-                "new_entity_names": [n for n in new_entities if n not in created_entity_ids],  # 仅保留创建失败的
+                "new_entity_names": [
+                    n for n in new_entities if n not in created_entity_ids
+                ],  # 仅保留创建失败的
                 "current_step": StepEnum.DONE,
             }
 
         except Exception as e:
             logger.error(f"[Entity_Alignment] 处理失败: {e}")
             import traceback
+
             traceback.print_exc()
-            writer({
-                "step": "entity_alignment",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "entity_alignment",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             return {
                 "entity_alignment_result": {},
                 "aligned_entity_ids": {},
@@ -4307,6 +5406,7 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
 
 # ===== P13新增：优化版节点函数（使用V3提示词） =====
+
 
 def create_joint_ner_re_node_v3(llm: Any):
     """
@@ -4322,16 +5422,18 @@ def create_joint_ner_re_node_v3(llm: Any):
 
     async def joint_ner_re_node_v3(state: CorpusState, writer: StreamWriter) -> Dict:
         """Joint NER + RE V3: RISEN框架优化版"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Joint_NER_RE_V3] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "joint_ner_re",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "version": "v3",
-            "message": "开始联合抽取（优化版）"
-        })
+        writer(
+            {
+                "step": "joint_ner_re",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "version": "v3",
+                "message": "开始联合抽取（优化版）",
+            }
+        )
 
         try:
             text_for_processing = get_text_for_processing(state)
@@ -4344,6 +5446,7 @@ def create_joint_ner_re_node_v3(llm: Any):
 
             # 使用动态组装函数（更灵活）
             from .prompts import assemble_optimized_joint_prompt
+
             full_prompt = assemble_optimized_joint_prompt(
                 raw_text=text_for_processing,
                 entity_hints=format_entity_hints(qa_entity_hints),
@@ -4352,13 +5455,22 @@ def create_joint_ner_re_node_v3(llm: Any):
             )
 
             # 添加格式化指令
-            full_prompt_with_format = f"{full_prompt}\n\n{parser.get_format_instructions()}"
+            full_prompt_with_format = (
+                f"{full_prompt}\n\n{parser.get_format_instructions()}"
+            )
 
             response = await llm.ainvoke(full_prompt_with_format)
             result: JointExtractionResult = parser.parse(response.content)
 
             # 转换为现有格式（v3.4扩展版：6种实体类型）
-            entities_dict = {"道路": [], "POI": [], "建筑物": [], "街区": [], "功能": [], "事件": []}
+            entities_dict = {
+                "道路": [],
+                "POI": [],
+                "建筑物": [],
+                "街区": [],
+                "功能": [],
+                "事件": [],
+            }
             for e in result.entities:
                 entity_type = extract_enum_value(e.type)  # P15改进：使用工具函数
                 if entity_type in entities_dict:
@@ -4370,8 +5482,12 @@ def create_joint_ner_re_node_v3(llm: Any):
                     "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence,
-                    "confidence": extract_enum_value(t.confidence),  # P15改进：使用工具函数
-                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                    "confidence": extract_enum_value(
+                        t.confidence
+                    ),  # P15改进：使用工具函数
+                    "attributes": t.attributes.model_dump(exclude_none=True)
+                    if t.attributes
+                    else {},
                 }
                 for t in result.triples
             ]
@@ -4381,15 +5497,17 @@ def create_joint_ner_re_node_v3(llm: Any):
                 f"{len(result.triples)}个三元组, 置信度={result.overall_confidence}"
             )
 
-            writer({
-                "step": "joint_ner_re",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "version": "v3",
-                "entity_count": len(result.entities),
-                "triple_count": len(result.triples),
-                "confidence": result.overall_confidence
-            })
+            writer(
+                {
+                    "step": "joint_ner_re",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "version": "v3",
+                    "entity_count": len(result.entities),
+                    "triple_count": len(result.triples),
+                    "confidence": result.overall_confidence,
+                }
+            )
 
             return {
                 "entities": entities_dict,
@@ -4401,13 +5519,15 @@ def create_joint_ner_re_node_v3(llm: Any):
 
         except Exception as e:
             logger.error(f"[Joint_NER_RE_V3] 失败: {e}")
-            writer({
-                "step": "joint_ner_re",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "version": "v3",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "joint_ner_re",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "version": "v3",
+                    "error": str(e),
+                }
+            )
             return {
                 "entities": DEFAULT_ENTITY_DICT.copy(),  # v3.4修复：使用6种实体类型
                 "triples": [],
@@ -4431,19 +5551,22 @@ def create_filter_node_v3(llm: Any):
 
     async def filter_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
         """Filter V2: APE框架优化版"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Filter_V2] 筛选语料: {corpus_id}")
 
-        writer({
-            "step": "filter",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "version": "v2",
-            "message": "开始文本筛选（优化版）"
-        })
+        writer(
+            {
+                "step": "filter",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "version": "v2",
+                "message": "开始文本筛选（优化版）",
+            }
+        )
 
         try:
             from .prompts import FILTER_PROMPT_V2
+
             prompt_text = FILTER_PROMPT_V2.invoke({"raw_text": state["raw_text"]})
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
@@ -4455,15 +5578,17 @@ def create_filter_node_v3(llm: Any):
                 f"region_hint={result.region_hint}"
             )
 
-            writer({
-                "step": "filter",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "version": "v2",
-                "is_valid": result.is_valid,
-                "confidence": result.confidence,
-                "skip_reason": result.skip_reason,
-            })
+            writer(
+                {
+                    "step": "filter",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "version": "v2",
+                    "is_valid": result.is_valid,
+                    "confidence": result.confidence,
+                    "skip_reason": result.skip_reason,
+                }
+            )
 
             next_step = StepEnum.NER if result.is_valid else StepEnum.DONE
 
@@ -4474,13 +5599,15 @@ def create_filter_node_v3(llm: Any):
 
         except Exception as e:
             logger.error(f"[Filter_V2] 失败: {e}")
-            writer({
-                "step": "filter",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "version": "v2",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "filter",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "version": "v2",
+                    "error": str(e),
+                }
+            )
             # 保守策略：筛选失败时默认继续处理
             return {
                 "filter_result": {
@@ -4506,39 +5633,55 @@ def create_self_check_joint_node_v3(llm: Any):
     4. 可执行的改进动作列表
     """
     from .schemas import SelfCheckJointResultV2  # P12新增增强版模型
+
     parser = PydanticOutputParser(pydantic_object=SelfCheckJointResultV2)
 
-    async def self_check_joint_node_v3(state: CorpusState, writer: StreamWriter) -> Dict:
+    async def self_check_joint_node_v3(
+        state: CorpusState, writer: StreamWriter
+    ) -> Dict:
         """Self-Check Joint V3: Pre-Mortem + 四维度评分"""
-        corpus_id = state['corpus_id']
-        retry_count = state.get('retry_count', 0)
-        max_retries = state.get('max_retries', DEFAULT_MAX_RETRIES)
-        logger.info(f"[Self-Check-Joint_V3] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}")
+        corpus_id = state["corpus_id"]
+        retry_count = state.get("retry_count", 0)
+        max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+        logger.info(
+            f"[Self-Check-Joint_V3] 校验语料: {corpus_id}, 重试: {retry_count}/{max_retries}"
+        )
 
-        writer({
-            "step": "self_check_joint",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "version": "v3",
-            "retry_count": retry_count
-        })
+        writer(
+            {
+                "step": "self_check_joint",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "version": "v3",
+                "retry_count": retry_count,
+            }
+        )
 
         try:
             text = get_text_for_processing(state)
             reflection_history = state.get("reflection_history", [])
 
             from .prompts import SELF_CHECK_JOINT_PROMPT_V3
-            prompt_text = SELF_CHECK_JOINT_PROMPT_V3.invoke({
-                "raw_text": text,
-                "entities": format_joint_entities(
-                    state.get("joint_extraction_result", {}).get("entities", [])
-                ),
-                "triples": format_joint_triples(state.get("triples", [])),
-                "semantic_summary": state.get("semantic_summary", ""),
-                "context_dependencies": format_context_dependencies(state.get("qa_context_dependencies", [])),
-                "previous_reflection": format_reflection_history(reflection_history),
-                "improvement_attempts": format_improvement_strategy(state.get("improvement_strategy", {})),
-            })
+
+            prompt_text = SELF_CHECK_JOINT_PROMPT_V3.invoke(
+                {
+                    "raw_text": text,
+                    "entities": format_joint_entities(
+                        state.get("joint_extraction_result", {}).get("entities", [])
+                    ),
+                    "triples": format_joint_triples(state.get("triples", [])),
+                    "semantic_summary": state.get("semantic_summary", ""),
+                    "context_dependencies": format_context_dependencies(
+                        state.get("qa_context_dependencies", [])
+                    ),
+                    "previous_reflection": format_reflection_history(
+                        reflection_history
+                    ),
+                    "improvement_attempts": format_improvement_strategy(
+                        state.get("improvement_strategy", {})
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: SelfCheckJointResultV2 = parser.parse(response.content)
@@ -4552,15 +5695,17 @@ def create_self_check_joint_node_v3(llm: Any):
                 f"整体置信度={overall_confidence}, 重试建议={result.retry_suggested}"
             )
 
-            writer({
-                "step": "self_check_joint",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "version": "v3",
-                "dimension_scores": dimension_scores,
-                "confidence": overall_confidence,
-                "retry_suggested": result.retry_suggested,
-            })
+            writer(
+                {
+                    "step": "self_check_joint",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "version": "v3",
+                    "dimension_scores": dimension_scores,
+                    "confidence": overall_confidence,
+                    "retry_suggested": result.retry_suggested,
+                }
+            )
 
             return {
                 "self_check_joint_result": result.model_dump(),
@@ -4570,18 +5715,22 @@ def create_self_check_joint_node_v3(llm: Any):
                 "retry_count": retry_count + (1 if result.retry_suggested else 0),
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
-                "current_step": StepEnum.EVAL if not result.retry_suggested else StepEnum.JOINT_NER_RE,
+                "current_step": StepEnum.EVAL
+                if not result.retry_suggested
+                else StepEnum.JOINT_NER_RE,
             }
 
         except Exception as e:
             logger.error(f"[Self-Check-Joint_V3] 失败: {e}")
-            writer({
-                "step": "self_check_joint",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "version": "v3",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "self_check_joint",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "version": "v3",
+                    "error": str(e),
+                }
+            )
             return {
                 "self_check_joint_result": {},
                 "reflection_text": "",
@@ -4605,27 +5754,31 @@ def create_re_node_v3(llm: Any):
 
     async def re_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
         """RE V2: 表格化Schema优化版"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[RE_V2] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "re",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "version": "v2",
-            "message": "开始关系抽取（优化版）"
-        })
+        writer(
+            {
+                "step": "re",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "version": "v2",
+                "message": "开始关系抽取（优化版）",
+            }
+        )
 
         total_entities = sum(len(v) for v in state["entities"].values())
         if total_entities == 0:
             logger.debug(f"[RE_V2] 无实体，跳过")
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "skipped",
-                "version": "v2",
-                "reason": "无实体"
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "skipped",
+                    "version": "v2",
+                    "reason": "无实体",
+                }
+            )
             return {"current_step": StepEnum.EVAL, "triples": []}
 
         try:
@@ -4634,12 +5787,17 @@ def create_re_node_v3(llm: Any):
             qa_context_dependencies = state.get("qa_context_dependencies", [])
 
             from .prompts import RE_PROMPT_V2
-            prompt_text = RE_PROMPT_V2.invoke({
-                "raw_text": text_for_processing,
-                "entities": format_entities(state["entities"]),
-                "relation_hints": format_relation_hints(qa_relation_hints),
-                "context_dependencies": format_context_dependencies(qa_context_dependencies),
-            })
+
+            prompt_text = RE_PROMPT_V2.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entities": format_entities(state["entities"]),
+                    "relation_hints": format_relation_hints(qa_relation_hints),
+                    "context_dependencies": format_context_dependencies(
+                        qa_context_dependencies
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: RelationExtractionResult = parser.parse(response.content)
@@ -4650,20 +5808,24 @@ def create_re_node_v3(llm: Any):
                     "relation": extract_enum_value(t.relation),  # P15改进：使用工具函数
                     "tail": t.tail,
                     "evidence": t.evidence or "",
-                    "attributes": t.attributes.model_dump(exclude_none=True) if t.attributes else {},
+                    "attributes": t.attributes.model_dump(exclude_none=True)
+                    if t.attributes
+                    else {},
                 }
                 for t in result.triples
             ]
 
             logger.debug(f"[RE_V2] 结果: {len(triples)}个三元组")
 
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "version": "v2",
-                "triple_count": len(triples),
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "version": "v2",
+                    "triple_count": len(triples),
+                }
+            )
 
             return {
                 "triples": triples,
@@ -4672,13 +5834,15 @@ def create_re_node_v3(llm: Any):
 
         except Exception as e:
             logger.error(f"[RE_V2] 失败: {e}")
-            writer({
-                "step": "re",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "version": "v2",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "re",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "version": "v2",
+                    "error": str(e),
+                }
+            )
             return {
                 "triples": [],
                 "error": str(e),
@@ -4701,16 +5865,18 @@ def create_label_node_v3(llm: Any):
 
     async def label_node_v2(state: CorpusState, writer: StreamWriter) -> Dict:
         """Label V2: 表格化Schema优化版"""
-        corpus_id = state['corpus_id']
+        corpus_id = state["corpus_id"]
         logger.info(f"[Label_V2] 处理语料: {corpus_id}")
 
-        writer({
-            "step": "label",
-            "corpus_id": corpus_id,
-            "status": "started",
-            "version": "v2",
-            "message": "开始属性标注（优化版）"
-        })
+        writer(
+            {
+                "step": "label",
+                "corpus_id": corpus_id,
+                "status": "started",
+                "version": "v2",
+                "message": "开始属性标注（优化版）",
+            }
+        )
 
         try:
             text_for_processing = get_text_for_processing(state)
@@ -4725,37 +5891,54 @@ def create_label_node_v3(llm: Any):
             relations_list = format_triples(state.get("triples", []))
 
             from .prompts import LABEL_PROMPT_V2
-            prompt_text = LABEL_PROMPT_V2.invoke({
-                "raw_text": text_for_processing,
-                "entities": all_entities,
-                "relations": relations_list,
-                "semantic_summary": state.get("semantic_summary", ""),
-                "entity_hints": format_entity_hints(state.get("qa_entity_hints", [])),
-                "relation_hints": format_relation_hints(state.get("qa_relation_hints", [])),
-            })
+
+            prompt_text = LABEL_PROMPT_V2.invoke(
+                {
+                    "raw_text": text_for_processing,
+                    "entities": all_entities,
+                    "relations": relations_list,
+                    "semantic_summary": state.get("semantic_summary", ""),
+                    "entity_hints": format_entity_hints(
+                        state.get("qa_entity_hints", [])
+                    ),
+                    "relation_hints": format_relation_hints(
+                        state.get("qa_relation_hints", [])
+                    ),
+                }
+            )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             result: LabelResult = parser.parse(response.content)
 
             logger.debug(f"[Label_V2] 完成: {len(result.entities)}个实体属性")
 
-            writer({
-                "step": "label",
-                "corpus_id": corpus_id,
-                "status": "completed",
-                "version": "v2",
-                "entity_attr_count": len(result.entities),
-                "relation_attr_count": len(result.relations),
-            })
+            writer(
+                {
+                    "step": "label",
+                    "corpus_id": corpus_id,
+                    "status": "completed",
+                    "version": "v2",
+                    "entity_attr_count": len(result.entities),
+                    "relation_attr_count": len(result.relations),
+                }
+            )
 
             # 转换属性字典格式
             entity_attrs = {}
             for name, attrs in result.entities.items():
-                entity_attrs[name] = attrs.model_dump(exclude_none=True) if hasattr(attrs, 'model_dump') else attrs
+                entity_attrs[name] = (
+                    attrs.model_dump(exclude_none=True)
+                    if hasattr(attrs, "model_dump")
+                    else attrs
+                )
 
             relation_attrs = {}
             for key, attrs in result.relations.items():
-                relation_attrs[key] = attrs.model_dump(exclude_none=True) if hasattr(attrs, 'model_dump') else attrs
+                relation_attrs[key] = (
+                    attrs.model_dump(exclude_none=True)
+                    if hasattr(attrs, "model_dump")
+                    else attrs
+                )
 
             return {
                 "entity_attrs": entity_attrs,
@@ -4765,13 +5948,15 @@ def create_label_node_v3(llm: Any):
 
         except Exception as e:
             logger.error(f"[Label_V2] 失败: {e}")
-            writer({
-                "step": "label",
-                "corpus_id": corpus_id,
-                "status": "error",
-                "version": "v2",
-                "error": str(e)
-            })
+            writer(
+                {
+                    "step": "label",
+                    "corpus_id": corpus_id,
+                    "status": "error",
+                    "version": "v2",
+                    "error": str(e),
+                }
+            )
             return {
                 "entity_attrs": {},
                 "relation_attrs": {},
@@ -4783,6 +5968,7 @@ def create_label_node_v3(llm: Any):
 
 
 # ===== 版本切换辅助函数 =====
+
 
 def get_node_creators(prompt_version: str = "v2"):
     """
@@ -4811,3 +5997,267 @@ def get_node_creators(prompt_version: str = "v2"):
             "re": create_re_node,
             "label": create_label_node,
         }
+
+
+# ===== P15新增：批量预处理节点 =====
+
+
+def create_batch_filter_node(llm: Any):
+    """创建批量筛选节点 - 一次LLM调用处理多条语料的筛选判断"""
+    from .schemas import BatchFilterResult
+    from .prompts import BATCH_FILTER_PROMPT, format_batch_corpus
+
+    parser = PydanticOutputParser(pydantic_object=BatchFilterResult)
+
+    async def batch_filter_node(corpus_list: List[Dict], writer: StreamWriter) -> Dict:
+        batch_size = len(corpus_list)
+        logger.info(f"[Batch_Filter] 处理 {batch_size} 条语料")
+        writer({"step": "batch_filter", "status": "started", "batch_size": batch_size})
+        if batch_size == 0:
+            return {"batch_results": {}, "processed_corpus": [], "skipped_corpus": []}
+        try:
+            corpus_list_str = format_batch_corpus(corpus_list)
+            prompt_text = BATCH_FILTER_PROMPT.invoke(
+                {"batch_size": batch_size, "corpus_list": corpus_list_str}
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result = parser.parse(response.content)
+            batch_results, processed_corpus, skipped_corpus = {}, [], []
+            for r in result.results:
+                # 使用正确的字段名：is_valid（语义相反）, is_non_wuhan_region
+                should_skip = not r.is_valid  # is_valid=False 时应跳过
+                batch_results[r.corpus_id] = {
+                    "should_skip": should_skip,
+                    "is_valid": r.is_valid,
+                    "skip_reason": r.skip_reason,
+                    "confidence": r.confidence,
+                    "is_wuhan": not r.is_non_wuhan_region,  # 语义转换
+                    "has_geo_info": r.has_geo_entity or r.has_spatial_relation,
+                }
+                target_list = skipped_corpus if should_skip else processed_corpus
+                for c in corpus_list:
+                    if c["id"] == r.corpus_id:
+                        target_list.append(
+                            {**c, "skip_reason": r.skip_reason} if should_skip else c
+                        )
+                        break
+            logger.info(
+                f"[Batch_Filter] 完成: {len(processed_corpus)}保留, {len(skipped_corpus)}跳过"
+            )
+            writer(
+                {
+                    "step": "batch_filter",
+                    "status": "completed",
+                    "processed_count": len(processed_corpus),
+                    "skipped_count": len(skipped_corpus),
+                }
+            )
+            return {
+                "batch_results": batch_results,
+                "processed_corpus": processed_corpus,
+                "skipped_corpus": skipped_corpus,
+                "batch_filter_result": result.model_dump(),
+            }
+        except Exception as e:
+            logger.error(f"[Batch_Filter] 处理失败: {e}")
+            return {
+                "batch_results": {},
+                "processed_corpus": corpus_list,
+                "skipped_corpus": [],
+                "error": str(e),
+            }
+
+    return batch_filter_node
+
+
+def create_batch_normalize_node(llm: Any):
+    """创建批量归一化节点 - 一次LLM调用处理多条语料的归一化"""
+    from .schemas import BatchNormalizeResult
+    from .prompts import BATCH_NORMALIZE_PROMPT, format_batch_corpus
+
+    parser = PydanticOutputParser(pydantic_object=BatchNormalizeResult)
+
+    async def batch_normalize_node(
+        corpus_list: List[Dict], writer: StreamWriter
+    ) -> Dict:
+        batch_size = len(corpus_list)
+        logger.info(f"[Batch_Normalize] 处理 {batch_size} 条语料")
+        writer(
+            {"step": "batch_normalize", "status": "started", "batch_size": batch_size}
+        )
+        if batch_size == 0:
+            return {"batch_results": {}, "normalized_corpus": []}
+        try:
+            corpus_list_str = format_batch_corpus(corpus_list)
+            prompt_text = BATCH_NORMALIZE_PROMPT.invoke(
+                {"batch_size": batch_size, "corpus_list": corpus_list_str}
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result = parser.parse(response.content)
+            batch_results, normalized_corpus = {}, []
+            for r in result.results:
+                batch_results[r.corpus_id] = {
+                    "normalized_text": r.normalized_text,
+                    "aliases": r.aliases,
+                    "confidence": r.confidence,
+                }
+                for c in corpus_list:
+                    if c["id"] == r.corpus_id:
+                        normalized_corpus.append(
+                            {
+                                **c,
+                                "normalized_text": r.normalized_text,
+                                "aliases": r.aliases,
+                            }
+                        )
+                        break
+            logger.info(f"[Batch_Normalize] 完成: {len(normalized_corpus)}条")
+            writer(
+                {
+                    "step": "batch_normalize",
+                    "status": "completed",
+                    "batch_size": len(normalized_corpus),
+                }
+            )
+            return {
+                "batch_results": batch_results,
+                "normalized_corpus": normalized_corpus,
+                "batch_normalize_result": result.model_dump(),
+            }
+        except Exception as e:
+            logger.error(f"[Batch_Normalize] 处理失败: {e}")
+            return {
+                "batch_results": {},
+                "normalized_corpus": corpus_list,
+                "error": str(e),
+            }
+
+    return batch_normalize_node
+
+
+def create_batch_qa_scaffold_node(llm: Any):
+    """创建批量QA脚手架节点 - 一次LLM调用处理多条语料的QA脚手架构建"""
+    from .schemas import BatchQAScaffoldResult
+    from .prompts import BATCH_QA_SCAFFOLD_PROMPT, format_batch_corpus
+
+    parser = PydanticOutputParser(pydantic_object=BatchQAScaffoldResult)
+
+    async def batch_qa_scaffold_node(
+        corpus_list: List[Dict], writer: StreamWriter
+    ) -> Dict:
+        batch_size = len(corpus_list)
+        logger.info(f"[Batch_QA_Scaffold] 处理 {batch_size} 条语料")
+        writer(
+            {"step": "batch_qa_scaffold", "status": "started", "batch_size": batch_size}
+        )
+        if batch_size == 0:
+            return {"batch_results": {}, "qa_corpus": []}
+        try:
+            corpus_list_str = format_batch_corpus(corpus_list)
+            prompt_text = BATCH_QA_SCAFFOLD_PROMPT.invoke(
+                {"batch_size": batch_size, "corpus_list": corpus_list_str}
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+            response = await llm.ainvoke(full_prompt)
+            result = parser.parse(response.content)
+            batch_results, qa_corpus = {}, []
+            for r in result.results:
+                batch_results[r.corpus_id] = {
+                    "qa_pairs": r.qa_pairs,
+                    "entity_hints": r.entity_hints,
+                    "relation_hints": r.relation_hints,
+                    "context_dependencies": r.context_dependencies,
+                    "confidence": r.overall_confidence,  # 使用正确的字段名
+                }
+                for c in corpus_list:
+                    if c["id"] == r.corpus_id:
+                        qa_corpus.append(
+                            {
+                                **c,
+                                "qa_pairs": r.qa_pairs,
+                                "entity_hints": r.entity_hints,
+                                "relation_hints": r.relation_hints,
+                                "context_dependencies": r.context_dependencies,
+                            }
+                        )
+                        break
+            logger.info(f"[Batch_QA_Scaffold] 完成: {len(qa_corpus)}条")
+            writer(
+                {
+                    "step": "batch_qa_scaffold",
+                    "status": "completed",
+                    "batch_size": len(qa_corpus),
+                }
+            )
+            return {
+                "batch_results": batch_results,
+                "qa_corpus": qa_corpus,
+                "batch_qa_scaffold_result": result.model_dump(),
+            }
+        except Exception as e:
+            logger.error(f"[Batch_QA_Scaffold] 处理失败: {e}")
+            return {"batch_results": {}, "qa_corpus": corpus_list, "error": str(e)}
+
+    return batch_qa_scaffold_node
+
+
+async def process_batch_preprocessing(
+    llm: Any,
+    corpus_list: List[Dict],
+    config: ExtractionConfig,
+    enable_filter: bool = True,
+    enable_normalize: bool = True,
+    enable_qa_scaffold: bool = True,
+) -> Dict:
+    """批量前置节点处理：Filter → Normalize → QA_Scaffold，一次LLM调用处理多条语料"""
+    logger.info(f"[Batch_Preprocessing] 开始批量预处理 {len(corpus_list)} 条语料")
+
+    def dummy_writer(e):
+        pass
+
+    preprocessing_results, current_corpus, skipped_corpus, fallback_corpus = (
+        {},
+        corpus_list,
+        [],
+        [],
+    )
+    if enable_filter:
+        filter_node = create_batch_filter_node(llm)
+        filter_result = await filter_node(current_corpus, dummy_writer)
+        preprocessing_results["filter"] = filter_result.get("batch_filter_result", {})
+        current_corpus = filter_result.get("processed_corpus", current_corpus)
+        skipped_corpus = filter_result.get("skipped_corpus", [])
+        if filter_result.get("error"):
+            fallback_corpus.extend(current_corpus)
+            current_corpus = []
+    if enable_normalize and current_corpus:
+        normalize_node = create_batch_normalize_node(llm)
+        normalize_result = await normalize_node(current_corpus, dummy_writer)
+        preprocessing_results["normalize"] = normalize_result.get(
+            "batch_normalize_result", {}
+        )
+        current_corpus = normalize_result.get("normalized_corpus", current_corpus)
+        if normalize_result.get("error"):
+            fallback_corpus.extend(current_corpus)
+            current_corpus = []
+    if enable_qa_scaffold and current_corpus:
+        qa_node = create_batch_qa_scaffold_node(llm)
+        qa_result = await qa_node(current_corpus, dummy_writer)
+        preprocessing_results["qa_scaffold"] = qa_result.get(
+            "batch_qa_scaffold_result", {}
+        )
+        current_corpus = qa_result.get("qa_corpus", current_corpus)
+        if qa_result.get("error"):
+            fallback_corpus.extend(current_corpus)
+            current_corpus = []
+    logger.info(
+        f"[Batch_Preprocessing] 完成: {len(current_corpus)}成功, {len(skipped_corpus)}跳过, {len(fallback_corpus)}fallback"
+    )
+    return {
+        "processed_corpus": current_corpus,
+        "skipped_corpus": skipped_corpus,
+        "fallback_corpus": fallback_corpus,
+        "preprocessing_results": preprocessing_results,
+    }

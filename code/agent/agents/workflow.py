@@ -948,7 +948,7 @@ def build_corpus_workflow(
     enable_normalize: bool = False,
     enable_qa_scaffold: bool = False,
     use_joint_extraction: bool = True,  # P9新增：默认使用联合抽取
-    enable_full_self_check: bool = False,  # P9新增：启用所有二次检查
+    enable_full_self_check: bool = True,  # P15修改：默认启用所有二次检查
     enable_self_check_filter: bool = False,  # P9新增：Filter二次检查（可选）
     enable_self_check_normalize: bool = False,  # P9新增：Normalize二次检查（可选）
     enable_entity_alignment: bool = False,  # P11新增：实体对齐
@@ -1510,13 +1510,21 @@ def build_distributed_workflow(
     # P2改进：使用配置决定是否使用简化评估
     # P4改进：使用配置决定是否启用 Self-Check
     # P5改进：使用配置决定是否启用 Filter
+    # P15修复：传递所有配置参数，包括 full_self_check、qa_scaffold、entity_alignment
     corpus_workflow = build_corpus_workflow(
         llm,
         use_simplified_eval=config.use_simplified_eval,
         enable_self_check=config.enable_self_check,
         enable_filter=config.enable_filter,
         enable_normalize=config.enable_normalize,
-        max_retries=config.self_check_max_retries
+        enable_qa_scaffold=config.enable_qa_scaffold,  # P15修复：传递QA脚手架配置
+        enable_full_self_check=config.enable_full_self_check,  # P15修复：传递二次检查配置
+        enable_entity_alignment=config.enable_entity_alignment,  # P15修复：传递实体对齐配置
+        enable_self_check_filter=config.enable_self_check_filter,  # P15修复：传递Filter二次检查配置
+        enable_self_check_normalize=config.enable_self_check_normalize,  # P15修复：传递Normalize二次检查配置
+        config=config,  # P15修复：传递完整配置对象（用于实体对齐等）
+        max_retries=config.self_check_max_retries,
+        prompt_version=config.prompt_version,  # P15修复：传递提示词版本
     )
 
     # P7改进：并发控制 - 防止API限流（从配置读取）
@@ -1580,6 +1588,8 @@ def build_distributed_workflow(
             """
             批量处理语料（一次LLM调用处理多条）
 
+            P15改进：先进行批量预处理（Filter → Normalize → QA_Scaffold）
+
             Args:
                 corpus_list: 语料列表（batch_llm_size条）
 
@@ -1590,10 +1600,56 @@ def build_distributed_workflow(
                 create_batch_joint_extraction_node,
                 create_batch_self_check_node,
                 process_corpus_batch_with_llm,
+                process_batch_preprocessing,  # P15新增：批量预处理
             )
 
             try:
-                # 使用批量处理
+                # P15新增：批量预处理（Filter → Normalize → QA_Scaffold）
+                if config.enable_filter or config.enable_normalize or config.enable_qa_scaffold:
+                    logger.info(f"[Batch_Preprocessing] 开始批量预处理 {len(corpus_list)} 条语料")
+
+                    preprocessing_result = await process_batch_preprocessing(
+                        llm, corpus_list, config,
+                        enable_filter=config.enable_filter,
+                        enable_normalize=config.enable_normalize,
+                        enable_qa_scaffold=config.enable_qa_scaffold,
+                    )
+
+                    # 更新语料列表
+                    processed_corpus = preprocessing_result.get("processed_corpus", [])
+                    skipped_corpus = preprocessing_result.get("skipped_corpus", [])
+                    fallback_corpus = preprocessing_result.get("fallback_corpus", [])
+
+                    # 被跳过的语料，返回空结果
+                    skipped_results = []
+                    for corpus in skipped_corpus:
+                        skipped_results.append({
+                            "corpus_id": corpus.get("id"),
+                            "entities": DEFAULT_ENTITY_DICT.copy(),
+                            "triples": [],
+                            "eval_passed": False,
+                            "skip_reason": corpus.get("skip_reason", "被筛选跳过"),
+                            "batch_processed": True,
+                        })
+
+                    # 需要fallback的语料（预处理失败）
+                    if batch_llm_fallback and fallback_corpus:
+                        logger.info(f"[Batch_Preprocessing] Fallback处理 {len(fallback_corpus)} 条预处理失败的语料")
+                        fallback_results = []
+                        for corpus in fallback_corpus:
+                            single_result = await process_corpus(corpus)
+                            fallback_results.append(single_result)
+                    else:
+                        fallback_results = []
+
+                    # 如果预处理后无语料，直接返回
+                    if not processed_corpus:
+                        return skipped_results + fallback_results
+
+                    # 更新语料列表为预处理后的语料
+                    corpus_list = processed_corpus
+
+                # 使用批量处理（联合抽取）
                 batch_result = await process_corpus_batch_with_llm(
                     llm, corpus_list, config,
                 )
@@ -1625,7 +1681,8 @@ def build_distributed_workflow(
                         single_result = await process_corpus(corpus)
                         results.append(single_result)
 
-                return results
+                # 合并预处理跳过的结果
+                return skipped_results + fallback_results + results
 
             except Exception as e:
                 logger.error(f"批量处理失败: {e}")
