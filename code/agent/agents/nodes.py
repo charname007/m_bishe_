@@ -2091,19 +2091,14 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     # P15调试：打印 triple 的 attributes 字段状态
                     triple_attrs = triple.get("attributes", {})
                     triple_relation_attrs = triple.get("relation_attrs", {})
-                    # 如果关系类型有属性映射但 triple 没有 attributes，记录警告
+                    # 弱约束：仅记录已有属性，不再按 expected_fields 做强校验告警
                     relation_raw = triple.get("relation", "")
                     relation_str = (
                         extract_enum_value(relation_raw)
                         if hasattr(relation_raw, "value")
                         else str(relation_raw)
                     )
-                    expected_fields = RELATION_ATTRS_MAP.get(relation_str, [])
-                    if expected_fields and not triple_attrs:
-                        logger.warning(
-                            f"[Aggregator-Missing] {triple_key}: relation={relation_str}, expected_fields={expected_fields}, but attributes={triple_attrs}"
-                        )
-                    elif triple_attrs:
+                    if triple_attrs:
                         logger.debug(
                             f"[Aggregator-Found] {triple_key}: relation={relation_str}, attributes={triple_attrs}"
                         )
@@ -2127,20 +2122,11 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     if attrs:
                         # v3.2精简版：relation_type 直接使用7种标准关系类型
                         triple["relation_type"] = triple.get("relation", "")
-                        # 根据关系类型选择对应的属性集（Schema v3.2）
-                        relation_raw = triple.get("relation", "")
-                        # P15修复：确保 relation 是字符串（RELATION_ATTRS_MAP 的 key 是字符串）
-                        relation = (
-                            extract_enum_value(relation_raw)
-                            if hasattr(relation_raw, "value")
-                            else str(relation_raw)
-                        )
-                        attr_fields = RELATION_ATTRS_MAP.get(relation, [])
-                        # 提取该关系类型的有效属性
+                        # 弱约束：保留传入的关系属性，不再按固定字段映射强裁剪
                         triple["relation_attrs"] = {
-                            field: attrs.get(field)
-                            for field in attr_fields
-                            if attrs.get(field) is not None
+                            str(field): value
+                            for field, value in attrs.items()
+                            if value is not None
                         }
                     all_triples.append(triple)
 
@@ -4965,19 +4951,30 @@ def create_batch_self_check_label_node(llm: Any):
 
             for r in result.verified_results:
                 r_dict = r.model_dump(mode="json")
+                corpus_id = str(r_dict.get("corpus_id", ""))
+                source_label_data = (
+                    batch_label_results.get(corpus_id)
+                    or batch_label_results.get(r_dict.get("corpus_id"))
+                    or {}
+                )
+                source_entity_attrs = source_label_data.get("entity_attrs", {})
+                source_relation_attrs = source_label_data.get("relation_attrs", {})
+                if not isinstance(source_entity_attrs, dict):
+                    source_entity_attrs = {}
+                if not isinstance(source_relation_attrs, dict):
+                    source_relation_attrs = {}
 
-                # 合并属性：verified + corrected - rejected
-                final_entity_attrs = {
-                    **r_dict.get("verified_entity_attrs", {}),
-                    **r_dict.get("corrected_entity_attrs", {}),
-                }
+                # 合并属性（弱覆盖）：以原始 Label 为底，叠加 verified/corrected，再扣除 rejected
+                # 目的：避免自检返回空结构时把已抽取属性清空
+                final_entity_attrs = dict(source_entity_attrs)
+                final_entity_attrs.update(r_dict.get("verified_entity_attrs", {}))
+                final_entity_attrs.update(r_dict.get("corrected_entity_attrs", {}))
                 for key in r_dict.get("rejected_entity_attrs", []):
                     final_entity_attrs.pop(key, None)
 
-                final_relation_attrs = {
-                    **r_dict.get("verified_relation_attrs", {}),
-                    **r_dict.get("corrected_relation_attrs", {}),
-                }
+                final_relation_attrs = dict(source_relation_attrs)
+                final_relation_attrs.update(r_dict.get("verified_relation_attrs", {}))
+                final_relation_attrs.update(r_dict.get("corrected_relation_attrs", {}))
                 for key in r_dict.get("rejected_relation_attrs", []):
                     final_relation_attrs.pop(key, None)
 
