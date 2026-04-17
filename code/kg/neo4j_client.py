@@ -67,6 +67,14 @@ class Neo4jClient:
             "updated_at",
             "source",
             "attrs",
+            # 关系基础字段
+            "evidence",
+            "relation",
+            "relation_type",
+            "relation_subtype",
+            "relation_attrs",  # 旧的 JSON 字符串字段
+            "head",
+            "tail",
         }
         normalized: Dict[str, Any] = {}
 
@@ -175,10 +183,86 @@ class Neo4jClient:
         return merged
 
     @classmethod
+    def _filter_relation_attrs(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """从关系属性中过滤掉基础字段，只保留自定义属性"""
+        reserved_keys = {
+            "evidence",
+            "corpus_ids",
+            "relation_type",
+            "relation_subtype",
+            "relation_attrs",  # 旧的 JSON 字符串字段也过滤
+            "created_at",
+            "updated_at",
+            "source",
+        }
+        return {
+            k: v for k, v in (props or {}).items()
+            if k not in reserved_keys and v is not None
+        }
+
+    @classmethod
+    def _merge_relation_attrs_dict(cls, existing_raw: Any, incoming_raw: Any) -> Dict[str, Any]:
+        """合并关系属性并返回展开后的字典（字段值统一为列表），用于 SET r += attrs。"""
+        relation_reserved_keys = {
+            "type",
+            "evidence",
+            "corpus_ids",
+            "relation_type",
+            "relation_subtype",
+            "created_at",
+            "updated_at",
+            "source",
+            "relation_attrs",
+        }
+
+        def normalize_relation_map(raw: Any) -> Dict[str, Any]:
+            if not isinstance(raw, dict):
+                return {}
+            normalized: Dict[str, Any] = {}
+            for key, value in raw.items():
+                if not isinstance(key, str) or not key or key in relation_reserved_keys:
+                    continue
+                if value is None:
+                    continue
+                if cls._is_neo4j_scalar(value):
+                    normalized[key] = value
+                    continue
+                if isinstance(value, (list, tuple, set)):
+                    values = [v for v in value if v is not None]
+                    if all(cls._is_neo4j_scalar(v) for v in values):
+                        normalized[key] = values
+                    else:
+                        normalized[key] = json.dumps(value, ensure_ascii=False)
+                    continue
+                normalized[key] = json.dumps(value, ensure_ascii=False)
+            return normalized
+
+        # existing_raw 可能是 properties(r) 或旧 relation_attrs(JSON字符串)
+        existing_props = existing_raw if isinstance(existing_raw, dict) else {}
+        existing_from_props = normalize_relation_map(existing_props)
+        legacy_in_props = cls._parse_json_dict(existing_props.get("relation_attrs"))
+        existing_legacy = normalize_relation_map(legacy_in_props)
+        if not existing_from_props and not existing_legacy and not isinstance(existing_raw, dict):
+            existing_legacy = normalize_relation_map(cls._parse_json_dict(existing_raw))
+
+        incoming_norm = normalize_relation_map(incoming_raw if isinstance(incoming_raw, dict) else {})
+
+        merged: Dict[str, Any] = {}
+        keys = set(existing_from_props.keys()) | set(existing_legacy.keys()) | set(incoming_norm.keys())
+        for key in keys:
+            base_values = cls._normalize_attr_list_value(existing_from_props.get(key))
+            legacy_values = cls._normalize_attr_list_value(existing_legacy.get(key))
+            incoming_values = cls._normalize_attr_list_value(incoming_norm.get(key))
+            all_values = list(dict.fromkeys(base_values + legacy_values + incoming_values))
+            if all_values:
+                merged[key] = all_values
+
+        return merged
+
+    @classmethod
     def _merge_relation_attrs_json(cls, existing_raw: Any, incoming_raw: Any) -> str:
-        """合并关系属性并输出 JSON 字符串（字段值统一为列表）。"""
-        existing_dict = cls._parse_json_dict(existing_raw)
-        merged_dict = cls._merge_attr_dicts_for_append(existing_dict, incoming_raw)
+        """合并关系属性并输出 JSON 字符串（字段值统一为列表）- 兼容旧调用"""
+        merged_dict = cls._merge_relation_attrs_dict(existing_raw, incoming_raw)
         if not merged_dict:
             return ""
         return json.dumps(merged_dict, ensure_ascii=False)
@@ -307,17 +391,17 @@ class Neo4jClient:
             existing_record = session.run(
                 """
                 MATCH (h:Entity {name: $head})-[r:RELATION {type: $relation}]->(t:Entity {name: $tail})
-                RETURN r.relation_attrs AS relation_attrs
+                RETURN properties(r) AS rel_props
                 """,
                 head=triple["head"],
                 relation=triple["relation"],
                 tail=triple["tail"],
             ).single()
-            existing_relation_attrs = (
-                existing_record["relation_attrs"] if existing_record else None
+            existing_rel_props = (
+                existing_record["rel_props"] if existing_record else None
             )
-            relation_attrs_json = self._merge_relation_attrs_json(
-                existing_relation_attrs, triple.get("relation_attrs", {})
+            relation_attrs_dict = self._merge_relation_attrs_dict(
+                existing_rel_props, triple.get("relation_attrs", {})
             )
 
             result = session.run(
@@ -330,7 +414,6 @@ class Neo4jClient:
                     r.corpus_ids = $corpus_ids,
                     r.relation_type = $relation_type,
                     r.relation_subtype = $relation_subtype,
-                    r.relation_attrs = $relation_attrs,
                     r.created_at = datetime(),
                     r.source = 'xiaohongshu'
                 ON MATCH SET
@@ -349,8 +432,9 @@ class Neo4jClient:
                         THEN $relation_subtype
                         ELSE r.relation_subtype
                     END,
-                    r.relation_attrs = $relation_attrs,
                     r.updated_at = datetime()
+                SET r += $relation_attrs_dict
+                REMOVE r.relation_attrs
                 RETURN r
             """,
                 head=triple["head"],
@@ -360,7 +444,7 @@ class Neo4jClient:
                 corpus_ids=triple.get("corpus_ids", []),
                 relation_type=triple.get("relation_type", ""),
                 relation_subtype=triple.get("relation_subtype", ""),
-                relation_attrs=relation_attrs_json,
+                relation_attrs_dict=relation_attrs_dict,
             )
             return result.single() is not None
 
@@ -826,7 +910,7 @@ class Neo4jClient:
                             OPTIONAL MATCH (h)-[r:{rel_label}]->(t)
                             RETURN triple.head_db_entity_id AS head_id,
                                    triple.tail_db_entity_id AS tail_id,
-                                   r.relation_attrs AS relation_attrs
+                                   properties(r) AS rel_props
                             """
                             ,
                             triples=[
@@ -842,7 +926,9 @@ class Neo4jClient:
                                 str(row["head_id"] or ""),
                                 str(row["tail_id"] or ""),
                             )
-                            existing_rel_attrs_map[key] = row["relation_attrs"]
+                            # 从 properties(r) 中提取属性（排除基础字段）
+                            rel_props = row["rel_props"] or {}
+                            existing_rel_attrs_map[key] = self._filter_relation_attrs(rel_props)
 
                         batch_data = [
                             {
@@ -854,7 +940,7 @@ class Neo4jClient:
                                 "corpus_ids": t.get("corpus_ids", []),
                                 "relation_type": t.get("relation_type", ""),
                                 "relation_subtype": t.get("relation_subtype", ""),
-                                "relation_attrs": self._merge_relation_attrs_json(
+                                "relation_attrs": self._merge_relation_attrs_dict(
                                     existing_rel_attrs_map.get(
                                         (
                                             str(t.get("head_db_entity_id", "")),
@@ -882,7 +968,6 @@ class Neo4jClient:
                                 r.corpus_ids = triple.corpus_ids,
                                 r.relation_type = triple.relation_type,
                                 r.relation_subtype = triple.relation_subtype,
-                                r.relation_attrs = triple.relation_attrs,
                                 r.created_at = datetime(),
                                 r.source = 'xiaohongshu'
                             ON MATCH SET
@@ -892,6 +977,8 @@ class Neo4jClient:
                                     ELSE coalesce(r.corpus_ids, [])
                                 END,
                                 r.updated_at = datetime()
+                            SET r += triple.relation_attrs
+                            REMOVE r.relation_attrs
                             RETURN count(r) as merged_count
                         """
                         result = session.run(query, triples=batch_data)
@@ -915,7 +1002,7 @@ class Neo4jClient:
                             OPTIONAL MATCH (h)-[r:{rel_label}]->(t)
                             RETURN triple.head AS head,
                                    triple.tail AS tail,
-                                   r.relation_attrs AS relation_attrs
+                                   properties(r) AS rel_props
                             """,
                             triples=[
                                 {"head": t["head"], "tail": t["tail"]}
@@ -924,7 +1011,9 @@ class Neo4jClient:
                         )
                         for row in existing_result:
                             key = (str(row["head"] or ""), str(row["tail"] or ""))
-                            existing_rel_attrs_map[key] = row["relation_attrs"]
+                            # 从 properties(r) 中提取属性（排除基础字段）
+                            rel_props = row["rel_props"] or {}
+                            existing_rel_attrs_map[key] = self._filter_relation_attrs(rel_props)
 
                         batch_data = [
                             {
@@ -935,7 +1024,7 @@ class Neo4jClient:
                                 "corpus_ids": t.get("corpus_ids", []),
                                 "relation_type": t.get("relation_type", ""),
                                 "relation_subtype": t.get("relation_subtype", ""),
-                                "relation_attrs": self._merge_relation_attrs_json(
+                                "relation_attrs": self._merge_relation_attrs_dict(
                                     existing_rel_attrs_map.get(
                                         (str(t["head"]), str(t["tail"]))
                                     ),
@@ -973,7 +1062,6 @@ class Neo4jClient:
                                 r.corpus_ids = triple.corpus_ids,
                                 r.relation_type = triple.relation_type,
                                 r.relation_subtype = triple.relation_subtype,
-                                r.relation_attrs = triple.relation_attrs,
                                 r.created_at = datetime(),
                                 r.source = 'xiaohongshu'
                             ON MATCH SET
@@ -992,8 +1080,9 @@ class Neo4jClient:
                                     THEN triple.relation_subtype
                                     ELSE r.relation_subtype
                                 END,
-                                r.relation_attrs = triple.relation_attrs,
                                 r.updated_at = datetime()
+                            SET r += triple.relation_attrs
+                            REMOVE r.relation_attrs
                             RETURN count(r) as merged_count
                         """
                         result = session.run(query, triples=batch_data)

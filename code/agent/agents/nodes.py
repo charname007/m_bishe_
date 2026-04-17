@@ -9273,17 +9273,97 @@ def create_batch_normalize_node(llm: Any):
 
 
 def create_batch_qa_scaffold_node(llm: Any):
-    """创建批量QA脚手架节点 - 一次LLM调用处理多条语料的QA脚手架构建"""
+    """创建批量QA脚手架节点（统一到QA_Mentor语义脚手架能力）"""
     from .schemas import BatchQAScaffoldResult
     from .prompts import BATCH_QA_SCAFFOLD_PROMPT, format_batch_corpus
 
     parser = PydanticOutputParser(pydantic_object=BatchQAScaffoldResult)
+    
+    def _normalize_quotes(text: str) -> str:
+        """将中文/花式引号标准化，减少JSON解析失败。"""
+        if not text:
+            return text
+        return (
+            text.replace("“", '"')
+            .replace("”", '"')
+            .replace("‘", "'")
+            .replace("’", "'")
+        )
+
+    def _parse_batch_qa_lenient(text: str) -> Dict[str, Any]:
+        """批量QA宽松解析：允许部分条目损坏，尽量保留可用结果。"""
+        cleaned = _normalize_quotes(text or "")
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```", "", cleaned).strip()
+
+        try:
+            payload = json.loads(cleaned)
+        except Exception:
+            payload = json.loads(fix_llm_json_content(cleaned))
+
+        if not isinstance(payload, dict):
+            return {"results": [], "overall_confidence": "low", "batch_size": 0}
+
+        results = payload.get("results", [])
+        if not isinstance(results, list):
+            results = []
+
+        normalized_results = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            corpus_id = str(item.get("corpus_id", "")).strip()
+            if not corpus_id:
+                continue
+
+            qa_pairs = item.get("qa_pairs", [])
+            if not isinstance(qa_pairs, list):
+                qa_pairs = []
+
+            norm_pairs = []
+            for q in qa_pairs:
+                if not isinstance(q, dict):
+                    continue
+                norm_pairs.append(
+                    {
+                        "question": str(q.get("question", "")).strip(),
+                        "answer": str(q.get("answer", "")).strip(),
+                        "dimension": str(q.get("dimension", "what")).lower() or "what",
+                        "entities_involved": q.get("entities_involved", [])
+                        if isinstance(q.get("entities_involved", []), list)
+                        else [],
+                        "confidence": str(q.get("confidence", "medium")),
+                    }
+                )
+
+            normalized_results.append(
+                {
+                    "corpus_id": corpus_id,
+                    "qa_pairs": norm_pairs,
+                    "entity_hints": item.get("entity_hints", [])
+                    if isinstance(item.get("entity_hints", []), list)
+                    else [],
+                    "relation_hints": item.get("relation_hints", [])
+                    if isinstance(item.get("relation_hints", []), list)
+                    else [],
+                    "context_dependencies": item.get("context_dependencies", [])
+                    if isinstance(item.get("context_dependencies", []), list)
+                    else [],
+                    "overall_confidence": str(item.get("overall_confidence", "medium")),
+                }
+            )
+
+        return {
+            "results": normalized_results,
+            "overall_confidence": str(payload.get("overall_confidence", "medium")),
+            "batch_size": len(normalized_results),
+        }
 
     async def batch_qa_scaffold_node(
         corpus_list: List[Dict], writer: StreamWriter
     ) -> Dict:
         batch_size = len(corpus_list)
-        logger.info(f"[Batch_QA_Scaffold] 处理 {batch_size} 条语料")
+        logger.info(f"[Batch_QA_Mentor] 处理 {batch_size} 条语料（统一语义脚手架）")
         writer(
             {"step": "batch_qa_scaffold", "status": "started", "batch_size": batch_size}
         )
@@ -9297,9 +9377,16 @@ def create_batch_qa_scaffold_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
             # P21改进：输出LLM原始响应到日志
-            logger.info(f"[Batch_QA_Scaffold] LLM响应: {truncate_for_log(response.content)}")
-            logger.debug(f"[Batch_QA_Scaffold] LLM完整响应: {response.content}")
-            result = safe_parse_json_with_quote_fix(parser, response.content)
+            logger.info(f"[Batch_QA_Mentor] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_QA_Mentor] LLM完整响应: {response.content}")
+            try:
+                result = safe_parse_json_with_quote_fix(parser, response.content)
+            except Exception as parse_error:
+                logger.warning(
+                    f"[Batch_QA_Mentor] 严格解析失败，尝试宽松解析: {parse_error}"
+                )
+                lenient_payload = _parse_batch_qa_lenient(response.content)
+                result = BatchQAScaffoldResult.model_validate(lenient_payload)
             batch_results, qa_corpus = {}, []
             for r in result.results:
                 batch_results[r.corpus_id] = {
@@ -9321,7 +9408,7 @@ def create_batch_qa_scaffold_node(llm: Any):
                             }
                         )
                         break
-            logger.info(f"[Batch_QA_Scaffold] 完成: {len(qa_corpus)}条")
+            logger.info(f"[Batch_QA_Mentor] 完成: {len(qa_corpus)}条")
             writer(
                 {
                     "step": "batch_qa_scaffold",
@@ -9335,7 +9422,7 @@ def create_batch_qa_scaffold_node(llm: Any):
                 "batch_qa_scaffold_result": result.model_dump(),
             }
         except Exception as e:
-            logger.error(f"[Batch_QA_Scaffold] 处理失败: {e}")
+            logger.error(f"[Batch_QA_Mentor] 处理失败: {e}")
             return {"batch_results": {}, "qa_corpus": corpus_list, "error": str(e)}
 
     return batch_qa_scaffold_node
@@ -9348,6 +9435,7 @@ async def process_batch_preprocessing(
     enable_filter: bool = True,
     enable_normalize: bool = True,
     enable_qa_scaffold: bool = True,
+    qa_llm: Any = None,
 ) -> Dict:
     """批量前置节点处理：Filter → Normalize → QA_Scaffold → Self_Check_QA（可选），一次LLM调用处理多条语料
 
@@ -9394,7 +9482,10 @@ async def process_batch_preprocessing(
             current_corpus = []
 
     if enable_qa_scaffold and current_corpus:
-        qa_node = create_batch_qa_scaffold_node(llm)
+        qa_model = qa_llm or llm
+        if qa_llm is not None:
+            logger.info("[Batch_Preprocessing] QA_Scaffold 统一走 QA_Mentor 模型")
+        qa_node = create_batch_qa_scaffold_node(qa_model)
         qa_retry_attempts = max(
             int(getattr(config, "batch_qa_scaffold_retry_attempts", 1) or 0), 0
         )

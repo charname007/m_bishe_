@@ -1892,6 +1892,7 @@ def build_distributed_workflow(
                         enable_filter=config.enable_filter,
                         enable_normalize=config.enable_normalize,
                         enable_qa_scaffold=config.enable_qa_scaffold,
+                        qa_llm=qa_llm,
                     )
 
                     # 更新语料列表
