@@ -3,7 +3,7 @@ Pydantic模型定义 - 用于LangChain with_structured_output
 v3.4改进：实体类型扩展（新增功能实体、事件实体）+ 属性Schema简化（删除联动推荐，开放文本属性）
 核心原则：所有属性和关系必须有原文依据（明确出现/暗示表达/语义推断），禁止幻觉
 """
-from typing import List, Dict, Optional, Any, Union
+from typing import List, Dict, Optional, Any, Union, ClassVar
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from enum import Enum
 
@@ -59,17 +59,25 @@ class EntityTypeEnum(str, Enum):
 
 RELATION_VARIANT_MAPPING: Dict[str, str] = {
     # 空间基础关系（3个）
-    '位于': '位于', '在': '位于', '在...上': '位于', '地处': '位于',
+    '位于': '位于', '地处': '位于',
     '属于': '位于', '隶属于': '位于', '是...的一部分': '位于',  # 合并入"位于"
     '包含': '包含', '里面有': '包含', '内有': '包含', '涵盖': '包含',
     '相对方位': '相对方位', '方位': '相对方位', '空间方位': '相对方位',
     '相邻': '相对方位', '旁边': '相对方位', '旁边是': '相对方位', '隔壁': '相对方位',  # 合并入"相对方位"
     '距离': '相对方位', '离': '相对方位', '附近': '相对方位',  # 合并入"相对方位"
     '方向': '相对方位', '东边': '相对方位', '南边': '相对方位', '西边': '相对方位', '北边': '相对方位',  # 合并入"相对方位"
+    # v3.4补充：常见空间邻近词汇（社交媒体高频）
+    '连接': '相对方位', '靠近': '相对方位', '周边': '相对方位', '周围': '相对方位',
+    '毗邻': '相对方位', '紧邻': '相对方位', '对门': '相对方位', '对面': '相对方位',
+    '交叉': '相对方位', '交汇': '相对方位', '交界': '相对方位',
+    '挨着': '相对方位', '紧挨': '相对方位',
 
     # 社交语义关系（1个）
-    '具有功能': '具有功能', '可以': '具有功能', '适合': '具有功能',
-    '承载活动': '具有功能', '活动': '具有功能',  # 原名改为"具有功能"
+    '具有功能': '具有功能', '适合': '具有功能',
+    '承载活动': '具有功能',  # 原名改为"具有功能"
+    # 注意：移除 '可以' 和 '活动' 映射（过度歧义）
+    # '可以' 太常见（如"我可以去"不应生成三元组）
+    # '活动' 语义多样（如"樱花节活动"应为事件实体而非关系）
 
     # 对比评价关系（3个）
     '优于': '优于', '比...好': '优于', '比...便宜': '优于',
@@ -77,7 +85,10 @@ RELATION_VARIANT_MAPPING: Dict[str, str] = {
     '劣于': '劣于', '不如': '劣于', '比...差': '劣于',
 
     # 事件关系（1个）
-    '发生事件': '发生事件', '有': '发生事件', '正在': '发生事件',
+    '发生事件': '发生事件',
+    # 注意：移除 '有' 和 '正在' 映射（过度歧义）
+    # '有' 太常见（如"武汉大学有图书馆"应为'包含'而非'发生事件'）
+    # '正在' 不应作为关系词汇（如"我正在吃饭"不应生成三元组）
 }
 
 
@@ -430,8 +441,39 @@ class TripleAttributes(BaseModel):
     - 删除联动推荐属性（信息价值有限）
     - 适合人群改为开放文本（枚举无法穷尽人群表达）
     - 具有限制改为开放文本列表（保留原文时长准确性）
+
+    v3.5改进：
+    - 使用 model_validator(mode='before') 清理 LLM 错误输出的额外字段
+    - "推荐指数"等字段应放在实体属性中，而非三元组属性
     """
     model_config = ConfigDict(extra='forbid')  # 拒绝未定义的字段
+
+    # ===== LLM幻觉字段清理器（v3.5新增） =====
+    # 这些字段应放在实体属性中，LLM有时错误地放在三元组属性中
+    # 使用 ClassVar 避免 Pydantic v2 将其误识别为私有模型属性
+    HALLUCINATION_FIELDS: ClassVar[set] = {'推荐指数', '引发情感', '特征标签', 'rating', 'emotion'}
+
+    @model_validator(mode='before')
+    @classmethod
+    def clean_hallucination_fields(cls, data):
+        """清理 LLM 错误输出的额外字段（幻觉字段）
+
+        LLM 有时会错误地将实体属性（如推荐指数、情感倾向）放入三元组属性中。
+        此 validator 在验证前删除这些字段，避免 extra='forbid' 报错。
+        """
+        if isinstance(data, dict):
+            # 删除幻觉字段
+            hallucination_fields = cls.HALLUCINATION_FIELDS.intersection(data.keys())
+            if hallucination_fields:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"[TripleAttributes] LLM幻觉字段被清理: {hallucination_fields} "
+                    f"→ 这些字段应放在实体属性(full_entities)而非三元组属性"
+                )
+                for field in hallucination_fields:
+                    data.pop(field)
+        return data
 
     # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
     距离值: Optional[DistanceValueEnum] = Field(
@@ -709,7 +751,7 @@ class EntityAttributes(BaseModel):
     # 基础分类属性（可选）
     类别: Optional[str] = Field(
         default=None,
-        description="实体类别（用于NER边界识别）：道路/POI/建筑物/街区（必须有原文依据）"
+        description="实体类别（用于NER边界识别，v3.4：道路/POI/建筑物/街区/功能/事件）"
     )
     细分: Optional[str] = Field(
         default=None,
@@ -843,18 +885,18 @@ class LabelResult(BaseModel):
 # ===== Self-Check阶段输出模型 =====
 
 class VerifiedEntity(BaseModel):
-    """校验后的实体"""
+    """校验后的实体（v3.4更新：支持6种实体类型）"""
     name: str = Field(description="实体名称（归一化后）")
-    type: str = Field(description="实体类型：道路/POI/建筑物/街区")
+    type: str = Field(description="实体类型：道路/POI/建筑物/街区/功能/事件")
     confidence: str = Field(description="置信度: high/medium/low")
     aliases: List[str] = Field(default_factory=list, description="别名/简称列表")
     evidence: Optional[str] = Field(default="", description="原文依据")
 
 
 class MissingEntity(BaseModel):
-    """遗漏实体建议"""
+    """遗漏实体建议（v3.4更新：支持6种实体类型）"""
     name: str = Field(description="建议补充的实体名")
-    suggested_type: str = Field(description="建议类型：道路?/POI?/建筑物?/街区?")
+    suggested_type: str = Field(description="建议类型：道路?/POI?/建筑物?/街区?/功能?/事件?")
     reason: str = Field(description="遗漏原因/原文依据")
 
 
@@ -1368,16 +1410,22 @@ class SelfCheckNormalizeResult(BaseModel):
 
 # ===== P10新增：批量LLM调用模型 =====
 
+# P15修复：批量抽取使用JointEntity作为实体输出结构
 class BatchCorpusResult(BaseModel):
-    """单条语料的批量抽取结果"""
+    """单条语料的批量抽取结果（P15修复：使用JointEntity强类型）"""
     corpus_id: str = Field(description="语料ID")
     entities: Dict[str, List[str]] = Field(
         default_factory=dict,
-        description="实体字典: {'道路': [...], 'POI': [...], '建筑物': [...], '街区': [...]}"
+        description="实体字典（快速统计）: {'道路': [...], 'POI': [...], '建筑物': [...], '街区': [...], '功能': [...], '事件': [...]}"
     )
-    triples: List[Dict[str, Any]] = Field(
+    # P15修复：使用JointEntity列表代替Dict，强制LLM输出完整属性
+    full_entities: List[JointEntity] = Field(
         default_factory=list,
-        description="三元组列表: [{'head': ..., 'relation': ..., 'tail': ..., 'evidence': ..., 'attributes': ...}]"
+        description="完整实体列表（使用JointEntity强类型，包含所有属性）"
+    )
+    triples: List[JointTriple] = Field(
+        default_factory=list,
+        description="三元组列表（使用JointTriple强类型）"
     )
     confidence: str = Field(default="medium", description="置信度: high/medium/low")
     has_geo_info: bool = Field(default=True, description="是否包含地理信息")
