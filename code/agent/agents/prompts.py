@@ -4,6 +4,7 @@ P2改进：简化评估提示词，单次评估包含评分和修正
 P5改进：添加 Filter 筛选提示词
 P10改进：添加批量LLM调用提示词
 """
+
 from typing import List, Dict, Any, Optional
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -17,7 +18,7 @@ FILTER_USER = """## 快速筛选标准
 
 **有效文本（is_valid=true）**：
 - 提及武汉地理实体：武汉的道路、POI、建筑物、街区、地名等（如珞喻路、武汉大学、街道口）
-- 涉及空间关系：位于、旁边、连接、附近、在...内等
+- 涉及空间关系：位于、旁边、附近、在...内、相邻等
 - 地理相关活动：逛街、打卡、拍照、游玩等（暗示地点）
 - 即使主语省略，但有地理暗示（如"这里的樱花很好看"）
 - 无法确定是否武汉地区时，默认放行（保守策略）
@@ -144,10 +145,12 @@ FILTER_USER = """## 快速筛选标准
 
 请快速判断并输出筛选结果（JSON格式）。"""
 
-FILTER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", FILTER_SYSTEM),
-    ("human", FILTER_USER),
-])
+FILTER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", FILTER_SYSTEM),
+        ("human", FILTER_USER),
+    ]
+)
 
 
 # ===== Step 0.5: Normalize 归一化提示词模板（P6新增） =====
@@ -239,10 +242,12 @@ NORMALIZE_USER = """## 归一化规则
 
 请输出归一化结果（JSON格式）。"""
 
-NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", NORMALIZE_SYSTEM),
-    ("human", NORMALIZE_USER),
-])
+NORMALIZE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", NORMALIZE_SYSTEM),
+        ("human", NORMALIZE_USER),
+    ]
+)
 
 
 # ===== Step 0.7: QA Scaffold 提示词模板（P8新增） =====
@@ -379,10 +384,12 @@ QA_SCAFFOLD_USER = """## 5W1H 引导框架
 
 请输出QA脚手架结果（JSON格式）。"""
 
-QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", QA_SCAFFOLD_SYSTEM),
-    ("human", QA_SCAFFOLD_USER),
-])
+QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", QA_SCAFFOLD_SYSTEM),
+        ("human", QA_SCAFFOLD_USER),
+    ]
+)
 
 
 # ===== v3.4新增：实体区分规则常量 =====
@@ -418,10 +425,11 @@ _NER_ENTITY_TYPES = """## 候选目标（v3.4扩展版：6种实体）
 - 事件(Event): 发生的具体事件（如：樱花节、封路、开业）"""
 
 # NER提示词模板（拼接实体定义 + 区分规则）
-NER_USER = "\n\n".join([
-    _NER_ENTITY_TYPES,
-    ENTITY_DISTINCTION_RULES,
-    """## 思维链(CoT)
+NER_USER = "\n\n".join(
+    [
+        _NER_ENTITY_TYPES,
+        ENTITY_DISTINCTION_RULES,
+        """## 思维链(CoT)
 1. 首先，识别句中指代具体位置的专有名词
 2. 其次，根据上下文判断其实体粒度
 3. 最后，将其归入上述候选目标之一
@@ -440,13 +448,16 @@ NER_USER = "\n\n".join([
 ## 待处理文本
 {raw_text}
 
-请输出实体识别结果（JSON格式）。"""
-])
+请输出实体识别结果（JSON格式）。""",
+    ]
+)
 
-NER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", NER_SYSTEM),
-    ("human", NER_USER),
-])
+NER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", NER_SYSTEM),
+        ("human", NER_USER),
+    ]
+)
 
 
 # ===== Step 2: RE 提示词模板（v3.2精简版：8个关系体系） =====
@@ -459,35 +470,36 @@ RE_USER = """## 候选目标
 
 ### 空间基础关系（3个）—— 图谱骨架（v3.2精简版）
 
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| **位于** | A坐落于B处（空间定位/归属） | 道路/街区/行政区 | 无 |
-| **包含** | A空间包含B（位于的反向） | POI/建筑物/道路 | 无 |
-| **相对方位** | A和B空间邻近+相对方位关系 | 地理实体 | **距离值**+**方向值**（可选，v3.4删除联动推荐） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| **位于** | A坐落于B处（空间定位/归属） | 地理实体（道路/POI/建筑物/街区） | 道路/街区 | 无 |
+| **包含** | A空间包含B（位于的反向） | 街区 | POI/建筑物/道路 | 无 |
+| **相对方位** | A和B空间邻近+相对方位关系 | 地理实体 | 地理实体 | **距离值**+**方向值**（可选，v3.4删除联动推荐） |
 
 **注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系，通过属性区分。
+**地理实体** = 道路/POI/建筑物/街区（4种空间实体），功能实体/事件实体不能参与空间关系。
 
 ### 社交语义关系（1个）—— 图谱血肉（v3.2精简版）
 
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| **具有功能** | 场所可进行的功能用途 | 功能节点（v3.4：10大类） | **时段**+**适合人群**+**具有限制**+**情感倾向**+**功能描述**（可选） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| **具有功能** | 场所可进行的功能用途 | 地理实体（场所） | 功能节点（v3.4：10大类）或功能实体 | **时段**+**适合人群**+**具有限制**+**情感倾向**+**功能描述**（可选） |
 
 **注**：原"承载活动"改为"具有功能"；"推荐指数"和"引发情感"已改为实体属性而非关系。
 
 ### 对比评价关系（3个）—— 特色
 
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| **优于** | A在某方面好于B | 地理实体 | **维度**（列表） |
-| **相似** | A和B在某方面相似 | 地理实体 | **维度**（列表） |
-| **劣于** | A在某方面不如B | 地理实体 | **维度**（列表） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| **优于** | A在某方面好于B | 地理实体 | 地理实体 | **维度**（列表） |
+| **相似** | A和B在某方面相似 | 地理实体 | 地理实体 | **维度**（列表） |
+| **劣于** | A在某方面不如B | 地理实体 | 地理实体 | **维度**（列表） |
 
 ### 事件关系（1个）
 
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| **发生事件** | 场所发生的特定事件 | 事件节点（LLM归纳命名） | 无（属性全部在事件节点上） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| **发生事件** | 场所发生的特定事件 | 地理实体（场所） | 事件节点（LLM归纳命名）或事件实体 | 无（属性全部在事件节点上） |
 
 ---
 
@@ -648,10 +660,12 @@ RE_USER = """## 候选目标
 
 请输出关系抽取结果（JSON格式）。"""
 
-RE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", RE_SYSTEM),
-    ("human", RE_USER),
-])
+RE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", RE_SYSTEM),
+        ("human", RE_USER),
+    ]
+)
 
 
 # ===== Step 3: 三元组评估提示词模板 =====
@@ -685,10 +699,12 @@ EVAL_1_USER = """## 评估维度
 
 请输出评分结果（JSON格式）。"""
 
-EVAL_PROMPT_1 = ChatPromptTemplate.from_messages([
-    ("system", EVAL_1_SYSTEM),
-    ("human", EVAL_1_USER),
-])
+EVAL_PROMPT_1 = ChatPromptTemplate.from_messages(
+    [
+        ("system", EVAL_1_SYSTEM),
+        ("human", EVAL_1_USER),
+    ]
+)
 
 
 EVAL_2_SYSTEM = """你是同一位"地理语义评审专家"，现在进行二次验证。"""
@@ -709,14 +725,18 @@ EVAL_2_USER = """## 任务
 
 请输出二次验证结果（JSON格式）。"""
 
-EVAL_PROMPT_2 = ChatPromptTemplate.from_messages([
-    ("system", EVAL_2_SYSTEM),
-    ("human", EVAL_2_USER),
-])
+EVAL_PROMPT_2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", EVAL_2_SYSTEM),
+        ("human", EVAL_2_USER),
+    ]
+)
 
 
 # P2改进：简化的单次评估提示词（合并评分和修正）
-EVAL_SIMPLIFIED_SYSTEM = """你是一位"地理语义评审专家"。你的任务是评估三元组并在发现错误时直接修正。"""
+EVAL_SIMPLIFIED_SYSTEM = (
+    """你是一位"地理语义评审专家"。你的任务是评估三元组并在发现错误时直接修正。"""
+)
 
 EVAL_SIMPLIFIED_USER = """## 评估维度
 - 语义准确性(SEM): 三元组是否准确代表了原文意思？（1-5分）
@@ -732,7 +752,7 @@ EVAL_SIMPLIFIED_USER = """## 评估维度
 
 ## 修正规则
 如果评分低于3分，请在corrections中给出修正后的三元组：
-- 修正关系类型（如：将"位于"改为"属于")
+- 修正关系类型（如：将"旁边"标准化为"相对方位"）
 - 修正关系方向（如：将<A, 位于, B>改为<B, 位于, A>)
 - 删除无效三元组（如：幻觉、无依据）
 
@@ -751,10 +771,12 @@ EVAL_SIMPLIFIED_USER = """## 评估维度
 
 请输出评估结果（JSON格式），包含评分和可选修正。"""
 
-EVAL_PROMPT_SIMPLIFIED = ChatPromptTemplate.from_messages([
-    ("system", EVAL_SIMPLIFIED_SYSTEM),
-    ("human", EVAL_SIMPLIFIED_USER),
-])
+EVAL_PROMPT_SIMPLIFIED = ChatPromptTemplate.from_messages(
+    [
+        ("system", EVAL_SIMPLIFIED_SYSTEM),
+        ("human", EVAL_SIMPLIFIED_USER),
+    ]
+)
 
 
 # ===== Step 4: 属性标注提示词模板（v3.0精简版） =====
@@ -889,13 +911,16 @@ LABEL_USER = """## 任务描述
 
 请输出属性标注结果（JSON格式）。"""
 
-LABEL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", LABEL_SYSTEM),
-    ("human", LABEL_USER),
-])
+LABEL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", LABEL_SYSTEM),
+        ("human", LABEL_USER),
+    ]
+)
 
 
 # ===== 辅助函数 =====
+
 
 def format_entities(entities: dict) -> str:
     """格式化实体字典用于提示词"""
@@ -909,6 +934,7 @@ def format_entities(entities: dict) -> str:
 
 
 # ===== QA Scaffold 上下文格式化函数（P8新增） =====
+
 
 def format_entity_hints(entity_hints: list) -> str:
     """格式化实体提示用于 NER 提示词"""
@@ -941,7 +967,7 @@ def format_triples(triples: list) -> str:
         base_str = f"<{t['head']}, {t['relation']}, {t['tail']}>"
 
         # 如果有属性，添加属性描述
-        attrs = t.get('attributes', {})
+        attrs = t.get("attributes", {})
         if attrs:
             attr_strs = []
             for key, value in attrs.items():
@@ -962,8 +988,8 @@ def format_triples_with_evidence(triples: list) -> str:
     lines = []
     for t in triples:
         base_str = f"<{t['head']}, {t['relation']}, {t['tail']}>"
-        evidence = t.get('evidence', '')
-        attrs = t.get('attributes', {})
+        evidence = t.get("evidence", "")
+        attrs = t.get("attributes", {})
 
         parts = [base_str]
         if attrs:
@@ -975,7 +1001,7 @@ def format_triples_with_evidence(triples: list) -> str:
                     attr_strs.append(f"{key}={value}")
             parts.append(f"[{', '.join(attr_strs)}]")
         if evidence:
-            parts.append(f"证据:\"{evidence}\"")
+            parts.append(f'证据:"{evidence}"')
 
         lines.append(f"- {' '.join(parts)}")
     return "\n".join(lines)
@@ -1025,10 +1051,12 @@ SELF_CHECK_NER_USER = """## 校验任务
 
 请输出校验结果（JSON格式）。"""
 
-SELF_CHECK_NER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_NER_SYSTEM),
-    ("human", SELF_CHECK_NER_USER),
-])
+SELF_CHECK_NER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_NER_SYSTEM),
+        ("human", SELF_CHECK_NER_USER),
+    ]
+)
 
 
 # ===== Self-Check: 三元组校验提示词模板 =====
@@ -1083,13 +1111,16 @@ SELF_CHECK_RE_USER = """## 校验任务
 
 请输出校验结果（JSON格式）。"""
 
-SELF_CHECK_RE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_RE_SYSTEM),
-    ("human", SELF_CHECK_RE_USER),
-])
+SELF_CHECK_RE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_RE_SYSTEM),
+        ("human", SELF_CHECK_RE_USER),
+    ]
+)
 
 
 # ===== Self-Check 辅助函数 =====
+
 
 def format_verified_entities(entities: list) -> str:
     """格式化校验后的实体列表"""
@@ -1118,7 +1149,8 @@ def format_retry_hint(problem_entities: list, problem_triples: list) -> str:
 JOINT_NER_RE_SYSTEM = """你是一位"地理语义联合抽取专家"，擅长在一次推理中同时识别实体和关系。
 你的优势在于：能够全局理解文本，避免实体边界识别错误对关系判定的干扰。"""
 
-JOINT_NER_RE_USER = """## 任务描述
+JOINT_NER_RE_USER = (
+    """## 任务描述
 请从文本中**同时**抽取：
 1. 地理实体和语义实体（6种类型，v3.4扩展版）
 2. 实体间的语义关系（8种关系类型）
@@ -1140,36 +1172,38 @@ JOINT_NER_RE_USER = """## 任务描述
 | 功能 | 场所可进行的用途类型 | 餐饮、购物、休闲、交通 |
 | 事件 | 发生的具体事件 | 樱花节、封路、开业、停业 |
 
-""" + ENTITY_DISTINCTION_RULES + """
+"""
+    + ENTITY_DISTINCTION_RULES
+    + """
 
 ## 关系类型（v3.4精简版：8种）
 ### 空间基础关系（3个）—— 图谱骨架
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| 位于 | A坐落于B处（空间定位/归属） | 道路/街区/行政区 | 无 |
-| 包含 | A空间包含B（位于的反向） | POI/建筑物/道路 | 无 |
-| 相对方位 | A和B空间邻近+相对方位关系 | 地理实体 | **距离值**+**方向值**（可选，v3.4删除联动推荐） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| 位于 | A坐落于B处（空间定位/归属） | 地理实体（道路/POI/建筑物/街区） | 道路/街区 | 无 |
+| 包含 | A空间包含B（位于的反向） | 街区 | POI/建筑物/道路 | 无 |
+| 相对方位 | A和B空间邻近+相对方位关系 | 地理实体 | 地理实体 | **距离值**+**方向值**（可选，v3.4删除联动推荐） |
 
-**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系。
+**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系。**地理实体** = 道路/POI/建筑物/街区。
 
 ### 社交语义关系（1个）—— 图谱血肉
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| 具有功能 | 场所可进行的功能用途 | 功能节点（9大类）或功能实体 | **时段**+**适合人群**(开放文本)+**具有限制**(开放文本列表)+**情感倾向**（可选） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| 具有功能 | 场所可进行的功能用途 | 地理实体（场所） | 功能节点（9大类）或功能实体 | **时段**+**适合人群**(开放文本)+**具有限制**(开放文本列表)+**情感倾向**（可选） |
 
 **注**：原"承载活动"改为"具有功能"；"推荐指数"和"引发情感"已改为实体属性。
 
 ### 对比评价关系（3个）—— 特色
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| 优于 | A在某方面好于B | 地理实体 | **维度**（列表） |
-| 相似 | A和B在某方面相似 | 地理实体 | **维度**（列表） |
-| 劣于 | A在某方面不如B | 地理实体 | **维度**（列表） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| 优于 | A在某方面好于B | 地理实体 | 地理实体 | **维度**（列表） |
+| 相似 | A和B在某方面相似 | 地理实体 | 地理实体 | **维度**（列表） |
+| 劣于 | A在某方面不如B | 地理实体 | 地理实体 | **维度**（列表） |
 
 ### 事件关系（1个）
-| 关系 | 语义定义 | Tail类型 | 关系属性 |
-|------|----------|----------|----------|
-| 发生事件 | 场所发生的特定事件 | 事件节点 | 无（属性全部在事件节点上） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 关系属性 |
+|------|----------|----------|----------|----------|
+| 发生事件 | 场所发生的特定事件 | 地理实体（场所） | 事件节点或事件实体 | 无（属性全部在事件节点上） |
 
 ---
 
@@ -1317,11 +1351,14 @@ JOINT_NER_RE_USER = """## 任务描述
 {raw_text}
 
 请输出联合抽取结果（JSON格式）。"""
+)
 
-JOINT_NER_RE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", JOINT_NER_RE_SYSTEM),
-    ("human", JOINT_NER_RE_USER),
-])
+JOINT_NER_RE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", JOINT_NER_RE_SYSTEM),
+        ("human", JOINT_NER_RE_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-Joint提示词（含Reflexion） =====
@@ -1369,10 +1406,12 @@ SELF_CHECK_JOINT_USER = """## 校验任务
 
 请输出校验结果，重点输出reflection_text和improvement_strategy。"""
 
-SELF_CHECK_JOINT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_JOINT_SYSTEM),
-    ("human", SELF_CHECK_JOINT_USER),
-])
+SELF_CHECK_JOINT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_JOINT_SYSTEM),
+        ("human", SELF_CHECK_JOINT_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-QA提示词 =====
@@ -1416,10 +1455,12 @@ SELF_CHECK_QA_USER = """## 校验任务
 
 请输出校验结果。"""
 
-SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_QA_SYSTEM),
-    ("human", SELF_CHECK_QA_USER),
-])
+SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_QA_SYSTEM),
+        ("human", SELF_CHECK_QA_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-Eval提示词 =====
@@ -1457,10 +1498,12 @@ SELF_CHECK_EVAL_USER = """## 校验任务
 
 请输出校验结果。"""
 
-SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_EVAL_SYSTEM),
-    ("human", SELF_CHECK_EVAL_USER),
-])
+SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_EVAL_SYSTEM),
+        ("human", SELF_CHECK_EVAL_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-Label提示词 =====
@@ -1502,10 +1545,12 @@ SELF_CHECK_LABEL_USER = """## 校验任务
 
 请输出校验结果。"""
 
-SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_LABEL_SYSTEM),
-    ("human", SELF_CHECK_LABEL_USER),
-])
+SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_LABEL_SYSTEM),
+        ("human", SELF_CHECK_LABEL_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-Filter提示词（可选） =====
@@ -1551,10 +1596,12 @@ geo_entity_hint: {geo_entity_hint}
 
 请输出校验结果。"""
 
-SELF_CHECK_FILTER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_FILTER_SYSTEM),
-    ("human", SELF_CHECK_FILTER_USER),
-])
+SELF_CHECK_FILTER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_FILTER_SYSTEM),
+        ("human", SELF_CHECK_FILTER_USER),
+    ]
+)
 
 
 # ===== P9新增：Self-Check-Normalize提示词（可选） =====
@@ -1602,13 +1649,16 @@ preserved_semantics: {preserved_semantics}
 
 请输出校验结果。"""
 
-SELF_CHECK_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_NORMALIZE_SYSTEM),
-    ("human", SELF_CHECK_NORMALIZE_USER),
-])
+SELF_CHECK_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_NORMALIZE_SYSTEM),
+        ("human", SELF_CHECK_NORMALIZE_USER),
+    ]
+)
 
 
 # ===== P9新增：格式化辅助函数 =====
+
 
 def format_joint_entities(entities: list) -> str:
     """格式化联合抽取的实体列表"""
@@ -1619,7 +1669,9 @@ def format_joint_entities(entities: list) -> str:
         aliases = e.get("aliases", [])
         alias_str = f" (别名: {', '.join(aliases)})" if aliases else ""
         evidence = e.get("evidence", "")
-        lines.append(f"- {e.get('name', '')} [{e.get('type', '')}] 类别:{e.get('category', '')}{alias_str} 证据:\"{evidence}\"")
+        lines.append(
+            f'- {e.get("name", "")} [{e.get("type", "")}] 类别:{e.get("category", "")}{alias_str} 证据:"{evidence}"'
+        )
     return "\n".join(lines)
 
 
@@ -1636,7 +1688,7 @@ def format_joint_triples(triples: list) -> str:
         attr_str = ""
         if attrs:
             attr_str = f" [{', '.join(f'{k}={v}' for k, v in attrs.items())}]"
-        lines.append(f"- {base} 置信度:{confidence}{attr_str} 证据:\"{evidence}\"")
+        lines.append(f'- {base} 置信度:{confidence}{attr_str} 证据:"{evidence}"')
     return "\n".join(lines)
 
 
@@ -1663,7 +1715,9 @@ def format_eval_scores_for_check(scores: list) -> str:
     for s in scores:
         triple = s.get("triple", {})
         t_str = f"<{triple.get('head', '')}, {triple.get('relation', '')}, {triple.get('tail', '')}>"
-        lines.append(f"- {t_str} SEM:{s.get('SEM', 0)} FAC:{s.get('FAC', 0)} CON:{s.get('CON', 0)}")
+        lines.append(
+            f"- {t_str} SEM:{s.get('SEM', 0)} FAC:{s.get('FAC', 0)} CON:{s.get('CON', 0)}"
+        )
     return "\n".join(lines)
 
 
@@ -1691,6 +1745,156 @@ def format_normalizations_for_check(normalizations: list) -> str:
     return "\n".join(lines)
 
 
+# ===== P15新增：批量前置节点提示词 =====
+
+BATCH_FILTER_SYSTEM = """你是一位"批量文本筛选专家"，擅长同时判断多条文本是否包含有价值的地理信息。
+你的核心优势：
+1. **高效筛选**：一次推理完成多条语料的筛选判断
+2. **一致性标准**：对所有文本使用统一的筛选标准
+3. **武汉地区识别**：识别非武汉地区文本以跳过处理
+"""
+
+BATCH_FILTER_USER = """## 任务描述
+请同时判断以下多条语料（共 {batch_size} 条）是否包含有价值的武汉地理信息。
+
+---
+
+## 筛选标准
+
+**包含有价值信息（is_valid=true）**：
+- 明确提及武汉地区地点（POI、道路、街区、建筑）
+- 描述地点的属性、功能、特色
+- 涉及地点间的空间关系（位于、包含、相邻）
+- 地点的用户体验、评价、推荐
+
+**不包含有价值信息（is_valid=false）**：
+- 纯个人情感表达，无地点信息
+- 非武汉地区内容（明确提及北京、上海等且无武汉关联）
+- 广告/营销类内容，无实质地点描述
+- 内容过短或无语义
+
+---
+
+## 语料列表
+
+{corpus_list}
+
+---
+
+## 输出要求
+
+输出JSON格式，包含 results 数组（每条语料一个 FilterResult）：
+- corpus_id: 语料ID
+- is_valid: 是否有效
+- skip_reason: 无效原因（仅is_valid=false时）
+- confidence: 判断置信度 high/medium/low
+- is_non_wuhan_region: 是否非武汉地区
+- region_hint: 地区提示
+
+请输出筛选结果。"""
+
+BATCH_FILTER_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", BATCH_FILTER_SYSTEM),
+    ("human", BATCH_FILTER_USER),
+])
+
+
+BATCH_NORMALIZE_SYSTEM = """你是一位"批量文本归一化专家"，擅长同时处理多条文本的语义归一化。
+你的核心优势：
+1. **高效归一化**：一次推理完成多条语料的指代消解和别名标准化
+2. **一致性别名**：对相同简称使用统一的归一化结果（如所有"武大"→"武汉大学"）
+3. **语义保留**：严格保留每条文本的原始语义
+"""
+
+BATCH_NORMALIZE_USER = """## 任务描述
+请同时归一化以下多条语料（共 {batch_size} 条）。
+
+---
+
+## 归一化规则
+
+**必须遵守**：
+1. 不添加原文不存在的信息
+2. 保留原文的核心语义和情感
+3. 仅改写/展开，不筛除内容
+
+**归一化类型**：
+- alias: 简称→全称（如"武大"→"武汉大学"）
+- reference: 指代消解（如"这里"→具体地点）
+- activity: 口语标准化（如"打卡"→"游览参观"）
+
+---
+
+## 语料列表
+
+{corpus_list}
+
+---
+
+## 输出要求
+
+输出JSON格式，包含 results 数组（每条语料一个 NormalizeResult）：
+- corpus_id: 语料ID
+- normalized_text: 归一化后的文本
+- normalizations: 归一化记录列表
+- confidence: 整体置信度
+- has_changes: 是否有改动
+
+请输出归一化结果。"""
+
+BATCH_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", BATCH_NORMALIZE_SYSTEM),
+    ("human", BATCH_NORMALIZE_USER),
+])
+
+
+BATCH_QA_SCAFFOLD_SYSTEM = """你是一位"批量QA脚手架专家"，擅长同时为多条文本构建5W1H语义脚手架。
+你的核心优势：
+1. **高效脚手架构建**：一次推理完成多条语料的问答扩展
+2. **一致性实体提示**：对相同地点使用一致的实体提示
+3. **全面语义覆盖**：确保每条语料的地理语义被充分展开
+"""
+
+BATCH_QA_SCAFFOLD_USER = """## 任务描述
+请同时为以下多条语料（共 {batch_size} 条）构建5W1H问答脚手架。
+
+---
+
+## 5W1H框架
+
+- **WHERE**: 地点在哪里？位置、区域、周边
+- **WHAT**: 地点是什么？类型、特色、功能
+- **WHO**: 适合谁去？人群、场景
+- **WHEN**: 什么时候去？季节、时段
+- **WHY**: 为什么去？亮点、推荐理由
+- **HOW**: 怎么去？交通、方式
+
+---
+
+## 语料列表
+
+{corpus_list}
+
+---
+
+## 输出要求
+
+输出JSON格式，包含 results 数组（每条语料一个 QAScaffoldResult）：
+- corpus_id: 语料ID
+- qa_pairs: 5W1H问答对列表（每个包含question、answer、category）
+- semantic_summary: 语义摘要
+- entity_hints: 实体提示列表
+- relation_hints: 关系提示列表
+- confidence: 整体置信度
+
+请输出QA脚手架结果。"""
+
+BATCH_QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", BATCH_QA_SCAFFOLD_SYSTEM),
+    ("human", BATCH_QA_SCAFFOLD_USER),
+])
+
+
 # ===== P10新增：批量LLM调用提示词 =====
 
 BATCH_JOINT_SYSTEM = """你是一位"地理语义批量抽取专家"，擅长一次处理多条文本，同时提取地理实体和三元组关系。
@@ -1700,7 +1904,8 @@ BATCH_JOINT_SYSTEM = """你是一位"地理语义批量抽取专家"，擅长一
 3. **一致性保证**：对相同实体的类型判断保持一致
 """
 
-BATCH_JOINT_USER = """## 任务描述
+BATCH_JOINT_USER = (
+    """## 任务描述
 请同时处理以下多条语料（共 {batch_size} 条），为每条语料提取：
 1. 地理实体和语义实体（6种类型，v3.4扩展版）
 2. 实体间的语义关系三元组
@@ -1724,31 +1929,47 @@ BATCH_JOINT_USER = """## 任务描述
 | 功能 | 场所可进行的用途类型 | 餐饮、购物、休闲、交通 |
 | 事件 | 发生的具体事件 | 樱花节、封路、开业、停业 |
 
-""" + ENTITY_DISTINCTION_RULES + """
+### 功能实体属性（type=功能时的category取值）
+| 功能类别 | 说明 |
+|---------|------|
+| 餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他 | 10大类功能 |
+
+### 事件实体属性（type=事件时的event_attrs）
+| 属性 | 枚举值 |
+|------|--------|
+| 事件类别 | **自然事件/人文事件/商业活动/社会事件/业态变更/停业/关闭/其他（7个，必填）** |
+| 事件状态 | 正在进行/已结束/计划中/周期性 |
+| 发生时间 | 每年3月、樱花季、2024年等 |
+| 详细描述 | 自由文本 |
+| 情感倾向 | 正面/中性/负面 |
+
+"""
+    + ENTITY_DISTINCTION_RULES
+    + """
 
 ---
 
 ## 关系类型（v3.2精简版：8种）
 
 ### 空间基础关系（3个）—— 图谱骨架
-- **位于**：A坐落于B处（如：武汉大学 位于 珞喻路）
-- **包含**：A空间包含B（如：街道口 包含 群光广场）
-- **相对方位**：A和B空间邻近+相对方位关系（属性：距离值/方向值，v3.4删除联动推荐）
+- **位于**：A坐落于B处（Head=地理实体，Tail=道路/街区，如：武汉大学 位于 珞喻路）
+- **包含**：A空间包含B（Head=街区，Tail=POI/建筑物，如：街道口 包含 群光广场）
+- **相对方位**：A和B空间邻近+相对方位关系（Head/Tail均为地理实体，属性：距离值/方向值，v3.4删除联动推荐）
 
-**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系。
+**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系。**地理实体** = 道路/POI/建筑物/街区。
 
 ### 社交语义关系（1个）—— 图谱血肉
-- **具有功能**：场所可进行的功能用途（属性：时段/适合人群/限制/情感倾向）
+- **具有功能**：场所可进行的功能用途（Head=场所，Tail=功能节点/功能实体，属性：时段/适合人群/限制/情感倾向）
 
 **注**：原"承载活动"改为"具有功能"；"推荐指数"和"引发情感"已改为实体属性。
 
 ### 对比评价关系（3个）—— 特色
-- **优于**：A在某方面好于B（属性：维度列表）
-- **相似**：A和B在某方面相似
-- **劣于**：A在某方面不如B
+- **优于**：A在某方面好于B（Head/Tail均为地理实体，属性：维度列表）
+- **相似**：A和B在某方面相似（Head/Tail均为地理实体）
+- **劣于**：A在某方面不如B（Head/Tail均为地理实体）
 
 ### 事件关系（1个）
-- **发生事件**：场所发生的特定事件（属性全部在事件节点上）
+- **发生事件**：场所发生的特定事件（Head=场所，Tail=事件节点/事件实体，属性全部在事件节点上）
 
 ---
 
@@ -1770,17 +1991,32 @@ BATCH_JOINT_USER = """## 任务描述
 ## 输出要求
 
 请输出：
-1. `results`: 每条语料的抽取结果（实体、三元组、置信度）
-2. `cross_corpus_aliases`: 跨语料发现的别名映射
+1. `results`: 每条语料的抽取结果
+   - `entities`: 实体类型字典（快速统计）
+   - `full_entities`: **完整实体列表（必须）**，每个实体包含：
+     - name: 实体名称
+     - type: 实体类型
+     - category: 细分类别（地理实体如"大学"，功能实体如"购物"，事件实体如"自然事件"）
+     - function_attrs: 功能实体属性（仅type=功能时）
+     - event_attrs: 事件实体属性（仅type=事件时）
+     - evidence: 原文依据
+   - `triples`: 三元组列表
+   - `confidence`: 置信度
+2. `cross_corpus_aliases`: 虪语料发现的别名映射
 3. `overall_confidence`: 整体置信度评估
+
+**重要**：full_entities必须包含每个实体的完整属性，特别是功能实体和事件实体的类别属性！
 
 输出JSON格式。
 """
+)
 
-BATCH_JOINT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", BATCH_JOINT_SYSTEM),
-    ("human", BATCH_JOINT_USER),
-])
+BATCH_JOINT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_JOINT_SYSTEM),
+        ("human", BATCH_JOINT_USER),
+    ]
+)
 
 
 # ===== 批量校验提示词 =====
@@ -1837,13 +2073,16 @@ BATCH_SELF_CHECK_USER = """## 校验任务
 输出JSON格式。
 """
 
-BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", BATCH_SELF_CHECK_SYSTEM),
-    ("human", BATCH_SELF_CHECK_USER),
-])
+BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_SELF_CHECK_SYSTEM),
+        ("human", BATCH_SELF_CHECK_USER),
+    ]
+)
 
 
 # ===== 批量处理辅助函数 =====
+
 
 def format_batch_corpus(corpus_list: List[Dict]) -> str:
     """格式化批量语料输入"""
@@ -1869,9 +2108,16 @@ def format_batch_results_for_check(batch_results: List[Dict]) -> str:
         confidence = r.get("confidence", "medium")
 
         entity_str = ", ".join([f"{k}: {v}" for k, v in entities.items() if v])
-        triple_str = ", ".join([f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>" for t in triples[:3]])
+        triple_str = ", ".join(
+            [
+                f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
+                for t in triples[:3]
+            ]
+        )
 
-        lines.append(f"- [{corpus_id}] 置信度:{confidence}\n  实体: {entity_str}\n  三元组: {triple_str}")
+        lines.append(
+            f"- [{corpus_id}] 置信度:{confidence}\n  实体: {entity_str}\n  三元组: {triple_str}"
+        )
     return "\n".join(lines)
 
 
@@ -1937,10 +2183,12 @@ QA_MENTOR_USER = """## 深度语义分析任务
 
 请输出导师脚手架结果（JSON格式）。"""
 
-QA_MENTOR_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", QA_MENTOR_SYSTEM),
-    ("human", QA_MENTOR_USER),
-])
+QA_MENTOR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", QA_MENTOR_SYSTEM),
+        ("human", QA_MENTOR_USER),
+    ]
+)
 
 
 QA_APPROVAL_SYSTEM = """你是一位"知识抽取审批导师"，负责审批后续节点的抽取结果。
@@ -2015,10 +2263,12 @@ QA_APPROVAL_USER = """## 审批任务
 
 请输出审批结果（JSON格式）。"""
 
-QA_APPROVAL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", QA_APPROVAL_SYSTEM),
-    ("human", QA_APPROVAL_USER),
-])
+QA_APPROVAL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", QA_APPROVAL_SYSTEM),
+        ("human", QA_APPROVAL_USER),
+    ]
+)
 
 
 REVISION_JOINT_SYSTEM = """你是一位"地理语义联合抽取专家"，正在根据导师反馈改进抽取结果。
@@ -2066,13 +2316,16 @@ REVISION_JOINT_USER = """## 修改任务
 
 请输出改进后的联合抽取结果（JSON格式）。"""
 
-REVISION_JOINT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", REVISION_JOINT_SYSTEM),
-    ("human", REVISION_JOINT_USER),
-])
+REVISION_JOINT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", REVISION_JOINT_SYSTEM),
+        ("human", REVISION_JOINT_USER),
+    ]
+)
 
 
 # ===== P10新增：QA导师模式格式化函数 =====
+
 
 def format_mentor_guidance(guidance: Dict) -> str:
     """格式化导师指导"""
@@ -2125,7 +2378,12 @@ def format_joint_for_approval(joint_result: Dict) -> str:
         tail = t.get("tail", "")
         triple_lines.append(f"<{head}, {relation}, {tail}>")
 
-    return f"实体:\n  " + "\n  ".join(entity_lines) + f"\n三元组:\n  " + "\n  ".join(triple_lines)
+    return (
+        f"实体:\n  "
+        + "\n  ".join(entity_lines)
+        + f"\n三元组:\n  "
+        + "\n  ".join(triple_lines)
+    )
 
 
 def format_eval_for_approval(eval_result: Dict) -> str:
@@ -2220,13 +2478,16 @@ MENTOR_QUERY_USER = """## 学生查询
 
 请输出导师响应（JSON格式）。"""
 
-MENTOR_QUERY_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", MENTOR_QUERY_SYSTEM),
-    ("human", MENTOR_QUERY_USER),
-])
+MENTOR_QUERY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", MENTOR_QUERY_SYSTEM),
+        ("human", MENTOR_QUERY_USER),
+    ]
+)
 
 
 # ===== P14新增：困惑检测辅助函数 =====
+
 
 def format_query_for_mentor(query: Dict) -> str:
     """格式化查询内容用于导师提示词"""
@@ -2324,7 +2585,9 @@ def detect_eval_confusion(eval_result: Dict, state: Dict) -> Optional[Dict]:
         }
 
     # 2. 评估置信度过低
-    if eval_result.get("eval_passed") is False and not eval_result.get("corrected_triples"):
+    if eval_result.get("eval_passed") is False and not eval_result.get(
+        "corrected_triples"
+    ):
         return {
             "query_type": "overall_uncertainty",
             "query_content": "评估未通过且无修正三元组，可能需要重新抽取",
@@ -2515,10 +2778,12 @@ ENTITY_ALIGNMENT_USER = """## 对齐任务
 - llm_decision: 判断说明（简短说明原因）
 """
 
-ENTITY_ALIGNMENT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", ENTITY_ALIGNMENT_SYSTEM),
-    ("human", ENTITY_ALIGNMENT_USER),
-])
+ENTITY_ALIGNMENT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", ENTITY_ALIGNMENT_SYSTEM),
+        ("human", ENTITY_ALIGNMENT_USER),
+    ]
+)
 
 
 def format_alignment_candidates(candidates: List[Dict]) -> str:
@@ -2534,12 +2799,18 @@ def format_alignment_candidates(candidates: List[Dict]) -> str:
         lon = c.get("longitude")
         lat = c.get("latitude")
         source = c.get("source", "unknown")
-        
+
         # 来源标识：geo为"已有实体"，amap为"高德POI"
-        source_label = "已有实体" if source == "geo_entity_names" else "高德POI" if source == "amap_poi_wgs84" else source
-        
+        source_label = (
+            "已有实体"
+            if source == "geo_entity_names"
+            else "高德POI"
+            if source == "amap_poi_wgs84"
+            else source
+        )
+
         loc_str = f"({lon:.4f}, {lat:.4f})" if lon and lat else "无坐标"
-        
+
         # 如果是高德POI，显示原始ID和地址
         extra_info = ""
         if source == "amap_poi_wgs84":
@@ -2547,8 +2818,10 @@ def format_alignment_candidates(candidates: List[Dict]) -> str:
             address = c.get("address", "")
             if address:
                 extra_info = f" 地址:{address[:30]}"
-        
-        lines.append(f"候选{i+1}: {name} [{type_}] - 相似度:{sim:.3f} - 位置:{loc_str} - 来源:{source_label}{extra_info}")
+
+        lines.append(
+            f"候选{i + 1}: {name} [{type_}] - 相似度:{sim:.3f} - 位置:{loc_str} - 来源:{source_label}{extra_info}"
+        )
 
     return "\n".join(lines)
 
@@ -2596,30 +2869,30 @@ ENTITY_SCHEMA_CORE = """## 实体类型定义（v3.4扩展版：6种）
 RELATION_SCHEMA_CORE = """## 关系类型定义（v3.4精简版：8种）
 
 ### 空间骨架关系（优先级高）
-| 关系 | 语义定义 | Tail类型 | 核心属性 |
-|------|----------|----------|----------|
-| 位于 | A坐落于B处（空间定位） | 道路/街区/行政区 | 无 |
-| 包含 | A空间包含B（位于的反向） | POI/建筑物/道路 | 无 |
-| 相对方位 | A和B空间邻近+方位关系 | 地理实体 | 距离值/方向值（v3.4删除联动推荐） |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 核心属性 |
+|------|----------|----------|----------|----------|
+| 位于 | A坐落于B处（空间定位） | 地理实体（道路/POI/建筑物/街区） | 道路/街区 | 无 |
+| 包含 | A空间包含B（位于的反向） | 街区 | POI/建筑物/道路 | 无 |
+| 相对方位 | A和B空间邻近+方位关系 | 地理实体 | 地理实体 | 距离值/方向值（v3.4删除联动推荐） |
 
 ### 语义血肉关系
-| 关系 | 语义定义 | Tail类型 | 核心属性 |
-|------|----------|----------|----------|
-| 具有功能 | 场所可进行的用途 | 功能节点(9类)或功能实体 | 时段/适合人群(开放文本)/具有限制(开放文本列表) |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 核心属性 |
+|------|----------|----------|----------|----------|
+| 具有功能 | 场所可进行的用途 | 地理实体（场所） | 功能节点(9类)或功能实体 | 时段/适合人群(开放文本)/具有限制(开放文本列表) |
 
 ### 对比评价关系
-| 关系 | 语义定义 | Tail类型 | 核心属性 |
-|------|----------|----------|----------|
-| 优于 | A在某方面好于B | 地理实体 | 维度列表 |
-| 相似 | A和B在某方面相似 | 地理实体 | 维度列表 |
-| 劣于 | A在某方面不如B | 地理实体 | 维度列表 |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 核心属性 |
+|------|----------|----------|----------|----------|
+| 优于 | A在某方面好于B | 地理实体 | 地理实体 | 维度列表 |
+| 相似 | A和B在某方面相似 | 地理实体 | 地理实体 | 维度列表 |
+| 劣于 | A在某方面不如B | 地理实体 | 地理实体 | 维度列表 |
 
 ### 事件关系
-| 关系 | 语义定义 | Tail类型 | 核心属性 |
-|------|----------|----------|----------|
-| 发生事件 | 场所发生的特定事件 | 事件节点或事件实体 | (属性在事件实体上) |
+| 关系 | 语义定义 | Head类型 | Tail类型 | 核心属性 |
+|------|----------|----------|----------|----------|
+| 发生事件 | 场所发生的特定事件 | 地理实体（场所） | 事件节点或事件实体 | (属性在事件实体上) |
 
-**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"。v3.4删除联动推荐属性。"""
+**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"。**地理实体** = 道路/POI/建筑物/街区。v3.4删除联动推荐属性。"""
 
 # 实体属性定义
 ENTITY_ATTRIBUTE_SCHEMA = """## 实体属性定义（从文本提取，必须有原文依据）
@@ -2751,13 +3024,14 @@ EXPERT_ROLE_TEMPLATE = """你是一位专注于武汉城市地理知识图谱构
 
 # ===== 辅助函数：模块化提示词组装 =====
 
+
 def assemble_joint_extraction_prompt(
     raw_text: str,
     entity_hints: str = "(无实体提示)",
     relation_hints: str = "(无关系提示)",
     context_dependencies: str = "(无上下文依赖)",
     mentor_guidance: str = "(无导师指导)",
-    include_negative_examples: bool = True
+    include_negative_examples: bool = True,
 ) -> str:
     """
     模块化组装联合抽取提示词
@@ -2901,28 +3175,31 @@ _JOINT_PROMPT_SUFFIX = """---
 请输出联合抽取结果（JSON格式）。"""
 
 # 使用字符串拼接组装最终提示词
-JOINT_NER_RE_USER_V2 = "\n\n".join([
-    _JOINT_PROMPT_PREFIX,
-    ENTITY_SCHEMA_CORE,
-    "---",
-    RELATION_SCHEMA_CORE,
-    "---",
-    ENTITY_ATTRIBUTE_SCHEMA,
-    "---",
-    VALIDATION_COT,
-    "---",
-    _JOINT_EXAMPLES,
-    "---",
-    NEGATIVE_EXAMPLES,
-    _JOINT_PROMPT_SUFFIX
-])
+JOINT_NER_RE_USER_V2 = "\n\n".join(
+    [
+        _JOINT_PROMPT_PREFIX,
+        ENTITY_SCHEMA_CORE,
+        "---",
+        RELATION_SCHEMA_CORE,
+        "---",
+        ENTITY_ATTRIBUTE_SCHEMA,
+        "---",
+        VALIDATION_COT,
+        "---",
+        _JOINT_EXAMPLES,
+        "---",
+        NEGATIVE_EXAMPLES,
+        _JOINT_PROMPT_SUFFIX,
+    ]
+)
 
 
-
-JOINT_NER_RE_PROMPT_V2 = ChatPromptTemplate.from_messages([
-    ("system", JOINT_NER_RE_SYSTEM_V2),
-    ("human", JOINT_NER_RE_USER_V2),
-])
+JOINT_NER_RE_PROMPT_V2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", JOINT_NER_RE_SYSTEM_V2),
+        ("human", JOINT_NER_RE_USER_V2),
+    ]
+)
 
 
 # ===== P12新增：增强版Self-Check反思机制 =====
@@ -3008,13 +3285,16 @@ SELF_CHECK_JOINT_USER_V2 = """## 校验任务
 3. improvement_strategy: 可执行的改进动作列表
 4. confidence: 整体置信度"""
 
-SELF_CHECK_JOINT_PROMPT_V2 = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_JOINT_SYSTEM_V2),
-    ("human", SELF_CHECK_JOINT_USER_V2),
-])
+SELF_CHECK_JOINT_PROMPT_V2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_JOINT_SYSTEM_V2),
+        ("human", SELF_CHECK_JOINT_USER_V2),
+    ]
+)
 
 
 # ===== Self-Check反思结果格式化函数（增强版） =====
+
 
 def format_dimension_scores(scores: Dict) -> str:
     """格式化四维度评分"""
@@ -3042,7 +3322,7 @@ def format_improvement_strategy(strategy: Dict) -> str:
             name = e.get("name", "")
             type_ = e.get("type", "")
             evidence = e.get("evidence", "")
-            lines.append(f"- 补充: {name} [{type_}] 原文依据: \"{evidence}\"")
+            lines.append(f'- 补充: {name} [{type_}] 原文依据: "{evidence}"')
 
     # 幻觉删除
     rejected = strategy.get("rejected_triples", [])
@@ -3101,16 +3381,19 @@ ENTITY_SCHEMA_TABLE = """## 实体类型（v3.4扩展版：6种）
 
 RELATION_SCHEMA_TABLE = """## 关系类型（v3.4精简版：8个，删除联动推荐）
 
-| 类别 | 关系 | Tail类型 | 核心属性 |
-|------|------|----------|----------|
-| 空间骨架 | 位于 | 道路/街区/行政区 | 无 |
-| 空间骨架 | 包含 | POI/建筑物/道路 | 无 |
-| 空间骨架 | 相对方位 | 地理实体 | 距离值/方向值（v3.4删除联动推荐） |
-| 语义血肉 | 具有功能 | 功能节点(9类)或功能实体 | 时段/适合人群(开放文本)/限制(开放文本列表) |
-| 对比评价 | 优于 | 地理实体 | 维度列表 |
-| 对比评价 | 相似 | 地理实体 | 维度列表 |
-| 对比评价 | 劣于 | 地理实体 | 维度列表 |
-| 事件 | 发生事件 | 事件节点或事件实体 | (属性在事件实体上)"""
+| 类别 | 关系 | Head类型 | Tail类型 | 核心属性 |
+|------|------|----------|----------|----------|
+| 空间骨架 | 位于 | 地理实体（道路/POI/建筑物/街区） | 道路/街区 | 无 |
+| 空间骨架 | 包含 | 街区 | POI/建筑物/道路 | 无 |
+| 空间骨架 | 相对方位 | 地理实体 | 地理实体 | 距离值/方向值（v3.4删除联动推荐） |
+| 语义血肉 | 具有功能 | 地理实体（场所） | 功能节点(9类)或功能实体 | 时段/适合人群(开放文本)/限制(开放文本列表) |
+| 对比评价 | 优于 | 地理实体 | 地理实体 | 维度列表 |
+| 对比评价 | 相似 | 地理实体 | 地理实体 | 维度列表 |
+| 对比评价 | 劣于 | 地理实体 | 地理实体 | 维度列表 |
+| 事件 | 发生事件 | 地理实体（场所） | 事件节点或事件实体 | (属性在事件实体上) |
+
+⚠️ **地理实体** = 道路/POI/建筑物/街区（4种空间实体）
+⚠️ **功能实体/事件实体不能参与空间关系**（位于/包含/相对方位）"""
 
 FUNCTION_SCHEMA_TABLE = """## 功能节点（v3.4：10大类，新增交通）
 
@@ -3148,17 +3431,25 @@ ATTRIBUTE_SCHEMA_TABLE = """## 属性约束（v3.4版，必须有原文依据）
 CONSTRAINT_RULES = """## 必须遵守（Do）
 
 ✅ 每个三元组必须有 evidence 字段（原文依据）
-✅ 实体类型必须为 4 大类之一（道路/POI/建筑物/街区）
+✅ 实体类型必须为 6 类之一（道路/POI/建筑物/街区/功能/事件）
 ✅ 关系类型必须为 8 种之一（见上表）
 ✅ 属性值必须来自指定枚举列表
 ✅ 使用"其他"时，必须在描述字段说明具体内容
+✅ 关系实体类型约束：
+   - 位于：Head=地理实体（道路/POI/建筑物/街区），Tail=道路/街区
+   - 包含：Head=街区，Tail=POI/建筑物/道路
+   - 相对方位：Head=地理实体，Tail=地理实体
+   - 具有功能：Head=地理实体（场所），Tail=功能节点或功能实体
+   - 优于/相似/劣于：Head=地理实体，Tail=地理实体
+   - 发生事件：Head=地理实体（场所），Tail=事件节点或事件实体
 
 ## 禁止行为（Don't）
 
 ❌ 生成无原文依据的三元组（幻觉）
 ❌ 使用泛化词作为实体（这里/那边/附近）
 ❌ 猜测未出现的属性值
-❌ 将推荐指数/情感倾向作为关系而非实体属性"""
+❌ 将推荐指数/情感倾向作为关系而非实体属性
+❌ 功能实体或事件实体作为空间关系的头/尾实体（位于/包含/相对方位）"""
 
 
 # ===== 3. 反向验证CoT（RCoT框架） =====
@@ -3209,7 +3500,8 @@ JOINT_NER_RE_SYSTEM_V3 = """你是一位武汉地理知识图谱构建专家。
 边界职责：仅抽取地理实体，排除人名/时间/非地理名词。
 审慎原则：信息模糊时标记confidence=low，宁可遗漏不产生幻觉。"""
 
-JOINT_NER_RE_USER_V3 = """## Role（角色）
+JOINT_NER_RE_USER_V3 = (
+    """## Role（角色）
 你是一位武汉地理知识图谱语义抽取专家。
 
 ---
@@ -3219,19 +3511,27 @@ JOINT_NER_RE_USER_V3 = """## Role（角色）
 
 ---
 
-""" + ENTITY_SCHEMA_TABLE + """
+"""
+    + ENTITY_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + RELATION_SCHEMA_TABLE + """
+"""
+    + RELATION_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + FUNCTION_SCHEMA_TABLE + """
+"""
+    + FUNCTION_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + CONSTRAINT_RULES + """
+"""
+    + CONSTRAINT_RULES
+    + """
 
 ---
 
@@ -3243,7 +3543,9 @@ JOINT_NER_RE_USER_V3 = """## Role（角色）
 3. 分析实体对语义关系，抽取三元组
 4. 为每个抽取标注 evidence（原文依据）
 
-""" + RCOT_VALIDATION + """
+"""
+    + RCOT_VALIDATION
+    + """
 
 ---
 
@@ -3272,11 +3574,14 @@ JOINT_NER_RE_USER_V3 = """## Role（角色）
 ---
 
 请输出联合抽取结果（JSON格式）。"""
+)
 
-JOINT_NER_RE_PROMPT_V3 = ChatPromptTemplate.from_messages([
-    ("system", JOINT_NER_RE_SYSTEM_V3),
-    ("human", JOINT_NER_RE_USER_V3),
-])
+JOINT_NER_RE_PROMPT_V3 = ChatPromptTemplate.from_messages(
+    [
+        ("system", JOINT_NER_RE_SYSTEM_V3),
+        ("human", JOINT_NER_RE_USER_V3),
+    ]
+)
 
 
 # ===== 6. 优化版Filter提示词（APE框架） =====
@@ -3315,10 +3620,12 @@ FILTER_USER_V2 = """## Action（任务）
 
 请输出筛选结果（JSON格式）。"""
 
-FILTER_PROMPT_V2 = ChatPromptTemplate.from_messages([
-    ("system", FILTER_SYSTEM_V2),
-    ("human", FILTER_USER_V2),
-])
+FILTER_PROMPT_V2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", FILTER_SYSTEM_V2),
+        ("human", FILTER_USER_V2),
+    ]
+)
 
 
 # ===== 7. 优化版RE提示词（表格化Schema） =====
@@ -3326,30 +3633,41 @@ FILTER_PROMPT_V2 = ChatPromptTemplate.from_messages([
 RE_SYSTEM_V2 = """你是地理语义专家，擅长从文本中提取实体关系。
 核心原则：所有关系必须有原文依据（evidence），禁止幻觉。"""
 
-RE_USER_V2 = """## 任务
+RE_USER_V2 = (
+    """## 任务
 从文本中抽取实体间的语义关系三元组。
 
 ---
 
-""" + ENTITY_SCHEMA_TABLE + """
+"""
+    + ENTITY_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + RELATION_SCHEMA_TABLE + """
+"""
+    + RELATION_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + ATTRIBUTE_SCHEMA_TABLE + """
+"""
+    + ATTRIBUTE_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + CONSTRAINT_RULES + """
+"""
+    + CONSTRAINT_RULES
+    + """
 
 ---
 
 ## Steps（思维链）
 
-""" + RCOT_VALIDATION + """
+"""
+    + RCOT_VALIDATION
+    + """
 
 ---
 
@@ -3370,11 +3688,14 @@ RE_USER_V2 = """## 任务
 ---
 
 请输出关系抽取结果（JSON格式）。"""
+)
 
-RE_PROMPT_V2 = ChatPromptTemplate.from_messages([
-    ("system", RE_SYSTEM_V2),
-    ("human", RE_USER_V2),
-])
+RE_PROMPT_V2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", RE_SYSTEM_V2),
+        ("human", RE_USER_V2),
+    ]
+)
 
 
 # ===== 8. 优化版Self-Check提示词（Pre-Mortem + 四维度评分） =====
@@ -3382,9 +3703,12 @@ RE_PROMPT_V2 = ChatPromptTemplate.from_messages([
 SELF_CHECK_JOINT_SYSTEM_V3 = """你是联合抽取校验专家。
 任务：四维度量化评估 + Pre-Mortem失败预防 + 结构化反思。"""
 
-SELF_CHECK_JOINT_USER_V3 = """## Pre-Mortem（假设失败分析）
+SELF_CHECK_JOINT_USER_V3 = (
+    """## Pre-Mortem（假设失败分析）
 
-""" + PRE_MORTEM_CHECK + """
+"""
+    + PRE_MORTEM_CHECK
+    + """
 
 ---
 
@@ -3401,7 +3725,9 @@ SELF_CHECK_JOINT_USER_V3 = """## Pre-Mortem（假设失败分析）
 
 ## RCoT反向验证
 
-""" + RCOT_VALIDATION + """
+"""
+    + RCOT_VALIDATION
+    + """
 
 ---
 
@@ -3433,11 +3759,14 @@ SELF_CHECK_JOINT_USER_V3 = """## Pre-Mortem（假设失败分析）
 2. reflection_text: 结构化反思
 3. improvement_actions: 可执行的改进动作列表
 4. confidence: 整体置信度"""
+)
 
-SELF_CHECK_JOINT_PROMPT_V3 = ChatPromptTemplate.from_messages([
-    ("system", SELF_CHECK_JOINT_SYSTEM_V3),
-    ("human", SELF_CHECK_JOINT_USER_V3),
-])
+SELF_CHECK_JOINT_PROMPT_V3 = ChatPromptTemplate.from_messages(
+    [
+        ("system", SELF_CHECK_JOINT_SYSTEM_V3),
+        ("human", SELF_CHECK_JOINT_USER_V3),
+    ]
+)
 
 
 # ===== 9. 优化版Label提示词 =====
@@ -3445,12 +3774,15 @@ SELF_CHECK_JOINT_PROMPT_V3 = ChatPromptTemplate.from_messages([
 LABEL_SYSTEM_V2 = """你是地理知识标注专家。
 任务：为实体和关系打上属性标签，必须有原文依据。"""
 
-LABEL_USER_V2 = """## 任务
+LABEL_USER_V2 = (
+    """## 任务
 为实体和关系标注属性（v3.3：特征标签开放文本）。
 
 ---
 
-""" + ENTITY_SCHEMA_TABLE + """
+"""
+    + ENTITY_SCHEMA_TABLE
+    + """
 
 ---
 
@@ -3466,11 +3798,15 @@ LABEL_USER_V2 = """## 任务
 
 ---
 
-""" + ATTRIBUTE_SCHEMA_TABLE + """
+"""
+    + ATTRIBUTE_SCHEMA_TABLE
+    + """
 
 ---
 
-""" + CONSTRAINT_RULES + """
+"""
+    + CONSTRAINT_RULES
+    + """
 
 ---
 
@@ -3495,11 +3831,14 @@ LABEL_USER_V2 = """## 任务
 ---
 
 请输出属性标注结果（JSON格式）。"""
+)
 
-LABEL_PROMPT_V2 = ChatPromptTemplate.from_messages([
-    ("system", LABEL_SYSTEM_V2),
-    ("human", LABEL_USER_V2),
-])
+LABEL_PROMPT_V2 = ChatPromptTemplate.from_messages(
+    [
+        ("system", LABEL_SYSTEM_V2),
+        ("human", LABEL_USER_V2),
+    ]
+)
 
 
 # ===== 10. Token对比统计（供参考） =====
@@ -3524,6 +3863,7 @@ TOKEN_ESTIMATE_V2_V3 = """
 
 
 # ===== 11. 辅助函数：动态组装优化版提示词 =====
+
 
 def assemble_optimized_joint_prompt(
     raw_text: str,
@@ -3576,11 +3916,11 @@ def assemble_optimized_joint_prompt(
         "",
         "## End Goal（输出格式）",
         "",
-        '{',
+        "{",
         '  "entities": [{"name": "...", "type": "...", "evidence": "..."}],',
         '  "triples": [{"head": "...", "relation": "...", "tail": "...", "evidence": "...", "confidence": "high/medium/low"}],',
         '  "overall_confidence": "high/medium/low"',
-        '}',
+        "}",
         "",
         "---",
         "",
