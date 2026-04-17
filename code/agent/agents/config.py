@@ -147,6 +147,22 @@ class ExtractionConfig:
     enable_qa_reasoning_trace: bool = True
     """是否保存QA的推理过程（Reasoner模型输出）"""
 
+    # ===== 导师困惑触发阈值配置（降token优化） =====
+    mentor_query_min_confidence: str = "low"
+    """触发导师查询的最低困惑级别: low / medium。默认 low（更省token）"""
+
+    mentor_extraction_low_item_threshold: int = 2
+    """联合抽取中低置信实体/关系数量阈值（达到才触发困惑）"""
+
+    mentor_eval_reject_ratio_threshold: float = 0.8
+    """Eval困惑触发阈值：拒绝比例超过该值才触发（默认0.8，较保守）"""
+
+    mentor_label_missing_ratio_threshold: float = 0.8
+    """Label困惑触发阈值：缺属性实体比例超过该值才触发（默认0.8，较保守）"""
+
+    mentor_label_min_missing_attrs: int = 3
+    """Label困惑触发阈值：至少缺失多少实体属性才触发"""
+
     # ===== 实体对齐配置（P11新增） =====
     enable_entity_alignment: bool = False
     """是否启用实体对齐节点，将抽取实体与数据库已有实体匹配"""
@@ -264,6 +280,11 @@ class ExtractionConfig:
             qa_llm_temperature=get_float("QA_LLM_TEMPERATURE", 0.7),
             worker_llm_temperature=get_float("WORKER_LLM_TEMPERATURE", 0.0),
             enable_qa_reasoning_trace=get_bool("ENABLE_QA_REASONING_TRACE", True),
+            mentor_query_min_confidence=os.getenv("MENTOR_QUERY_MIN_CONFIDENCE", "low"),
+            mentor_extraction_low_item_threshold=get_int("MENTOR_EXTRACTION_LOW_ITEM_THRESHOLD", 2),
+            mentor_eval_reject_ratio_threshold=get_float("MENTOR_EVAL_REJECT_RATIO_THRESHOLD", 0.8),
+            mentor_label_missing_ratio_threshold=get_float("MENTOR_LABEL_MISSING_RATIO_THRESHOLD", 0.8),
+            mentor_label_min_missing_attrs=get_int("MENTOR_LABEL_MIN_MISSING_ATTRS", 3),
             # P11新增：实体对齐参数
             enable_entity_alignment=get_bool("ENABLE_ENTITY_ALIGNMENT", False),
             alignment_similarity_threshold=get_float("ALIGNMENT_SIMILARITY_THRESHOLD", 0.75),
@@ -319,6 +340,11 @@ class ExtractionConfig:
             qa_llm_temperature=config_dict.get("qa_llm_temperature", 0.7),
             worker_llm_temperature=config_dict.get("worker_llm_temperature", 0.0),
             enable_qa_reasoning_trace=config_dict.get("enable_qa_reasoning_trace", True),
+            mentor_query_min_confidence=config_dict.get("mentor_query_min_confidence", "low"),
+            mentor_extraction_low_item_threshold=config_dict.get("mentor_extraction_low_item_threshold", 2),
+            mentor_eval_reject_ratio_threshold=config_dict.get("mentor_eval_reject_ratio_threshold", 0.8),
+            mentor_label_missing_ratio_threshold=config_dict.get("mentor_label_missing_ratio_threshold", 0.8),
+            mentor_label_min_missing_attrs=config_dict.get("mentor_label_min_missing_attrs", 3),
             # P11新增：实体对齐参数
             enable_entity_alignment=config_dict.get("enable_entity_alignment", False),
             alignment_similarity_threshold=config_dict.get("alignment_similarity_threshold", 0.75),
@@ -373,6 +399,11 @@ class ExtractionConfig:
             "qa_llm_temperature": self.qa_llm_temperature,
             "worker_llm_temperature": self.worker_llm_temperature,
             "enable_qa_reasoning_trace": self.enable_qa_reasoning_trace,
+            "mentor_query_min_confidence": self.mentor_query_min_confidence,
+            "mentor_extraction_low_item_threshold": self.mentor_extraction_low_item_threshold,
+            "mentor_eval_reject_ratio_threshold": self.mentor_eval_reject_ratio_threshold,
+            "mentor_label_missing_ratio_threshold": self.mentor_label_missing_ratio_threshold,
+            "mentor_label_min_missing_attrs": self.mentor_label_min_missing_attrs,
             # P11新增：实体对齐参数
             "enable_entity_alignment": self.enable_entity_alignment,
             "alignment_similarity_threshold": self.alignment_similarity_threshold,

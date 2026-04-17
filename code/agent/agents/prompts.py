@@ -974,42 +974,74 @@ def format_triples(triples: list) -> str:
     """格式化三元组列表用于提示词（v2.2改进：支持attributes）"""
     if not triples:
         return "(无三元组)"
+
+    def _relation_to_text(relation) -> str:
+        if relation is None:
+            return ""
+        if hasattr(relation, "value"):
+            return str(relation.value)
+        return str(relation)
+
     lines = []
     for t in triples:
+        if not isinstance(t, dict):
+            continue
+        head = str(t.get("head", "")).strip()
+        relation = _relation_to_text(t.get("relation")).strip()
+        tail = str(t.get("tail", "")).strip()
+        if not head or not relation or not tail:
+            continue
+
         # 基础三元组字符串
-        base_str = f"<{t['head']}, {t['relation']}, {t['tail']}>"
+        base_str = f"<{head}, {relation}, {tail}>"
 
         # 如果有属性，添加属性描述
         attrs = t.get("attributes", {})
-        if attrs:
+        if isinstance(attrs, dict) and attrs:
             attr_strs = []
             for key, value in attrs.items():
                 if isinstance(value, list):
-                    attr_strs.append(f"{key}=[{','.join(value)}]")
+                    attr_strs.append(f"{key}=[{','.join(str(v) for v in value)}]")
                 else:
                     attr_strs.append(f"{key}={value}")
             lines.append(f"- {base_str} [{', '.join(attr_strs)}]")
         else:
             lines.append(f"- {base_str}")
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "(无三元组)"
 
 
 def format_triples_with_evidence(triples: list) -> str:
     """格式化三元组列表（含证据）用于提示词"""
     if not triples:
         return "(无三元组)"
+
+    def _relation_to_text(relation) -> str:
+        if relation is None:
+            return ""
+        if hasattr(relation, "value"):
+            return str(relation.value)
+        return str(relation)
+
     lines = []
     for t in triples:
-        base_str = f"<{t['head']}, {t['relation']}, {t['tail']}>"
-        evidence = t.get("evidence", "")
+        if not isinstance(t, dict):
+            continue
+        head = str(t.get("head", "")).strip()
+        relation = _relation_to_text(t.get("relation")).strip()
+        tail = str(t.get("tail", "")).strip()
+        if not head or not relation or not tail:
+            continue
+
+        base_str = f"<{head}, {relation}, {tail}>"
+        evidence = str(t.get("evidence", "")).strip()
         attrs = t.get("attributes", {})
 
         parts = [base_str]
-        if attrs:
+        if isinstance(attrs, dict) and attrs:
             attr_strs = []
             for key, value in attrs.items():
                 if isinstance(value, list):
-                    attr_strs.append(f"{key}=[{','.join(value)}]")
+                    attr_strs.append(f"{key}=[{','.join(str(v) for v in value)}]")
                 else:
                     attr_strs.append(f"{key}={value}")
             parts.append(f"[{', '.join(attr_strs)}]")
@@ -1017,7 +1049,7 @@ def format_triples_with_evidence(triples: list) -> str:
             parts.append(f'证据:"{evidence}"')
 
         lines.append(f"- {' '.join(parts)}")
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "(无三元组)"
 
 
 # ===== Self-Check: 实体校验提示词模板 =====
@@ -1760,31 +1792,34 @@ def format_normalizations_for_check(normalizations: list) -> str:
 
 # ===== P15新增：批量前置节点提示词 =====
 
-BATCH_FILTER_SYSTEM = """你是一位"批量文本筛选专家"，擅长同时判断多条文本是否包含有价值的地理信息。
-你的核心优势：
-1. **高效筛选**：一次推理完成多条语料的筛选判断
-2. **一致性标准**：对所有文本使用统一的筛选标准
-3. **武汉地区识别**：识别非武汉地区文本以跳过处理
-"""
+BATCH_FILTER_SYSTEM = """你是一位"批量地理语义筛选专家"。
+你的目标是：为后续"地理实体-语义关系抽取"阶段筛选高价值语料。
+你必须用统一标准同时判断多条文本，优先识别是否存在可落地的地理实体与关系线索。"""
 
 BATCH_FILTER_USER = """## 任务描述
-请同时判断以下多条语料（共 {batch_size} 条）是否包含有价值的武汉地理信息。
+请同时判断以下语料（共 {batch_size} 条）是否值得进入后续地理抽取。
 
 ---
 
-## 筛选标准
+## 判定原则（先关系、后细节）
 
-**包含有价值信息（is_valid=true）**：
-- 明确提及武汉地区地点（POI、道路、街区、建筑）
-- 描述地点的属性、功能、特色
-- 涉及地点间的空间关系（位于、包含、相邻）
-- 地点的用户体验、评价、推荐
+满足以下任一条件，通常判定 `is_valid=true`：
+1. 出现可识别地理实体（道路/POI/建筑物/街区）；
+2. 出现地理关系线索（位于/包含/相对方位/附近/对面/沿着等）；
+3. 出现场所功能或事件信息，且能关联到具体地点。
 
-**不包含有价值信息（is_valid=false）**：
-- 纯个人情感表达，无地点信息
-- 非武汉地区内容（明确提及北京、上海等且无武汉关联）
-- 广告/营销类内容，无实质地点描述
-- 内容过短或无语义
+判定 `is_valid=false` 的典型情况：
+1. 纯情绪或日常碎片表达，无地点语义；
+2. 只有人物/人群叙述，无地理实体（如"男生/女生/闺蜜"）；
+3. 明确是武汉以外内容，且与武汉无关联；
+4. 广告口号、乱码、极短无语义文本。
+
+---
+
+## 武汉地区判断
+
+- 若文本明确只涉及非武汉地区，设 `is_non_wuhan_region=true`，并给出 `region_hint`（如"北京"）。
+- 若出现武汉相关地点或无法确定地区，设 `is_non_wuhan_region=false`。
 
 ---
 
@@ -1794,17 +1829,20 @@ BATCH_FILTER_USER = """## 任务描述
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
-输出JSON格式，包含 results 数组（每条语料一个 FilterResult）：
-- corpus_id: 语料ID
-- is_valid: 是否有效
-- skip_reason: 无效原因（仅is_valid=false时）
-- confidence: 判断置信度 high/medium/low
-- is_non_wuhan_region: 是否非武汉地区
-- region_hint: 地区提示
+输出 `results` 数组，每条包含：
+1. `corpus_id`
+2. `is_valid`
+3. `skip_reason`（仅 `is_valid=false` 时必填，否则为 null）
+4. `confidence`（high/medium/low）
+5. `has_geo_entity`（是否出现地理实体）
+6. `has_spatial_relation`（是否出现空间关系线索）
+7. `geo_entity_hint`（简短提示，如"武汉大学, 珞喻路"；无则null）
+8. `is_non_wuhan_region`
+9. `region_hint`（武汉/非武汉城市名/未知）
 
-请输出筛选结果。"""
+并输出 `overall_confidence`。"""
 
 BATCH_FILTER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_FILTER_SYSTEM),
@@ -1812,29 +1850,26 @@ BATCH_FILTER_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
-BATCH_NORMALIZE_SYSTEM = """你是一位"批量文本归一化专家"，擅长同时处理多条文本的语义归一化。
-你的核心优势：
-1. **高效归一化**：一次推理完成多条语料的指代消解和别名标准化
-2. **一致性别名**：对相同简称使用统一的归一化结果（如所有"武大"→"武汉大学"）
-3. **语义保留**：严格保留每条文本的原始语义
-"""
+BATCH_NORMALIZE_SYSTEM = """你是一位"批量文本归一化专家"。
+你的职责是：在不改变语义的前提下，为后续地理关系抽取做标准化输入。
+你必须优先做地名简称统一、同名实体歧义消解和必要的轻量口语规范化。"""
 
 BATCH_NORMALIZE_USER = """## 任务描述
-请同时归一化以下多条语料（共 {batch_size} 条）。
+请同时归一化以下语料（共 {batch_size} 条）。
 
 ---
 
 ## 归一化规则
 
-**必须遵守**：
-1. 不添加原文不存在的信息
-2. 保留原文的核心语义和情感
-3. 仅改写/展开，不筛除内容
+必须遵守：
+1. 不能添加原文不存在的事实；
+2. 不能删除关键地理语义；
+3. 尽量保持原句风格，只做必要归一化。
 
-**归一化类型**：
-- alias: 简称→全称（如"武大"→"武汉大学"）
-- reference: 指代消解（如"这里"→具体地点）
-- activity: 口语标准化（如"打卡"→"游览参观"）
+重点动作：
+1. 别名统一：如"武大"->"武汉大学"、"华科"->"华中科技大学"；
+2. 指代消解：仅当上下文足够明确时，将"这里/那边"替换为具体地点；
+3. 轻量口语标准化：仅在不损失语义时进行。
 
 ---
 
@@ -1844,16 +1879,15 @@ BATCH_NORMALIZE_USER = """## 任务描述
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
-输出JSON格式，包含 results 数组（每条语料一个 NormalizeResult）：
-- corpus_id: 语料ID
-- normalized_text: 归一化后的文本
-- normalizations: 归一化记录列表
-- confidence: 整体置信度
-- has_changes: 是否有改动
+输出 `results` 数组，每条包含：
+1. `corpus_id`
+2. `normalized_text`
+3. `aliases`（简称->标准名映射；无则 `{{}}`）
+4. `confidence`（high/medium/low）
 
-请输出归一化结果。"""
+并输出 `overall_confidence`。"""
 
 BATCH_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_NORMALIZE_SYSTEM),
@@ -1861,26 +1895,23 @@ BATCH_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
-BATCH_QA_SCAFFOLD_SYSTEM = """你是一位"批量QA脚手架专家"，擅长同时为多条文本构建5W1H语义脚手架。
-你的核心优势：
-1. **高效脚手架构建**：一次推理完成多条语料的问答扩展
-2. **一致性实体提示**：对相同地点使用一致的实体提示
-3. **全面语义覆盖**：确保每条语料的地理语义被充分展开
-"""
+BATCH_QA_SCAFFOLD_SYSTEM = """你是一位"批量QA脚手架专家"。
+你的目标是：通过5W1H问答，把社交媒体文本中的地理实体和关系线索显式化，
+为后续实体-关系抽取提供高召回提示。"""
 
 BATCH_QA_SCAFFOLD_USER = """## 任务描述
-请同时为以下多条语料（共 {batch_size} 条）构建5W1H问答脚手架。
+请同时为以下语料（共 {batch_size} 条）构建5W1H问答脚手架。
 
 ---
 
-## 5W1H框架
+## 5W1H侧重点（地理关系导向）
 
-- **WHERE**: 地点在哪里？位置、区域、周边
-- **WHAT**: 地点是什么？类型、特色、功能
-- **WHO**: 适合谁去？人群、场景
-- **WHEN**: 什么时候去？季节、时段
-- **WHY**: 为什么去？亮点、推荐理由
-- **HOW**: 怎么去？交通、方式
+1. WHERE：地点位置、上下位、周边方位；
+2. WHAT：地点类型、场所功能、事件信息；
+3. WHO：适合人群（作为属性，不当作实体）；
+4. WHEN：时间/时段（作为属性）；
+5. WHY：推荐或评价理由；
+6. HOW：到达方式与交通线索。
 
 ---
 
@@ -1890,17 +1921,22 @@ BATCH_QA_SCAFFOLD_USER = """## 任务描述
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
-输出JSON格式，包含 results 数组（每条语料一个 QAScaffoldResult）：
-- corpus_id: 语料ID
-- qa_pairs: 5W1H问答对列表（每个包含question、answer、category）
-- semantic_summary: 语义摘要
-- entity_hints: 实体提示列表
-- relation_hints: 关系提示列表
-- confidence: 整体置信度
+输出 `results` 数组，每条包含：
+1. `corpus_id`
+2. `qa_pairs`：每个问答对必须包含
+   - `question`
+   - `answer`
+   - `dimension`（只能是 who/what/when/where/why/how）
+   - `entities_involved`（涉及实体名列表）
+   - `confidence`（high/medium/low）
+3. `entity_hints`（地理实体提示）
+4. `relation_hints`（关系提示，优先使用：位于/包含/相对方位/具有功能/发生事件/优于/相似/劣于）
+5. `context_dependencies`（别名、指代、上下文依赖）
+6. `overall_confidence`
 
-请输出QA脚手架结果。"""
+并输出 `overall_confidence`（批量级）。"""
 
 BATCH_QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_QA_SCAFFOLD_SYSTEM),
@@ -1910,23 +1946,30 @@ BATCH_QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
 
 # ===== P10新增：批量LLM调用提示词 =====
 
-BATCH_JOINT_SYSTEM = """你是一位"地理语义批量抽取专家"，擅长一次处理多条文本，同时提取地理实体和三元组关系。
-你的核心优势：
-1. **高效处理**：一次推理完成多条语料的抽取，大幅降低成本
-2. **跨语料感知**：识别不同文本中的同名实体和别名（如"武大"和"武汉大学"是同一实体）
-3. **一致性保证**：对相同实体的类型判断保持一致
-"""
+BATCH_JOINT_SYSTEM = """你是一位"地理实体与语义关系批量抽取专家"。
+你的首要目标是构建高质量"地理实体-关系"结构化结果。
+原则：关系正确性 > 实体数量 > 属性丰富度；无证据不输出。"""
 
 BATCH_JOINT_USER = (
     """## 任务描述
 请同时处理以下多条语料（共 {batch_size} 条），为每条语料提取：
-1. 地理实体和语义实体（6种类型，v3.4扩展版）
-2. 实体间的语义关系三元组
-3. 每个抽取的原文依据
+1. 地理实体与语义实体（6种）
+2. 以地理实体为核心的语义关系三元组
+3. 每个实体/关系的原文证据
 
 ---
 
-## 实体类型定义（v3.4扩展版：6种）
+## 抽取策略（必须执行）
+
+1. 先识别地理实体（道路/POI/建筑物/街区）；
+2. 再识别功能/事件实体；
+3. 优先抽取空间关系（位于/包含/相对方位）；
+4. 再补充语义关系（具有功能/发生事件/优于/相似/劣于）；
+5. 每条三元组都必须能在原文定位证据，无法定位则删除。
+
+---
+
+## 实体类型定义（6种）
 
 ### 空间实体（GIS标准）—— 4种
 | 类型 | 定义 | 示例 |
@@ -1963,36 +2006,38 @@ BATCH_JOINT_USER = (
 
 ---
 
-## 关系类型（v3.2精简版：8种）
+## 关系类型（仅允许以下8种）
 
-### 空间基础关系（3个）—— 图谱骨架
-- **位于**：A坐落于B处（Head=地理实体，Tail=道路/街区，如：武汉大学 位于 珞喻路）
-- **包含**：A空间包含B（Head=街区，Tail=POI/建筑物，如：街道口 包含 群光广场）
-- **相对方位**：A和B空间邻近+相对方位关系（Head/Tail均为地理实体，属性：距离值/方向值，v3.4删除联动推荐）
+### 空间关系（优先级最高）
+1. **位于**：Head=地理实体，Tail=道路/街区/上位区域
+2. **包含**：Head=街区/上位区域，Tail=POI/建筑物/道路
+3. **相对方位**：Head/Tail均为地理实体（可带`距离值/方向值`）
 
-**注**：原"相邻"、"距离"、"方向"已合并为"相对方位"关系。**地理实体** = 道路/POI/建筑物/街区。
+### 语义关系
+4. **具有功能**：Head=场所（地理实体），Tail=功能实体或功能节点
+5. **发生事件**：Head=场所（地理实体），Tail=事件实体或事件节点
 
-### 社交语义关系（1个）—— 图谱血肉
-- **具有功能**：场所可进行的功能用途（Head=场所，Tail=功能节点/功能实体，属性：时段/适合人群/限制/情感倾向）
-
-**注**：原"承载活动"改为"具有功能"；"推荐指数"和"引发情感"已改为实体属性。
-
-### 对比评价关系（3个）—— 特色
-- **优于**：A在某方面好于B（Head/Tail均为地理实体，属性：维度列表）
-- **相似**：A和B在某方面相似（Head/Tail均为地理实体）
-- **劣于**：A在某方面不如B（Head/Tail均为地理实体）
-
-### 事件关系（1个）
-- **发生事件**：场所发生的特定事件（Head=场所，Tail=事件节点/事件实体，属性全部在事件节点上）
+### 对比关系
+6. **优于**
+7. **相似**
+8. **劣于**
 
 ---
 
-## 跨语料别名发现
+## 关键约束（必须遵守）
 
-在处理多条语料时，请特别注意：
-1. 不同文本中可能用不同名称指代同一实体（如"武大"、"武汉大学"、"WHU"）
-2. 发现别名时，在 `cross_corpus_aliases` 中记录归一化建议
-3. 保持相同实体的类型一致性
+1. 头尾实体不能是人物词（男生/女生/游客/闺蜜等）；
+2. 功能/事件实体不能参与空间关系（位于/包含/相对方位）；
+3. 每个 `triples[*].evidence` 必须来自原文短片段；
+4. 若关系方向不确定，宁缺毋滥，不要强行输出。
+
+---
+
+## 跨语料别名发现（强制执行）
+
+1. 识别同一实体的不同写法（如"武大"/"武汉大学"/"WHU"）；
+2. 在 `cross_corpus_aliases` 记录归一化建议；
+3. 同一实体在不同语料中的类型保持一致。
 
 ---
 
@@ -2006,20 +2051,29 @@ BATCH_JOINT_USER = (
 
 请输出：
 1. `results`: 每条语料的抽取结果
+   - `corpus_id`: 语料ID
    - `entities`: 实体类型字典（快速统计）
+     - 键必须包含：道路/POI/建筑物/街区/功能/事件
    - `full_entities`: **完整实体列表（必须）**，每个实体包含：
-     - name: 实体名称
-     - type: 实体类型
-     - category: 细分类别（地理实体如"大学"，功能实体如"购物"，事件实体如"自然事件"）
-     - function_attrs: 功能实体属性（仅type=功能时）
-     - event_attrs: 事件实体属性（仅type=事件时）
-     - evidence: 原文依据
-   - `triples`: 三元组列表
-   - `confidence`: 置信度
-2. `cross_corpus_aliases`: 虪语料发现的别名映射
-3. `overall_confidence`: 整体置信度评估
+      - name: 实体名称
+      - type: 实体类型
+      - category: 细分类别
+      - aliases: 别名列表（可空）
+      - evidence: 原文依据
+      - function_attrs: 功能实体属性（仅type=功能时）
+      - event_attrs: 事件实体属性（仅type=事件时）
+    - `triples`: 三元组列表（head/relation/tail/evidence/confidence/attributes）
+    - `confidence`: 置信度
+    - `has_geo_info`: 是否包含地理信息
+    - `skip_reason`: 无地理信息时的原因（否则null）
+2. `cross_corpus_aliases`: 跨语料别名映射
+3. `cross_corpus_relations`: 跨语料重复关系或可合并关系（无则[]）
+4. `overall_confidence`: 整体置信度评估
+5. `extraction_strategy`: 固定写 `batch_joint`
 
-**重要**：full_entities必须包含每个实体的完整属性，特别是功能实体和事件实体的类别属性！
+**重要**：
+1. `full_entities` 必须完整，特别是功能/事件实体属性；
+2. 若某条语料无有效地理信息，也要返回该 `corpus_id` 的空结果并给出 `skip_reason`。
 
 输出JSON格式。
 """
@@ -2035,36 +2089,31 @@ BATCH_JOINT_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== 批量校验提示词 =====
 
-BATCH_SELF_CHECK_SYSTEM = """你是一位"批量抽取校验专家"，负责同时校验多条语料的抽取结果。
-你的任务是：
-1. 校验每条语料的实体和三元组质量
-2. 验证跨语料别名映射的准确性
-3. 决定是否需要重试或退化为单条处理
-"""
+BATCH_SELF_CHECK_SYSTEM = """你是一位"批量抽取校验修正专家"（P18改进）。
+你的职责是复核批量抽取结果，发现问题后直接修正而非拒绝，仅对无法修正的严重问题才拒绝。"""
 
-BATCH_SELF_CHECK_USER = """## 校验任务
+BATCH_SELF_CHECK_USER = """## 校验与修正任务（P18改进：修正型校验）
 
-请校验以下批量抽取结果：
+请校验以下批量抽取结果，发现问题直接修正：
 
-### 1. 实体校验（每条语料）
-- 是否遗漏重要地理实体？
-- 实体类型是否正确？
-- 是否抽取了非地理实体？
-- ⚠️ **人物实体检测**：是否存在"男生/女生/孩子/老人/学生/游客/闺蜜"等人物相关词被误识别为实体？如有，标记为错误。
+### 1. 实体校验与修正
+- 遗漏关键地理实体 → 补充到 `corrected_entities`
+- 实体类型错误（如建筑物误标为POI） → 修正为正确类型，记录到 `correction_records`
+- 非地理实体（人物、时间、泛词） → 加入 `rejected_entities`
 
-### 2. 三元组校验（每条语料）
-- 是否存在幻觉（无原文依据的三元组）？
-- 关系类型和方向是否正确？
-- 属性是否合理？
-- ⚠️ **人物三元组检测**：三元组的head/tail是否为人物相关词（如"男生/女生"）？如有，标记为无效并建议修正为属性值。
+### 2. 三元组校验与修正
+- 方向错误（如<A,位于,B>应为<B,包含,A>） → 修正方向，记录到 `corrected_triples`
+- 关系类型错误 → 修正为正确的8类关系之一
+- 缺少证据 → 补充原文证据位置
+- 幻觉三元组（原文无依据） → 加入 `rejected_triples`（无法修正）
 
-### 3. 跨语料别名验证
-- 别名映射是否正确？（如"武大"→"武汉大学"是否合理）
-- 是否有遗漏的别名关系？
+### 3. 跨语料别名校验
+- 别名同指 → 加入 `verified_aliases`
+- 别名误合并 → 加入 `rejected_aliases`
 
-### 4. 整体质量评估
-- 如果多数语料质量低，建议重新批量处理
-- 如果只有少数语料有问题，建议退化为单条处理这些语料
+### 4. 修正原则
+- **优先修正**：大部分问题可修正（方向、类型、证据）
+- **仅严重问题拒绝**：幻觉三元组、非地理实体无法修正
 
 ---
 
@@ -2077,17 +2126,24 @@ BATCH_SELF_CHECK_USER = """## 校验任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `verified_results`: 校验通过的语料结果
-2. `rejected_results`: 校验失败的语料（标注原因）
-3. `verified_aliases`: 校验通过的别名
-4. `retry_suggested`: 是否建议重新批量处理
-5. `fallback_to_single`: 是否建议退化为单条处理
+1. `verified_results`：每条语料包含：
+   - `corpus_id`：语料ID
+   - `entities`/`full_entities`/`triples`：原始抽取结果
+   - `corrected_entities`/`corrected_full_entities`/`corrected_triples`：修正后的结果
+   - `verified_entities`/`verified_full_entities`/`verified_triples`：校验通过的结果（无需修正）
+   - `rejected_entities`/`rejected_triples`：拒绝的结果（无法修正）
+   - `correction_records`：修正记录 [{{original, corrected, action, reason}}]
+   - `confidence`
 
-输出JSON格式。
-"""
+2. `rejected_results`：仅包含无法修正的严重问题语料（corpus_id, reason, error_type）
+
+3. `verified_aliases`/`rejected_aliases`
+4. `overall_confidence`
+5. `retry_suggested`：仅当多数语料严重问题时才为true
+6. `fallback_to_single`：仅当批量处理完全失败时才为true"""
 
 BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2099,25 +2155,26 @@ BATCH_SELF_CHECK_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Self-Check-QA提示词 =====
 
-BATCH_SELF_CHECK_QA_SYSTEM = """你是一位"批量QA脚手架校验专家"，负责同时校验多条语料的QA Scaffold结果。
-你的任务是：
-1. 校验每条语料的QA问答质量
-2. 检查实体/关系覆盖度
-3. 决定哪些语料需要重新生成QA
-"""
+BATCH_SELF_CHECK_QA_SYSTEM = """你是一位"批量QA脚手架校验修正专家"（P18改进）。
+你的职责是确保QA脚手架能有效支撑后续抽取，发现问题直接修正或补充。"""
 
-BATCH_SELF_CHECK_QA_USER = """## 校验任务
+BATCH_SELF_CHECK_QA_USER = """## 校验与修正任务（P18改进：修正型校验）
 
-请校验以下批量QA脚手架结果：
+请校验以下批量QA脚手架结果，发现问题直接修正：
 
-### 1. QA质量评估（每条语料）
-- **问答一致性**：问答内容是否与原文一致？
-- **维度完整性**：5W1H维度是否覆盖关键信息？
-- **实体覆盖度**：QA是否识别了所有关键地理实体？
+### 1. QA真实性校验与修正
+- 答案与原文不符 → 修正答案，加入 `corrected_qa_pairs`
+- 问题歧义 → 修正问题表述
 
-### 2. 整体质量评估
-- 如果多数语料QA质量低，建议重新批量生成QA
-- 如果只有少数语料有问题，将其标记为rejected
+### 2. 覆盖度补充
+- 遗漏关键地理实体 → 补充QA问答对，加入 `added_qa_pairs`
+- 遗漏关键关系（位于/包含/相对方位等） → 补充QA问答对
+
+### 3. 结构规范修正
+- `dimension` 不在 who/what/when/where/why/how → 修正为正确维度
+
+### 4. 严重问题拒绝
+- QA与原文严重矛盾无法修正 → 加入 `rejected_qa_pairs`
 
 ---
 
@@ -2131,16 +2188,21 @@ BATCH_SELF_CHECK_QA_USER = """## 校验任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `verified_results`: 校验通过的语料QA结果（包含corpus_id, verified_qa_pairs, entity_coverage, relation_coverage, confidence）
-2. `rejected_results`: 校验失败的语料（包含corpus_id, reason）
-3. `overall_confidence`: 批量整体置信度
-4. `retry_suggested`: 是否建议重新批量生成QA
+1. `verified_results`：每条语料包含：
+   - `corpus_id`：语料ID
+   - `corrected_qa_pairs`：修正后的问答对（答案修正）
+   - `added_qa_pairs`：补充的问答对（遗漏实体/关系）
+   - `verified_qa_pairs`：校验通过的问答对（无需修正）
+   - `rejected_qa_pairs`：拒绝的问答对（严重矛盾无法修正）
+   - `entity_coverage`/`relation_coverage`/`confidence`
 
-输出JSON格式。
-"""
+2. `rejected_results`：仅包含QA质量严重过低无法修正的语料
+
+3. `overall_confidence`
+4. `retry_suggested`：仅当多数语料严重问题时才为true"""
 
 BATCH_SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2152,25 +2214,26 @@ BATCH_SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Eval提示词 =====
 
-BATCH_EVAL_SYSTEM = """你是一位"批量三元组评估专家"，负责同时评估多条语料的三元组质量。
-你的任务是：
-1. 对每条语料的三元组进行评分（SEM语义、FAC事实、CON置信度）
-2. 判断三元组是否需要修正
-3. 决定每条语料的评估是否通过
-"""
+BATCH_EVAL_SYSTEM = """你是一位"批量三元组评估专家"。
+你需要客观评估每条语料的关系抽取质量，重点审查地理关系方向、证据充分性和关系类型合法性。"""
 
 BATCH_EVAL_USER = """## 评估任务
 
-请评估以下批量三元组：
+请评估以下批量三元组。
 
 ### 评分标准（每条语料）
-- **SEM（语义合理性）**: 1-5分，三元组语义是否合理
-- **FAC（事实准确性）**: 1-5分，是否有原文依据
-- **CON（置信度）**: 1-5分，整体抽取置信度
+1. `SEM`（语义合理性，1-5）
+- 关系类型是否恰当；
+- 地理关系方向是否正确（位于/包含尤需严格）。
+2. `FAC`（事实准确性，1-5）
+- 是否有明确原文证据；
+- 是否存在臆断。
+3. `CON`（整体置信，1-5）
+- 实体边界、关系、属性是否一致稳定。
 
 ### 通过阈值
-- 平均分≥3.5: 通过
-- 平均分<3.5: 需修正或不通过
+- 平均分 >= 3.5：通过
+- 平均分 < 3.5：建议修正
 
 ---
 
@@ -2184,14 +2247,11 @@ BATCH_EVAL_USER = """## 评估任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `batch_eval_results`: 每条语料的评估结果（包含corpus_id, scores, eval_passed, corrected_triples, confidence）
-2. `overall_confidence`: 批量整体置信度
-
-输出JSON格式。
-"""
+1. `batch_eval_results`：每条包含 `corpus_id`, `scores`, `eval_passed`, `corrected_triples`, `confidence`
+2. `overall_confidence`"""
 
 BATCH_EVAL_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2203,24 +2263,24 @@ BATCH_EVAL_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Self-Check-Eval提示词 =====
 
-BATCH_SELF_CHECK_EVAL_SYSTEM = """你是一位"批量评估结果校验专家"，负责同时校验多条语料的评估结果。
-你的任务是：
-1. 验证评分合理性
-2. 检查三元组是否应该通过评估
-3. 决定哪些语料需要重新评估
-"""
+BATCH_SELF_CHECK_EVAL_SYSTEM = """你是一位"批量评估结果校验修正专家"（P18改进）。
+你要复核评分是否与实际关系质量一致，发现问题直接修正三元组而非拒绝。"""
 
-BATCH_SELF_CHECK_EVAL_USER = """## 校验任务
+BATCH_SELF_CHECK_EVAL_USER = """## 校验与修正任务（P18改进：修正型校验）
 
-请校验以下批量评估结果：
+请校验以下批量评估结果，发现问题直接修正：
 
-### 1. 评分一致性检查（每条语料）
-- 评分是否与三元组质量匹配？
-- 是否存在评分过高（幻觉三元组得高分）或过低（正确三元组得低分）？
+### 1. 评分一致性校验
+- 分数是否与证据质量一致
+- 是否存在"无证据但高分"、"方向错误但高分"
 
-### 2. 通过判定验证
-- eval_passed=true的三元组是否真的应该通过？
-- eval_passed=false的三元组是否有修正机会？
+### 2. 三元组修正
+- 方向错误（<A,位于,B>应为<B,包含,A>） → 修正方向，加入 `corrected_triples`
+- 关系类型错误 → 修正为正确的8类关系
+- 评分过低但可修正 → 修正后提高评分
+
+### 3. 严重问题拒绝
+- 幻觉三元组（原文完全无依据） → 加入 `rejected_triples`（无法修正）
 
 ---
 
@@ -2234,16 +2294,21 @@ BATCH_SELF_CHECK_EVAL_USER = """## 校验任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `verified_results`: 校验通过的语料评估结果（包含corpus_id, verified_triples, score_consistency, confidence）
-2. `rejected_results`: 校验失败的语料（包含corpus_id, reason）
-3. `overall_confidence`: 批量整体置信度
-4. `retry_suggested`: 是否建议重新评估
+1. `verified_results`：每条语料包含：
+   - `corpus_id`：语料ID
+   - `corrected_triples`：修正后的三元组（方向修正、类型修正）
+   - `verified_triples`：校验通过的三元组（无需修正）
+   - `rejected_triples`：拒绝的三元组（幻觉、无法修正）
+   - `correction_records`：修正记录 [{{original, corrected, action, reason}}]
+   - `score_consistency`/`confidence`
 
-输出JSON格式。
-"""
+2. `rejected_results`：仅包含评估结果严重问题无法修正的语料
+
+3. `overall_confidence`
+4. `retry_suggested`：仅当多数语料严重问题时才为true"""
 
 BATCH_SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2255,24 +2320,20 @@ BATCH_SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Label提示词 =====
 
-BATCH_LABEL_SYSTEM = """你是一位"批量属性标注专家"，负责同时为多条语料的实体和关系添加属性标注。
-你的任务是：
-1. 为每个实体标注类型和属性
-2. 为每个关系标注属性
-3. 确保属性有原文依据
-"""
+BATCH_LABEL_SYSTEM = """你是一位"批量属性标注专家"。
+你负责为实体和关系补充属性标注，并确保属性值与原文证据一致。"""
 
 BATCH_LABEL_USER = """## 标注任务
 
-请为以下批量实体和关系添加属性标注：
+请为以下批量实体和关系添加属性标注。
 
-### 1. 实体属性标注（每条语料）
-- 实体类型：道路/POI/建筑物/街区/功能/事件
-- 特征标签：氛围感、网红、文艺等（开放文本，需原文依据）
+---
 
-### 2. 关系属性标注（每条语料）
-- 置信度：high/medium/low
-- 原文依据：标注证据来源
+## 标注原则
+
+1. 只标注有证据的属性；
+2. 属性值尽量贴近原文表达；
+3. 人群词、时间词优先作为属性值，不作为实体。
 
 ---
 
@@ -2286,14 +2347,11 @@ BATCH_LABEL_USER = """## 标注任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `batch_label_results`: 每条语料的标注结果（包含corpus_id, entity_attrs, relation_attrs, confidence）
-2. `overall_confidence`: 批量整体置信度
-
-输出JSON格式。
-"""
+1. `batch_label_results`：每条包含 `corpus_id`, `entity_attrs`, `relation_attrs`, `confidence`
+2. `overall_confidence`"""
 
 BATCH_LABEL_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2305,23 +2363,24 @@ BATCH_LABEL_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Self-Check-Label提示词 =====
 
-BATCH_SELF_CHECK_LABEL_SYSTEM = """你是一位"批量标注校验专家"，负责同时校验多条语料的属性标注结果。
-你的任务是：
-1. 校验实体属性合理性
-2. 校验关系属性完整性
-3. 决定哪些语料需要重新标注
-"""
+BATCH_SELF_CHECK_LABEL_SYSTEM = """你是一位"批量标注校验修正专家"（P18改进）。
+你负责复核实体/关系属性，发现问题直接修正而非拒绝。"""
 
-BATCH_SELF_CHECK_LABEL_USER = """## 校验任务
+BATCH_SELF_CHECK_LABEL_USER = """## 校验与修正任务（P18改进：修正型校验）
 
-请校验以下批量标注结果：
+请校验以下批量标注结果，发现问题直接修正：
 
-### 1. 实体属性校验（每条语料）
-- 实体类型是否正确？
-- 属性是否有原文依据？
+### 1. 实体属性校验与修正
+- 类型错误（如建筑物误标为POI） → 修正类型，加入 `corrected_entity_attrs`
+- 属性缺失（原文提及但未标注） → 补充属性
+- 属性值错误 → 修正为原文一致的表达
 
-### 2. 关系属性校验（每条语料）
-- 关系置信度是否合理？
+### 2. 关系属性校验与修正
+- 属性与关系类型不匹配 → 修正属性值
+- 空属性或矛盾属性 → 修正或补充
+
+### 3. 严重问题拒绝
+- 无依据属性（原文完全未提及） → 加入 `rejected_entity_attrs`/`rejected_relation_attrs`
 
 ---
 
@@ -2335,16 +2394,23 @@ BATCH_SELF_CHECK_LABEL_USER = """## 校验任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `verified_results`: 校验通过的语料标注结果
-2. `rejected_results`: 校验失败的语料
-3. `overall_confidence`: 批量整体置信度
-4. `retry_suggested`: 是否建议重新标注
+1. `verified_results`：每条语料包含：
+   - `corpus_id`：语料ID
+   - `corrected_entity_attrs`：修正后的实体属性
+   - `corrected_relation_attrs`：修正后的关系属性
+   - `verified_entity_attrs`：校验通过的实体属性（无需修正）
+   - `verified_relation_attrs`：校验通过的关系属性
+   - `rejected_entity_attrs`：拒绝的实体属性键（无依据）
+   - `rejected_relation_attrs`：拒绝的关系属性键（无依据）
+   - `attr_completeness`/`confidence`
 
-输出JSON格式。
-"""
+2. `rejected_results`：仅包含标注结果严重问题无法修正的语料
+
+3. `overall_confidence`
+4. `retry_suggested`：仅当多数语料严重问题时才为true"""
 
 BATCH_SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2356,20 +2422,20 @@ BATCH_SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Entity_Alignment提示词 =====
 
-BATCH_ENTITY_ALIGNMENT_SYSTEM = """你是一位"批量实体对齐专家"，负责将抽取实体与数据库已有实体对齐。
-你的任务是：
-1. 判断实体是否已存在于数据库
-2. 合理合并相同实体的不同表达
-3. 输出需要新增到数据库的实体
-"""
+BATCH_ENTITY_ALIGNMENT_SYSTEM = """你是一位"批量实体对齐专家"。
+你负责将抽取实体与数据库实体对齐，尽量统一地理实体命名，避免同物多名。"""
 
 BATCH_ENTITY_ALIGNMENT_USER = """## 对齐任务
 
-请将以下批量实体与数据库已有实体对齐：
+请将以下批量实体与数据库已有实体对齐。
 
-### 1. 实体匹配（每条语料）
-- 判断实体是否与已有实体匹配
-- 记录别名关系
+---
+
+## 对齐原则
+
+1. 优先合并同名异写（简称/别名/大小写差异）；
+2. 仅在语义和类型一致时合并；
+3. 不确定时保守为新实体，避免误合并。
 
 ---
 
@@ -2383,14 +2449,11 @@ BATCH_ENTITY_ALIGNMENT_USER = """## 对齐任务
 
 ---
 
-## 输出要求
+## 输出要求（严格JSON）
 
 请输出：
-1. `aligned_results`: 每条语料的对齐结果（包含corpus_id, aligned_entity_attrs, new_entities）
-2. `overall_confidence`: 批量整体置信度
-
-输出JSON格式。
-"""
+1. `aligned_results`：每条包含 `corpus_id`, `aligned_entity_attrs`, `new_entities`, `confidence`
+2. `overall_confidence`"""
 
 BATCH_ENTITY_ALIGNMENT_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -2411,7 +2474,20 @@ def format_batch_corpus(corpus_list: List[Dict]) -> str:
     for i, corpus in enumerate(corpus_list, 1):
         corpus_id = corpus.get("id", f"unknown_{i}")
         text = corpus.get("text", "")
-        lines.append(f"【语料 {i}】ID: {corpus_id}\n文本: {text}")
+        block = [f"【语料 {i}】ID: {corpus_id}", f"文本: {text}"]
+
+        entity_hints = corpus.get("entity_hints") or []
+        relation_hints = corpus.get("relation_hints") or []
+        semantic_summary = str(corpus.get("semantic_summary", "") or "").strip()
+
+        if entity_hints:
+            block.append(f"实体提示: {', '.join(str(x) for x in entity_hints[:8])}")
+        if relation_hints:
+            block.append(f"关系提示: {', '.join(str(x) for x in relation_hints[:8])}")
+        if semantic_summary:
+            block.append(f"语义摘要: {semantic_summary}")
+
+        lines.append("\n".join(block))
     return "\n\n".join(lines)
 
 
@@ -2520,9 +2596,11 @@ def format_batch_triples_for_eval(batch_extraction_results: Dict) -> str:
                     for t in triples
                 ]
             )
-            lines.append(
-                f"- [{corpus_id}] 置信度:{confidence}\n  三元组: {triple_str}"
-            )
+            line = f"- [{corpus_id}] 置信度:{confidence}\n  三元组: {triple_str}"
+            mentor_note = str(data.get("mentor_note", "") or "").strip()
+            if mentor_note:
+                line += f"\n  导师提示: {mentor_note}"
+            lines.append(line)
         else:
             lines.append(f"- [{corpus_id}] 无三元组")
     return "\n".join(lines)
@@ -2761,9 +2839,24 @@ def format_joint_for_approval(joint_result: Dict) -> str:
     triples = joint_result.get("triples", [])
 
     entity_lines = []
-    for entity_type, names in entities.items():
-        if names:
-            entity_lines.append(f"{entity_type}: {', '.join(names)}")
+    if isinstance(entities, dict):
+        for entity_type, names in entities.items():
+            if names:
+                entity_lines.append(f"{entity_type}: {', '.join(names)}")
+    elif isinstance(entities, list):
+        grouped_entities: Dict[str, List[str]] = {}
+        for item in entities:
+            if not isinstance(item, dict):
+                continue
+            entity_name = str(item.get("name", "")).strip()
+            entity_type = str(item.get("type", "Unknown")).strip() or "Unknown"
+            if not entity_name:
+                continue
+            grouped_entities.setdefault(entity_type, []).append(entity_name)
+
+        for entity_type, names in grouped_entities.items():
+            unique_names = list(dict.fromkeys(names))
+            entity_lines.append(f"{entity_type}: {', '.join(unique_names)}")
 
     triple_lines = []
     for t in triples[:10]:
@@ -2880,6 +2973,47 @@ MENTOR_QUERY_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+# ===== P19新增：批量导师查询提示词（降低token与调用次数） =====
+
+BATCH_MENTOR_QUERY_SYSTEM = """你是一位经验丰富的"地理语义导师"，正在批量回答多个语料样本的查询。
+你的目标是在保证准确性的前提下，减少冗余解释，为每条语料给出简明可执行建议。
+
+输出要求：
+1. 必须覆盖输入中的每个 corpus_id
+2. 逐条给出 answer / clarification / recommendation / suggests_revision
+3. 可按需更新 updated_entity_hints / updated_relation_hints
+4. return_to_node 默认用查询来源节点（如 eval）"""
+
+BATCH_MENTOR_QUERY_USER = """## 批量学生查询
+
+### 查询来源节点
+{source_node}
+
+### 查询列表（JSON）
+{query_items}
+
+---
+
+## 原始文本映射（JSON）
+{raw_text_map}
+
+---
+
+## 之前的导师指导（统一上下文）
+{previous_guidance}
+
+---
+
+请输出批量导师响应（JSON格式）。"""
+
+BATCH_MENTOR_QUERY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_MENTOR_QUERY_SYSTEM),
+        ("human", BATCH_MENTOR_QUERY_USER),
+    ]
+)
+
+
 # ===== P14新增：困惑检测辅助函数 =====
 
 
@@ -2903,7 +3037,9 @@ def format_query_for_mentor(query: Dict) -> str:
     return "\n".join(lines)
 
 
-def detect_extraction_confusion(result: Dict, state: Dict) -> Optional[Dict]:
+def detect_extraction_confusion(
+    result: Dict, state: Dict, low_item_threshold: int = 2
+) -> Optional[Dict]:
     """检测联合抽取结果中的困惑点
 
     Args:
@@ -2913,29 +3049,37 @@ def detect_extraction_confusion(result: Dict, state: Dict) -> Optional[Dict]:
     Returns:
         如果检测到困惑，返回查询字典；否则返回 None
     """
-    # 1. 实体歧义检测
-    for entity in result.get("entities", []):
-        entity_confidence = entity.get("confidence", "medium")
-        if entity_confidence == "low":
-            return {
-                "query_type": "entity_ambiguity",
-                "query_content": f"实体 '{entity.get('name')}' 类型不确定，可能是 '{entity.get('type')}' 但需要确认",
-                "involved_entities": [entity.get("name", "")],
-                "involved_relations": [],
-                "current_confidence": "low",
-            }
+    low_item_threshold = max(1, int(low_item_threshold or 1))
 
-    # 2. 关系困惑检测
+    # 1. 实体歧义检测（低置信样本达到阈值才触发，避免过度查询）
+    low_entities = []
+    for entity in result.get("entities", []):
+        if entity.get("confidence", "medium") == "low":
+            low_entities.append(entity)
+    if len(low_entities) >= low_item_threshold:
+        names = [e.get("name", "") for e in low_entities[:5] if e.get("name")]
+        return {
+            "query_type": "entity_ambiguity",
+            "query_content": f"{len(low_entities)} 个实体类型不确定，超过阈值 {low_item_threshold}",
+            "involved_entities": names,
+            "involved_relations": [],
+            "current_confidence": "low",
+        }
+
+    # 2. 关系困惑检测（低置信关系达到阈值才触发）
+    low_triples = []
     for triple in result.get("triples", []):
-        triple_confidence = triple.get("confidence", "medium")
-        if triple_confidence == "low":
-            return {
-                "query_type": "relation_confusion",
-                "query_content": f"三元组 '{triple.get('head')}-{triple.get('relation')}-{triple.get('tail')}' 证据不足或关系不确定",
-                "involved_entities": [triple.get("head", ""), triple.get("tail", "")],
-                "involved_relations": [triple.get("relation", "")],
-                "current_confidence": "low",
-            }
+        if triple.get("confidence", "medium") == "low":
+            low_triples.append(triple)
+    if len(low_triples) >= low_item_threshold:
+        t = low_triples[0] if low_triples else {}
+        return {
+            "query_type": "relation_confusion",
+            "query_content": f"{len(low_triples)} 个三元组证据不足或关系不确定，超过阈值 {low_item_threshold}",
+            "involved_entities": [t.get("head", ""), t.get("tail", "")],
+            "involved_relations": [t.get("relation", "")],
+            "current_confidence": "low",
+        }
 
     # 3. 整体置信度过低
     overall_confidence = result.get("overall_confidence", "medium")
@@ -2962,17 +3106,25 @@ def detect_extraction_confusion(result: Dict, state: Dict) -> Optional[Dict]:
     return None
 
 
-def detect_eval_confusion(eval_result: Dict, state: Dict) -> Optional[Dict]:
+def detect_eval_confusion(
+    eval_result: Dict, state: Dict, reject_ratio_threshold: float = 0.8
+) -> Optional[Dict]:
     """检测评估结果中的困惑点"""
     # 1. 大量三元组被拒绝
     corrected = eval_result.get("corrected_triples", [])
     original_triples = state.get("triples", [])
 
-    if len(original_triples) > 0 and len(corrected) < len(original_triples) * 0.5:
-        rejected_count = len(original_triples) - len(corrected)
+    reject_ratio_threshold = max(0.0, min(1.0, float(reject_ratio_threshold)))
+    rejected_count = len(original_triples) - len(corrected)
+    rejected_ratio = (rejected_count / len(original_triples)) if len(original_triples) > 0 else 0.0
+
+    if len(original_triples) > 0 and rejected_ratio >= reject_ratio_threshold:
         return {
             "query_type": "eval_disagreement",
-            "query_content": f"评估拒绝了 {rejected_count} 个三元组，可能需要重新理解原文语义",
+            "query_content": (
+                f"评估拒绝了 {rejected_count}/{len(original_triples)} 个三元组 "
+                f"(比例={rejected_ratio:.2f})，达到阈值 {reject_ratio_threshold:.2f}"
+            ),
             "involved_entities": [],
             "involved_relations": [],
             "current_confidence": "medium",
@@ -2993,7 +3145,12 @@ def detect_eval_confusion(eval_result: Dict, state: Dict) -> Optional[Dict]:
     return None
 
 
-def detect_label_confusion(label_result: Dict, state: Dict) -> Optional[Dict]:
+def detect_label_confusion(
+    label_result: Dict,
+    state: Dict,
+    missing_ratio_threshold: float = 0.8,
+    min_missing_attrs: int = 3,
+) -> Optional[Dict]:
     """检测标注结果中的困惑点"""
     # 1. 实体属性缺失
     entity_attrs = label_result.get("entity_attrs", {})
@@ -3003,11 +3160,21 @@ def detect_label_confusion(label_result: Dict, state: Dict) -> Optional[Dict]:
     for entity_type, names in entities.items():
         all_entity_names.extend(names)
 
+    missing_ratio_threshold = max(0.0, min(1.0, float(missing_ratio_threshold)))
+    min_missing_attrs = max(1, int(min_missing_attrs or 1))
     missing_attrs = [name for name in all_entity_names if name not in entity_attrs]
-    if len(missing_attrs) > len(all_entity_names) * 0.5:
+    missing_ratio = (len(missing_attrs) / len(all_entity_names)) if len(all_entity_names) > 0 else 0.0
+    if (
+        all_entity_names
+        and len(missing_attrs) >= min_missing_attrs
+        and missing_ratio >= missing_ratio_threshold
+    ):
         return {
             "query_type": "label_confusion",
-            "query_content": f"{len(missing_attrs)} 个实体缺少属性标注，可能需要确认实体类型",
+            "query_content": (
+                f"{len(missing_attrs)}/{len(all_entity_names)} 个实体缺少属性标注 "
+                f"(比例={missing_ratio:.2f})，达到阈值 {missing_ratio_threshold:.2f}"
+            ),
             "involved_entities": missing_attrs[:5],  # 只列出前5个
             "involved_relations": [],
             "current_confidence": "medium",

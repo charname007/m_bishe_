@@ -28,6 +28,8 @@ class PostgresClient:
     def connect(self):
         """建立连接"""
         self.conn = psycopg2.connect(**self.conn_params)
+        # P15修复：设置客户端编码为UTF-8，避免中文编码问题
+        self.conn.set_client_encoding('UTF8')
 
     def close(self):
         """关闭连接"""

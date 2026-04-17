@@ -343,6 +343,8 @@ class DirectionValueEnum(str, Enum):
     WEST_SIDE = "西侧"
     OPPOSITE = "对面"
     BESIDE = "旁边"
+    FRONT = "前"  # P15修复：添加"前"方向值
+    BACK = "后"  # P15修复：添加"后"方向值
 
 
 # ===== 情感节点枚举 =====
@@ -533,9 +535,10 @@ class TripleAttributes(BaseModel):
     v3.5改进：
     - 使用 model_validator(mode='before') 清理 LLM 错误输出的额外字段
     - "推荐指数"等字段应放在实体属性中，而非三元组属性
+    P20改进：放宽校验，忽略额外字段
     """
 
-    model_config = ConfigDict(extra="forbid")  # 拒绝未定义的字段
+    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段（原为 forbid）
 
     # ===== LLM幻觉字段清理器（v3.5新增） =====
     # 这些字段应放在实体属性中，LLM有时错误地放在三元组属性中
@@ -730,20 +733,30 @@ class RelationExtractionResult(BaseModel):
 
 
 class TripleForEval(BaseModel):
-    """用于评估的三元组（硬校验）"""
+    """用于评估的三元组（硬校验）
 
-    head: str = Field(description="头实体名称")
-    relation: RelationTypeEnum = Field(description="关系类型")
-    tail: str = Field(description="尾实体名称")
+    P20改进：放宽校验，允许LLM输出不完整数据
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    head: str = Field(default="", description="头实体名称")  # P20: 放宽校验
+    relation: Optional[RelationTypeEnum] = Field(default=None, description="关系类型")  # P20: 放宽校验
+    tail: str = Field(default="", description="尾实体名称")  # P20: 放宽校验
 
 
 class TripleScore(BaseModel):
-    """单个三元组的评分"""
+    """单个三元组的评分
 
-    triple: TripleForEval = Field(description="被评分的三元组")
-    SEM: int = Field(ge=1, le=5, description="语义准确性评分(1-5)")
-    FAC: int = Field(ge=1, le=5, description="事实真实性评分(1-5)")
-    CON: int = Field(ge=1, le=5, description="一致性评分(1-5)")
+    P20改进：放宽校验，允许LLM输出不完整数据
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    triple: Optional[TripleForEval] = Field(default=None, description="被评分的三元组")  # P20: 放宽校验
+    SEM: Optional[int] = Field(default=3, ge=1, le=5, description="语义准确性评分(1-5)")  # P20: 放宽校验
+    FAC: Optional[int] = Field(default=3, ge=1, le=5, description="事实真实性评分(1-5)")  # P20: 放宽校验
+    CON: Optional[int] = Field(default=3, ge=1, le=5, description="一致性评分(1-5)")  # P20: 放宽校验
 
 
 class EvalResultFirst(BaseModel):
@@ -753,11 +766,16 @@ class EvalResultFirst(BaseModel):
 
 
 class Correction(BaseModel):
-    """三元组修正"""
+    """三元组修正
+
+    P20改进：corrected 允许为 None（表示删除该三元组）
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
 
     original: TripleForEval = Field(description="原始三元组")
-    corrected: TripleForEval = Field(description="修正后的三元组")
-    reason: str = Field(description="修正原因")
+    corrected: Optional[TripleForEval] = Field(default=None, description="修正后的三元组（null表示删除）")  # P20: 允许None
+    reason: str = Field(default="", description="修正原因")  # P20: 放宽校验
 
 
 class EvalResultSecond(BaseModel):
@@ -771,10 +789,15 @@ class EvalResultSecond(BaseModel):
 
 
 class EvalResultSimplified(BaseModel):
-    """简化的单次评估结果 - 包含评分和可选修正"""
+    """简化的单次评估结果 - 包含评分和可选修正
+
+    P20改进：放宽校验
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
 
     scores: List[TripleScore] = Field(default_factory=list, description="评分列表")
-    need_correction: bool = Field(default=False, description="是否需要修正")
+    need_correction: Optional[bool] = Field(default=False, description="是否需要修正")  # P20: 放宽校验
     corrections: List[Correction] = Field(
         default_factory=list, description="修正列表（仅当need_correction=True时有效）"
     )
@@ -790,13 +813,12 @@ class FunctionEntityAttributes(BaseModel):
     所有属性必须有原文依据，禁止幻觉。
 
     v3.4扩展：功能类型从9种扩展为10种，新增'交通'
+    P20改进：放宽校验
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段（原为 forbid）
 
-    功能类型: FunctionEnum = Field(
-        description="功能大类（v3.4：10种）：餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他"
-    )
+    功能类型: Optional[FunctionEnum] = Field(default=None, description="功能大类（v3.4：10种）：餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他")  # P20: 放宽校验
     功能细分: Optional[str] = Field(
         default=None,
         description="功能细分描述：咖啡厅、火锅、书店、手工艺体验等（必须有原文依据）",
@@ -828,13 +850,12 @@ class EventEntityAttributes(BaseModel):
 
     事件实体作为独立实体抽取，不再仅作为三元组Tail。
     所有属性必须有原文依据，禁止幻觉。
+    P20改进：放宽校验
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段（原为 forbid）
 
-    事件类别: EventCategoryEnum = Field(
-        description="事件类别（7种）：自然事件/人文事件/商业活动/社会事件/业态变更/停业关闭/其他"
-    )
+    事件类别: Optional[EventCategoryEnum] = Field(default=None, description="事件类别（7种）：自然事件/人文事件/商业活动/社会事件/业态变更/停业关闭/其他")  # P20: 放宽校验
     事件状态: Optional[EventStateEnum] = Field(
         default=None,
         description="事件当前状态：正在进行/已结束/计划中/周期性（必须有原文依据）",
@@ -865,9 +886,10 @@ class EntityAttributes(BaseModel):
     - 设计原因：社交媒体表达模糊，权威分类由数据源（高德POI）在对齐阶段补充
 
     原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
+    P20改进：放宽校验
     """
 
-    model_config = ConfigDict(extra="forbid")  # 拒绝未定义的字段
+    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段（原为 forbid）
 
     # 基础分类属性（可选）
     类别: Optional[str] = Field(
@@ -902,7 +924,10 @@ class RelationAttributes(BaseModel):
     - 对比关系属性：维度
 
     所有属性可选，语料中出现才标注。
+    P20改进：放宽校验
     """
+
+    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段
 
     # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
     距离值: Optional[DistanceValueEnum] = Field(
@@ -1269,13 +1294,16 @@ class JointEntity(BaseModel):
     """联合抽取的单个实体（v3.4扩展版）
 
     v3.4改进：实体类型扩展为6种（新增功能、事件）
+    P20改进：放宽校验，允许LLM输出不完整数据
     """
 
-    name: str = Field(description="实体名称")
-    type: EntityTypeEnum = Field(description="实体类型：道路/POI/建筑物/街区/功能/事件")
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    name: str = Field(default="", description="实体名称")  # P20: 放宽校验
+    type: Optional[EntityTypeEnum] = Field(default=None, description="实体类型：道路/POI/建筑物/街区/功能/事件")  # P20: 放宽校验
     category: Optional[str] = Field(default=None, description="细分类别")
     aliases: List[str] = Field(default_factory=list, description="别名/简称")
-    evidence: str = Field(description="原文依据")
+    evidence: Optional[str] = Field(default=None, description="原文依据")  # P20: 放宽校验
     # v3.4新增：功能实体和事件实体属性
     function_attrs: Optional[FunctionEntityAttributes] = Field(
         default=None, description="功能实体属性（仅当type=功能时有效）"
@@ -1287,18 +1315,25 @@ class JointEntity(BaseModel):
     @field_validator("type", mode="before")
     @classmethod
     def normalize_type(cls, v):
-        """将实体类型变体映射到标准枚举值（P15修复：处理英文成员名）"""
+        """将实体类型变体映射到标准枚举值（P15修复：处理英文成员名，P20: 允许None）"""
+        if v is None:
+            return None
         return normalize_entity_type(v)
 
 
 class JointTriple(BaseModel):
-    """联合抽取的单个三元组（v3.2精简版：8个关系，强类型属性）"""
+    """联合抽取的单个三元组（v3.2精简版：8个关系，强类型属性）
 
-    head: str = Field(description="头实体")
-    relation: RelationTypeEnum = Field(description="关系类型（6种之一）")
-    tail: str = Field(description="尾实体")
-    evidence: str = Field(description="原文依据")
-    confidence: ConfidenceEnum = Field(description="置信度")
+    P20改进：放宽校验，允许LLM输出不完整数据
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    head: str = Field(default="", description="头实体")  # P20: 放宽校验
+    relation: Optional[RelationTypeEnum] = Field(default=None, description="关系类型（6种之一）")  # P20: 放宽校验
+    tail: str = Field(default="", description="尾实体")  # P20: 放宽校验
+    evidence: Optional[str] = Field(default=None, description="原文依据")  # P20: 放宽校验
+    confidence: Optional[ConfidenceEnum] = Field(default="medium", description="置信度")  # P20: 放宽校验
     attributes: Optional[TripleAttributes] = Field(
         default=None, description="关系属性（强类型约束，全部可选，语料中出现才标注）"
     )
@@ -1306,7 +1341,9 @@ class JointTriple(BaseModel):
     @field_validator("relation", mode="before")
     @classmethod
     def normalize_relation(cls, v):
-        """将关系类型变体映射到标准枚举值（使用模块级常量）"""
+        """将关系类型变体映射到标准枚举值（P20: 允许None）"""
+        if v is None:
+            return None
         return normalize_relation_type(v)
 
 
@@ -1694,6 +1731,8 @@ class BatchFilterResult(BaseModel):
             return len(info.data["results"])
         return v or 0
 
+    model_config = ConfigDict(extra="ignore")
+
 
 class BatchNormalizeResult(BaseModel):
     """批量归一化结果 - 一次LLM调用处理多条语料的归一化"""
@@ -1712,6 +1751,8 @@ class BatchNormalizeResult(BaseModel):
         if "results" in info.data:
             return len(info.data["results"])
         return v or 0
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class BatchQAScaffoldResult(BaseModel):
@@ -1732,17 +1773,26 @@ class BatchQAScaffoldResult(BaseModel):
             return len(info.data["results"])
         return v or 0
 
+    model_config = ConfigDict(extra="ignore")
+
 
 # P15修复：批量抽取使用JointEntity作为实体输出结构
 class BatchCorpusResult(BaseModel):
-    """单条语料的批量抽取结果（P15修复：使用JointEntity强类型）"""
+    """单条语料的批量抽取结果（P18改进：支持修正型校验）
 
-    corpus_id: str = Field(description="语料ID")
+    改进点：添加修正字段，支持校验节点直接修正问题而非拒绝
+    P20改进：放宽校验
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    corpus_id: str = Field(default="", description="语料ID")  # P20: 放宽校验
+
+    # 原始抽取结果
     entities: Dict[str, List[str]] = Field(
         default_factory=dict,
         description="实体字典（快速统计）: {'道路': [...], 'POI': [...], '建筑物': [...], '街区': [...], '功能': [...], '事件': [...]}",
     )
-    # P15修复：使用JointEntity列表代替Dict，强制LLM输出完整属性
     full_entities: List[JointEntity] = Field(
         default_factory=list,
         description="完整实体列表（使用JointEntity强类型，包含所有属性）",
@@ -1750,11 +1800,103 @@ class BatchCorpusResult(BaseModel):
     triples: List[JointTriple] = Field(
         default_factory=list, description="三元组列表（使用JointTriple强类型）"
     )
+
+    # P18新增：修正后的结果（校验节点输出）
+    corrected_entities: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="修正后的实体字典（类型修正、边界调整）",
+    )
+    corrected_full_entities: List[JointEntity] = Field(
+        default_factory=list,
+        description="修正后的完整实体列表",
+    )
+    corrected_triples: List[JointTriple] = Field(
+        default_factory=list,
+        description="修正后的三元组列表（方向修正、关系类型修正）",
+    )
+
+    # P18新增：校验通过的结果（无需修正）
+    verified_entities: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="校验通过的实体字典",
+    )
+    verified_full_entities: List[JointEntity] = Field(
+        default_factory=list,
+        description="校验通过的完整实体列表",
+    )
+    verified_triples: List[JointTriple] = Field(
+        default_factory=list,
+        description="校验通过的三元组列表",
+    )
+
+    # P18新增：拒绝的结果（无法修正的严重问题）
+    rejected_entities: List[str] = Field(
+        default_factory=list,
+        description="拒绝的实体名称列表（非地理实体、严重错误）",
+    )
+    rejected_triples: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="拒绝的三元组列表（幻觉、无依据）",
+    )
+
+    # P18新增：修正记录
+    correction_records: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="修正记录：[{original, corrected, action, reason}]",
+    )
+
     confidence: str = Field(default="medium", description="置信度: high/medium/low")
     has_geo_info: bool = Field(default=True, description="是否包含地理信息")
     skip_reason: Optional[str] = Field(
         default=None, description="跳过原因（无地理信息时）"
     )
+
+    @field_validator(
+        "full_entities",
+        "corrected_full_entities",
+        "verified_full_entities",
+        mode="before",
+    )
+    @classmethod
+    def sanitize_full_entities(cls, value):
+        """批量抽取容错：清洗不完整实体，避免因单条脏数据导致整批解析失败。"""
+        if not value:
+            return []
+        if not isinstance(value, list):
+            return []
+
+        cleaned: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            name = str(item.get("name", "")).strip()
+            if not name:
+                # 跳过空实体名
+                continue
+
+            entity_type = item.get("type", "POI")
+            if hasattr(entity_type, "value"):
+                entity_type = entity_type.value
+            if not entity_type:
+                entity_type = "POI"
+
+            evidence = item.get("evidence")
+            if not evidence:
+                evidence = name
+
+            cleaned.append(
+                {
+                    **item,
+                    "name": name,
+                    "type": entity_type,
+                    "evidence": evidence,
+                }
+            )
+
+        return cleaned
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class BatchExtractionResult(BaseModel):
@@ -1794,6 +1936,8 @@ class BatchExtractionResult(BaseModel):
                 data["batch_size"] = len(results)
         return data
 
+    model_config = ConfigDict(extra="ignore")
+
 
 class BatchSelfCheckResult(BaseModel):
     """批量校验结果"""
@@ -1822,15 +1966,38 @@ class BatchSelfCheckResult(BaseModel):
 
 
 class BatchSelfCheckQACorpusResult(BaseModel):
-    """单条语料的QA校验结果"""
+    """单条语料的QA校验结果（P18改进：支持修正型校验）
 
-    corpus_id: str = Field(description="语料ID")
+    改进点：添加 corrected_qa_pairs、added_qa_pairs，校验节点可直接修正或补充QA
+    P20改进：放宽校验
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    corpus_id: str = Field(default="", description="语料ID")  # P20: 放宽校验
+
+    # P18新增：修正后的问答对
+    corrected_qa_pairs: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="修正后的QA问答对（答案与原文不符时修正）",
+    )
+
+    # P18新增：补充的问答对（遗漏关键实体/关系）
+    added_qa_pairs: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="补充的QA问答对（发现遗漏的关键实体或关系）",
+    )
+
+    # 校验通过的问答对
     verified_qa_pairs: List[Dict[str, Any]] = Field(
         default_factory=list, description="校验通过的QA问答对"
     )
+
+    # 拒绝的问答对（严重不符原文，无法修正）
     rejected_qa_pairs: List[Dict[str, Any]] = Field(
-        default_factory=list, description="校验失败的QA问答对"
+        default_factory=list, description="校验失败的QA问答对（严重不符原文）"
     )
+
     entity_coverage: str = Field(
         default="medium", description="实体覆盖度: high/medium/low"
     )
@@ -1884,12 +2051,39 @@ class BatchEvalResult(BaseModel):
 
 
 class BatchSelfCheckEvalCorpusResult(BaseModel):
-    """单条语料的评估校验结果"""
+    """单条语料的评估校验结果（P18改进：支持修正型校验）
 
-    corpus_id: str = Field(description="语料ID")
+    改进点：添加 corrected_triples、rejected_triples、correction_records
+    P20改进：放宽校验
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    corpus_id: str = Field(default="", description="语料ID")  # P20: 放宽校验
+
+    # P18新增：修正后的三元组（方向错误、关系类型错误）
+    corrected_triples: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="修正后的三元组（修正方向错误、关系类型错误）",
+    )
+
+    # 校验通过的三元组（无需修正）
     verified_triples: List[Dict[str, Any]] = Field(
         default_factory=list, description="校验通过的三元组"
     )
+
+    # P18新增：拒绝的三元组（幻觉、严重错误无法修正）
+    rejected_triples: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="拒绝的三元组（幻觉、严重错误无法修正）",
+    )
+
+    # P18新增：修正记录
+    correction_records: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="修正记录：[{original, corrected, action, reason}]",
+    )
+
     score_consistency: str = Field(
         default="medium", description="评分一致性: high/medium/low"
     )
@@ -1938,15 +2132,46 @@ class BatchLabelResult(BaseModel):
 
 
 class BatchSelfCheckLabelCorpusResult(BaseModel):
-    """单条语料的标注校验结果"""
+    """单条语料的标注校验结果（P18改进：支持修正型校验）
 
-    corpus_id: str = Field(description="语料ID")
+    改进点：添加 corrected_entity_attrs、corrected_relation_attrs、rejected_*_attrs
+    P20改进：放宽校验
+    """
+
+    model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
+
+    corpus_id: str = Field(default="", description="语料ID")  # P20: 放宽校验
+
+    # P18新增：修正后的实体属性（类型修正、属性补全）
+    corrected_entity_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="修正后的实体属性（类型修正、补全缺失属性）",
+    )
+
+    # P18新增：修正后的关系属性
+    corrected_relation_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="修正后的关系属性（属性值修正）",
+    )
+
+    # 校验通过的属性（无需修正）
     verified_entity_attrs: Dict[str, Dict[str, Any]] = Field(
         default_factory=dict, description="校验通过的实体属性"
     )
     verified_relation_attrs: Dict[str, Dict[str, Any]] = Field(
         default_factory=dict, description="校验通过的关系属性"
     )
+
+    # P18新增：拒绝的属性键（无依据、不合理）
+    rejected_entity_attrs: List[str] = Field(
+        default_factory=list,
+        description="拒绝的实体属性键（无依据、不合理）",
+    )
+    rejected_relation_attrs: List[str] = Field(
+        default_factory=list,
+        description="拒绝的关系属性键（无依据、不合理）",
+    )
+
     attr_completeness: str = Field(
         default="medium", description="属性完整性: high/medium/low"
     )
@@ -2272,4 +2497,35 @@ class MentorQuery(BaseModel):
     source_node: str = Field(default="", description="发起查询的节点名称")
     context: str = Field(
         default="", description="查询上下文：当前的抽取/评估/标注结果摘要"
+    )
+
+
+class BatchMentorQueryItem(BaseModel):
+    """批量导师查询中的单条响应项"""
+
+    corpus_id: str = Field(description="语料ID")
+    answer: str = Field(default="", description="导师回答")
+    clarification: str = Field(default="", description="澄清说明")
+    recommendation: str = Field(default="", description="推荐处理方案")
+    updated_entity_hints: List[str] = Field(
+        default_factory=list, description="更新的实体提示列表"
+    )
+    updated_relation_hints: List[str] = Field(
+        default_factory=list, description="更新的关系提示列表"
+    )
+    response_confidence: str = Field(
+        default="medium", description="响应置信度: high/medium/low"
+    )
+    suggests_revision: bool = Field(default=False, description="是否建议修改")
+    return_to_node: str = Field(default="eval", description="返回目标节点")
+
+
+class BatchMentorQueryResponse(BaseModel):
+    """批量导师查询响应"""
+
+    results: List[BatchMentorQueryItem] = Field(
+        default_factory=list, description="每条语料对应的导师响应"
+    )
+    overall_confidence: str = Field(
+        default="medium", description="整体置信度: high/medium/low"
     )

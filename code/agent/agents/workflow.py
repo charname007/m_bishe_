@@ -658,7 +658,11 @@ def create_config_init_node(enable_normalize: bool, enable_qa_scaffold: bool, en
 
 def route_after_joint_extraction(state: CorpusState) -> str:
     """Joint_NER_RE 后路由"""
-    if state.get("error"):
+    # 仅当当前节点没有产出结果时，才将 error 视为本步骤失败。
+    # 避免上游历史 error 残留导致误路由。
+    joint_result = state.get("joint_extraction_result", {})
+    triples = state.get("triples", [])
+    if state.get("error") and not joint_result and not triples:
         logger.warning(f"[Joint-Route] 有错误，跳转到 Eval")
         return "eval"
     return "self_check_joint"
@@ -666,15 +670,14 @@ def route_after_joint_extraction(state: CorpusState) -> str:
 
 def route_after_self_check_joint(state: CorpusState) -> str:
     """Self-Check-Joint 后路由 - Reflexion驱动的重试"""
-
-    if state.get("error"):
+    check_result = state.get("self_check_joint_result", {})
+    if state.get("error") and not check_result:
         logger.warning(f"[Self-Check-Joint-Route] 有错误，跳转到 END")
         return END
 
     retry_count = state.get("retry_count", 0)
     max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
 
-    check_result = state.get("self_check_joint_result", {})
     retry_suggested = check_result.get("retry_suggested", False)
     confidence = check_result.get("overall_confidence", "medium")
 
@@ -696,12 +699,11 @@ def route_after_self_check_joint(state: CorpusState) -> str:
 
 def route_after_self_check_qa(state: CorpusState) -> str:
     """Self-Check-QA 后路由"""
-
-    if state.get("error"):
+    check_result = state.get("self_check_qa_result", {})
+    if state.get("error") and not check_result:
         logger.warning(f"[Self-Check-QA-Route] 有错误，继续到联合抽取")
         return "joint_ner_re"
 
-    check_result = state.get("self_check_qa_result", {})
     retry_suggested = check_result.get("retry_suggested", False)
     retry_count = state.get("retry_count", 0)
     max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
@@ -721,12 +723,11 @@ def route_after_self_check_qa(state: CorpusState) -> str:
 
 def route_after_self_check_eval(state: CorpusState) -> str:
     """Self-Check-Eval 后路由"""
-
-    if state.get("error"):
+    check_result = state.get("self_check_eval_result", {})
+    if state.get("error") and not check_result:
         logger.warning(f"[Self-Check-Eval-Route] 有错误，继续到Label")
         return "label"
 
-    check_result = state.get("self_check_eval_result", {})
     retry_suggested = check_result.get("retry_suggested", False)
     retry_count = state.get("retry_count", 0)
     max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
@@ -758,8 +759,9 @@ def route_after_self_check_label(state: CorpusState) -> str:
     """
     # P15修复：从配置标记字段获取是否启用实体对齐
     enable_entity_alignment = state.get("_config_enable_entity_alignment", False)
+    check_result = state.get("self_check_label_result", {})
 
-    if state.get("error"):
+    if state.get("error") and not check_result:
         # 错误时根据配置决定下一步
         if enable_entity_alignment:
             logger.warning(f"[Self-Check-Label-Route] 有错误，但继续到实体对齐")
@@ -767,7 +769,6 @@ def route_after_self_check_label(state: CorpusState) -> str:
         logger.warning(f"[Self-Check-Label-Route] 有错误，结束")
         return END
 
-    check_result = state.get("self_check_label_result", {})
     retry_suggested = check_result.get("retry_suggested", False)
     retry_count = state.get("retry_count", 0)
     max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
@@ -938,6 +939,24 @@ LLM_RETRY_POLICY = RetryPolicy(
     jitter=True,               # 添加随机抖动防止雪崩
     retry_on=_should_retry_llm
 )
+
+
+# P19新增：预处理完成路由函数
+def route_start_preprocessing(state: CorpusState) -> str:
+    """
+    START 路由：判断是否跳过预处理
+
+    P19新增：当 corpus 已包含预处理结果时，直接跳到联合抽取
+
+    Returns:
+        "joint_ner_re" - 预处理已完成，直接开始抽取
+        "filter" / "normalize" / "qa_scaffold" - 需要预处理
+    """
+    if state.get("_preprocessing_completed"):
+        logger.info(f"[Start-Route] 语料 {state.get('corpus_id')} 预处理已完成，跳到联合抽取")
+        return "joint_ner_re"
+    # 默认走预处理流程
+    return "filter"
 
 
 def build_corpus_workflow(
@@ -1113,9 +1132,19 @@ def build_corpus_workflow(
             else:
                 if need_config_init:
                     builder.add_edge(START, "config_init")
-                    builder.add_edge("config_init", "filter")
+                    # P19改进：config_init 后使用条件路由判断是否跳过预处理
+                    builder.add_conditional_edges(
+                        "config_init",
+                        route_start_preprocessing,
+                        {"filter": "filter", "joint_ner_re": "joint_ner_re"}
+                    )
                 else:
-                    builder.add_edge(START, "filter")
+                    # P19改进：START 使用条件路由判断是否跳过预处理
+                    builder.add_conditional_edges(
+                        START,
+                        route_start_preprocessing,
+                        {"filter": "filter", "joint_ner_re": "joint_ner_re"}
+                    )
                 builder.add_conditional_edges("filter", route_after_filter_to_normalize)
 
             # Normalize → Self-Check-Normalize → QA_Scaffold
@@ -1485,7 +1514,8 @@ def build_corpus_workflow(
 
 def build_distributed_workflow(
     llm: Any,
-    config: Optional[ExtractionConfig] = None
+    config: Optional[ExtractionConfig] = None,
+    qa_llm: Any = None,
 ) -> CompiledStateGraph:
     """
     构建分布式知识图谱构建工作流
@@ -1501,6 +1531,7 @@ def build_distributed_workflow(
         config: ExtractionConfig 配置实例，默认使用 DEFAULT_CONFIG
     """
     config = config or DEFAULT_CONFIG
+    qa_llm = qa_llm or llm
 
     # 创建节点函数
     coordinator_node = create_coordinator_node(config.corpus_per_worker, config.max_workers)
@@ -1527,6 +1558,34 @@ def build_distributed_workflow(
         prompt_version=config.prompt_version,  # P15修复：传递提示词版本
     )
 
+    mentor_workflow = None
+    mentor_resume_workflows: Dict[str, Any] = {}
+    if config.enable_qa_mentor:
+        mentor_workflow = build_qa_mentor_workflow(
+            qa_llm=qa_llm,
+            worker_llm=llm,
+            config=config,
+            enable_bidirectional_query=True,
+        )
+
+        # P18修复：按节点恢复的导师工作流
+        # 目前三类恢复都走“去前置节点”的同一导师图，
+        # 通过 initial_state.query_source_node + mentor_query 实现从困惑节点恢复。
+        resume_config = ExtractionConfig.from_dict(config.to_dict())
+        resume_config.enable_filter = False
+        resume_config.enable_normalize = False
+        resume_config.enable_qa_scaffold = False
+
+        resume_workflow = build_qa_mentor_workflow(
+            qa_llm=qa_llm,
+            worker_llm=llm,
+            config=resume_config,
+            enable_bidirectional_query=True,
+        )
+        mentor_resume_workflows["joint_ner_re"] = resume_workflow
+        mentor_resume_workflows["eval"] = resume_workflow
+        mentor_resume_workflows["label"] = resume_workflow
+
     # P7改进：并发控制 - 防止API限流（从配置读取）
     max_concurrent = config.max_concurrent_corpus
 
@@ -1546,14 +1605,28 @@ def build_distributed_workflow(
         batch_llm_size = config.batch_llm_size
         enable_batch_llm = config.enable_batch_llm
         batch_llm_fallback = config.batch_llm_fallback
+        enable_qa_mentor = config.enable_qa_mentor
+
+        if enable_qa_mentor and enable_batch_llm:
+            logger.info("[Workers] QA导师 + batch_llm 并行模式: batch主处理, fallback走导师流程")
 
         if enable_batch_llm:
             logger.info(f"[Workers] 批量LLM模式: 每次处理 {batch_llm_size} 条语料")
         else:
             logger.info(f"[Workers] 单条处理模式: 最大 {max_concurrent} 条语料同时处理")
 
-        async def process_corpus(corpus: Dict) -> Dict:
-            """处理单条语料（原有逻辑，用于fallback）"""
+        async def process_corpus(
+            corpus: Dict,
+            mentor_query: Optional[Dict] = None,
+            query_source_node: Optional[str] = None,
+            skip_preprocessing: bool = False,  # P19新增：跳过预处理（用于 fallback）
+        ) -> Dict:
+            """处理单条语料（原有逻辑，用于fallback）
+
+            P19改进：支持 skip_preprocessing 参数
+            - 当 corpus 已包含预处理结果（normalized_text, entity_hints 等）时
+            - 可跳过 Filter/Normalize/QA_Scaffold，直接从 Joint_NER_RE 开始
+            """
             try:
                 # 验证输入 - P2改进：传入配置
                 corpus_id = _validate_corpus_id(corpus.get("id"))
@@ -1564,10 +1637,54 @@ def build_distributed_workflow(
                     corpus_id=corpus_id,
                     raw_text=raw_text,
                     max_retries=config.self_check_max_retries,
+                    enable_normalize=config.enable_normalize and not skip_preprocessing,
+                    enable_qa_scaffold=config.enable_qa_scaffold and not skip_preprocessing,
+                    enable_entity_alignment=config.enable_entity_alignment,
+                    max_revision_cycles=config.max_revision_cycles,
                 )
+
+                # P19新增：如果 corpus 包含预处理结果，直接注入到 initial_state
+                if skip_preprocessing or corpus.get("normalized_text"):
+                    # 注入预处理结果
+                    initial_state["normalized_text"] = corpus.get("normalized_text", raw_text)
+                    initial_state["qa_entity_hints"] = corpus.get("entity_hints", [])
+                    initial_state["qa_relation_hints"] = corpus.get("relation_hints", [])
+                    initial_state["qa_context_dependencies"] = corpus.get("context_dependencies", [])
+                    initial_state["semantic_summary"] = corpus.get("semantic_summary", "")
+                    # 标记预处理已完成
+                    initial_state["_preprocessing_completed"] = True
+                    logger.info(f"[Fallback] 语料 {corpus_id} 使用预处理结果，跳过 Filter/Normalize/QA_Scaffold")
+
+                if mentor_query and query_source_node:
+                    initial_state["mentor_query"] = mentor_query
+                    initial_state["query_source_node"] = query_source_node
+                    initial_state["needs_mentor_help"] = True
+
+                selected_mentor_workflow = mentor_workflow
+                if mentor_query and query_source_node and mentor_resume_workflows:
+                    selected_mentor_workflow = mentor_resume_workflows.get(
+                        query_source_node, mentor_workflow
+                    )
+                # P19修复：fallback要求跳过前置节点时，强制使用resume导师工作流（从joint/eval/label恢复）
+                if skip_preprocessing and mentor_resume_workflows:
+                    selected_mentor_workflow = mentor_resume_workflows.get(
+                        query_source_node or "joint_ner_re", selected_mentor_workflow
+                    )
                 # 为每条语料生成唯一的 thread_id，避免并发状态串扰
-                thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
-                result = await corpus_workflow.ainvoke(initial_state, thread_config)  # type: ignore
+                if enable_qa_mentor and selected_mentor_workflow is not None:
+                    thread_config = {
+                        "configurable": {
+                            "thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"
+                        }
+                    }
+                    result = await selected_mentor_workflow.ainvoke(initial_state, thread_config)  # type: ignore
+                else:
+                    thread_config = {
+                        "configurable": {
+                            "thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"
+                        }
+                    }
+                    result = await corpus_workflow.ainvoke(initial_state, thread_config)  # type: ignore
                 return result
             except ValueError as e:
                 # 输入验证错误
@@ -1601,7 +1718,35 @@ def build_distributed_workflow(
                 create_batch_self_check_node,
                 process_corpus_batch_with_llm,
                 process_batch_preprocessing,  # P15新增：批量预处理
+                create_batch_entity_alignment_node,  # P21新增：批量实体对齐
             )
+
+            skipped_results = []
+            fallback_results = []
+
+            async def run_single_with_optional_mentor(
+                corpus: Dict,
+                mentor_query: Optional[Dict] = None,
+                query_source_node: Optional[str] = None,
+            ) -> Dict:
+                """单条处理入口：开启导师模式时走导师双向交流流程。
+
+                P19改进：如果 corpus 包含预处理结果，跳过预处理节点
+                """
+                # P19新增：检测是否有预处理结果
+                has_preprocessing = bool(
+                    corpus.get("normalized_text")
+                    or corpus.get("entity_hints")
+                    or corpus.get("relation_hints")
+                    or corpus.get("context_dependencies")
+                    or corpus.get("semantic_summary")
+                )
+                return await process_corpus(
+                    corpus,
+                    mentor_query=mentor_query,
+                    query_source_node=query_source_node,
+                    skip_preprocessing=has_preprocessing,
+                )
 
             try:
                 # P15新增：批量预处理（Filter → Normalize → QA_Scaffold）
@@ -1621,7 +1766,6 @@ def build_distributed_workflow(
                     fallback_corpus = preprocessing_result.get("fallback_corpus", [])
 
                     # 被跳过的语料，返回空结果
-                    skipped_results = []
                     for corpus in skipped_corpus:
                         skipped_results.append({
                             "corpus_id": corpus.get("id"),
@@ -1635,12 +1779,9 @@ def build_distributed_workflow(
                     # 需要fallback的语料（预处理失败）
                     if batch_llm_fallback and fallback_corpus:
                         logger.info(f"[Batch_Preprocessing] Fallback处理 {len(fallback_corpus)} 条预处理失败的语料")
-                        fallback_results = []
                         for corpus in fallback_corpus:
-                            single_result = await process_corpus(corpus)
+                            single_result = await run_single_with_optional_mentor(corpus)
                             fallback_results.append(single_result)
-                    else:
-                        fallback_results = []
 
                     # 如果预处理后无语料，直接返回
                     if not processed_corpus:
@@ -1649,9 +1790,17 @@ def build_distributed_workflow(
                     # 更新语料列表为预处理后的语料
                     corpus_list = processed_corpus
 
+                # P21新增：创建批量实体对齐节点（如果启用）
+                batch_entity_alignment_node = None
+                if getattr(config, "enable_entity_alignment", False):
+                    batch_entity_alignment_node = create_batch_entity_alignment_node(llm)
+                    logger.info("[Batch] 实体对齐节点已创建")
+
                 # 使用批量处理（联合抽取）
                 batch_result = await process_corpus_batch_with_llm(
-                    llm, corpus_list, config,
+                    llm, corpus_list, config, 
+                    batch_entity_alignment_node=batch_entity_alignment_node,
+                    qa_llm=qa_llm,
                 )
 
                 results = []
@@ -1676,12 +1825,25 @@ def build_distributed_workflow(
                     }
                     results.append(result)
 
-                # 处理fallback的语料（单条处理）
+                # P18改进：批内样本导师升级
+                # 目标：即使在 batch_llm 模式下，每条样本在 Joint/Eval/Label 任一步出现困惑时，
+                #      都能主动回问导师（通过升级为导师单条流实现）。
+                # 批内导师交互已在 process_corpus_batch_with_llm 内完成
+
                 if batch_llm_fallback and batch_result["needs_single_processing"]:
                     fallback_corpus = batch_result["fallback_corpus_list"]
                     logger.info(f"[Batch] Fallback处理 {len(fallback_corpus)} 条语料")
                     for corpus in fallback_corpus:
-                        single_result = await process_corpus(corpus)
+                        single_result = await run_single_with_optional_mentor(corpus)
+                        results.append(single_result)
+
+                # 漏项保护：确保本批输入语料都有输出结果
+                result_ids = {str(r.get("corpus_id")) for r in results}
+                missing_corpus = [c for c in corpus_list if str(c.get("id")) not in result_ids]
+                if missing_corpus:
+                    logger.warning(f"[Batch] 检测到 {len(missing_corpus)} 条语料无结果，自动转单条补处理")
+                    for corpus in missing_corpus:
+                        single_result = await run_single_with_optional_mentor(corpus)
                         results.append(single_result)
 
                 # 合并预处理跳过的结果
@@ -1695,7 +1857,7 @@ def build_distributed_workflow(
                     logger.warning(f"[Batch] 退化为单条处理")
                     results = []
                     for corpus in corpus_list:
-                        single_result = await process_corpus(corpus)
+                        single_result = await run_single_with_optional_mentor(corpus)
                         results.append(single_result)
                     return results
                 else:
@@ -2339,25 +2501,29 @@ def route_joint_to_mentor_or_eval(state: CorpusState) -> str:
 
 
 def route_eval_to_mentor_or_label(state: CorpusState) -> str:
-    """Eval 后路由 - 可向导师求助
-
-    P14新增：如果检测到困惑且未超过最大查询次数，回退到 QA_Mentor
-    """
+    """Eval 路由：导师咨询优先，评估失败回抽取，正常进标注。"""
     needs_mentor_help = state.get("needs_mentor_help", False)
     query_count = state.get("query_count", 0)
     max_queries = state.get("max_queries", 2)
 
-    # 有错误时继续到 Label（保守策略）
-    if state.get("error"):
-        logger.warning(f"[Eval-Route] 有错误，跳转到 Label")
-        return "label"
-
-    # 需要导师帮助且未超过最大查询次数
     if needs_mentor_help and query_count < max_queries:
-        logger.info(f"[Eval-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        logger.info(
+            f"[Eval-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})"
+        )
         return "qa_mentor"
 
-    # 正常继续到 Label
+    eval_passed = state.get("eval_passed", True)
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", DEFAULT_MAX_RETRIES)
+    if not eval_passed and retry_count < max_retries:
+        logger.info(
+            f"[Eval-Route] eval未通过，回到 joint_ner_re 重抽 ({retry_count}/{max_retries})"
+        )
+        return "joint_ner_re"
+
+    if state.get("error"):
+        logger.warning(f"[Eval-Route] 评估异常，转到 Label 兜底")
+
     return "label"
 
 
@@ -2507,8 +2673,9 @@ def build_qa_mentor_workflow(
             "eval",
             route_eval_to_mentor_or_label,
             {
-                "qa_mentor": "qa_mentor",  # 需要帮助时回退到导师
-                "label": "label",          # 正常继续
+                "qa_mentor": "qa_mentor",  # 需要帮助时回导师
+                "joint_ner_re": "joint_ner_re",  # eval不通过回抽取
+                "label": "label",  # 正常进入标注
             }
         )
     else:
