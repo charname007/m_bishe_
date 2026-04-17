@@ -1,6 +1,7 @@
 """
 Neo4j 图数据库客户端
 """
+
 import json
 from collections import defaultdict
 from typing import Dict, List, Optional, Any
@@ -54,10 +55,15 @@ class Neo4jClient:
             }
         """
         # 将 attrs 转为 JSON 字符串存储（Neo4j 不原生支持 JSONB）
-        attrs_json = json.dumps(entity.get("attrs", {}), ensure_ascii=False) if entity.get("attrs") else ""
+        attrs_json = (
+            json.dumps(entity.get("attrs", {}), ensure_ascii=False)
+            if entity.get("attrs")
+            else ""
+        )
 
         with self.driver.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MERGE (e:Entity {name: $name})
                 ON CREATE SET
                     e.type = $type,
@@ -70,13 +76,13 @@ class Neo4jClient:
                 ON MATCH SET
                     e.aliases = CASE
                         WHEN $aliases IS NOT NULL AND size($aliases) > 0
-                        THEN coll.distinct(e.aliases + $aliases)
-                        ELSE e.aliases
+                        THEN coll.distinct(coalesce(e.aliases, []) + $aliases)
+                        ELSE coalesce(e.aliases, [])
                     END,
                     e.corpus_ids = CASE
                         WHEN $corpus_ids IS NOT NULL AND size($corpus_ids) > 0
-                        THEN coll.distinct(e.corpus_ids + $corpus_ids)
-                        ELSE e.corpus_ids
+                        THEN coll.distinct(coalesce(e.corpus_ids, []) + $corpus_ids)
+                        ELSE coalesce(e.corpus_ids, [])
                     END,
                     e.attrs = CASE
                         WHEN $attrs IS NOT NULL AND $attrs <> '' AND $attrs <> '{}'
@@ -91,7 +97,7 @@ class Neo4jClient:
                 category=entity.get("category", ""),
                 aliases=entity.get("aliases", []),
                 corpus_ids=entity.get("corpus_ids", []),
-                attrs=attrs_json
+                attrs=attrs_json,
             )
             return result.single() is not None
 
@@ -112,11 +118,16 @@ class Neo4jClient:
             }
         """
         # 将 relation_attrs 转为 JSON 字符串存储（Neo4j 不原生支持 JSONB）
-        relation_attrs_json = json.dumps(triple.get("relation_attrs", {}), ensure_ascii=False) if triple.get("relation_attrs") else ""
+        relation_attrs_json = (
+            json.dumps(triple.get("relation_attrs", {}), ensure_ascii=False)
+            if triple.get("relation_attrs")
+            else ""
+        )
 
         with self.driver.session() as session:
             # 先确保头尾实体存在（设置基本属性避免空壳实体）
-            session.run("""
+            session.run(
+                """
                 MERGE (e1:Entity {name: $head})
                 ON CREATE SET
                     e1.type = 'Unknown',
@@ -133,10 +144,14 @@ class Neo4jClient:
                     e2.corpus_ids = [],
                     e2.created_at = datetime(),
                     e2.source = 'xiaohongshu'
-            """, head=triple["head"], tail=triple["tail"])
+            """,
+                head=triple["head"],
+                tail=triple["tail"],
+            )
 
             # 创建关系
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (h:Entity {name: $head})
                 MATCH (t:Entity {name: $tail})
                 MERGE (h)-[r:RELATION {type: $relation}]->(t)
@@ -151,8 +166,8 @@ class Neo4jClient:
                 ON MATCH SET
                     r.corpus_ids = CASE
                         WHEN $corpus_ids IS NOT NULL AND size($corpus_ids) > 0
-                        THEN coll.distinct(r.corpus_ids + $corpus_ids)
-                        ELSE r.corpus_ids
+                        THEN coll.distinct(coalesce(r.corpus_ids, []) + $corpus_ids)
+                        ELSE coalesce(r.corpus_ids, [])
                     END,
                     r.relation_type = CASE
                         WHEN $relation_type IS NOT NULL AND $relation_type <> ''
@@ -179,7 +194,7 @@ class Neo4jClient:
                 corpus_ids=triple.get("corpus_ids", []),
                 relation_type=triple.get("relation_type", ""),
                 relation_subtype=triple.get("relation_subtype", ""),
-                relation_attrs=relation_attrs_json
+                relation_attrs=relation_attrs_json,
             )
             return result.single() is not None
 
@@ -201,10 +216,10 @@ class Neo4jClient:
         # P15改进：按实体类型分组
         GEO_TYPES = {"道路", "POI", "建筑物", "街区"}
         groups = {
-            "geo_entity_node": [],      # 地理实体
-            "FunctionNode": [],         # 功能实体
-            "EventNode": [],            # 事件实体
-            "Entity": [],               # 其他/Unknown
+            "geo_entity_node": [],  # 地理实体
+            "FunctionNode": [],  # 功能实体
+            "EventNode": [],  # 事件实体
+            "Entity": [],  # 其他/Unknown
         }
 
         for e in entities:
@@ -231,11 +246,14 @@ class Neo4jClient:
                             "category": e.get("category", ""),
                             "aliases": e.get("aliases", []),
                             "corpus_ids": e.get("corpus_ids", []),
-                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False)
+                            if e.get("attrs")
+                            else "",
                         }
                         for e in groups["geo_entity_node"]
                     ]
-                    result = session.run("""
+                    result = session.run(
+                        """
                         UNWIND $entities AS entity
                         MERGE (e:geo_entity_node:Entity {name: entity.name})
                         ON CREATE SET
@@ -249,13 +267,13 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN coll.distinct(e.aliases + entity.aliases)
-                                ELSE e.aliases
+                                THEN coll.distinct(coalesce(e.aliases, []) + entity.aliases)
+                                ELSE coalesce(e.aliases, [])
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
-                                ELSE e.corpus_ids
+                                THEN coll.distinct(coalesce(e.corpus_ids, []) + entity.corpus_ids)
+                                ELSE coalesce(e.corpus_ids, [])
                             END,
                             e.attrs = CASE
                                 WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
@@ -264,7 +282,9 @@ class Neo4jClient:
                             END,
                             e.updated_at = datetime()
                         RETURN count(e) as merged_count
-                    """, entities=batch_data)
+                    """,
+                        entities=batch_data,
+                    )
                     record = result.single()
                     total_merged += record["merged_count"] if record else 0
 
@@ -277,11 +297,14 @@ class Neo4jClient:
                             "category": e.get("category", ""),
                             "aliases": e.get("aliases", []),
                             "corpus_ids": e.get("corpus_ids", []),
-                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False)
+                            if e.get("attrs")
+                            else "",
                         }
                         for e in groups["FunctionNode"]
                     ]
-                    result = session.run("""
+                    result = session.run(
+                        """
                         UNWIND $entities AS entity
                         MERGE (e:FunctionNode:Entity {name: entity.name})
                         ON CREATE SET
@@ -295,13 +318,13 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN coll.distinct(e.aliases + entity.aliases)
-                                ELSE e.aliases
+                                THEN coll.distinct(coalesce(e.aliases, []) + entity.aliases)
+                                ELSE coalesce(e.aliases, [])
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
-                                ELSE e.corpus_ids
+                                THEN coll.distinct(coalesce(e.corpus_ids, []) + entity.corpus_ids)
+                                ELSE coalesce(e.corpus_ids, [])
                             END,
                             e.attrs = CASE
                                 WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
@@ -310,7 +333,9 @@ class Neo4jClient:
                             END,
                             e.updated_at = datetime()
                         RETURN count(e) as merged_count
-                    """, entities=batch_data)
+                    """,
+                        entities=batch_data,
+                    )
                     record = result.single()
                     total_merged += record["merged_count"] if record else 0
 
@@ -323,11 +348,14 @@ class Neo4jClient:
                             "category": e.get("category", ""),
                             "aliases": e.get("aliases", []),
                             "corpus_ids": e.get("corpus_ids", []),
-                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False)
+                            if e.get("attrs")
+                            else "",
                         }
                         for e in groups["EventNode"]
                     ]
-                    result = session.run("""
+                    result = session.run(
+                        """
                         UNWIND $entities AS entity
                         MERGE (e:EventNode:Entity {name: entity.name})
                         ON CREATE SET
@@ -341,13 +369,13 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN coll.distinct(e.aliases + entity.aliases)
-                                ELSE e.aliases
+                                THEN coll.distinct(coalesce(e.aliases, []) + entity.aliases)
+                                ELSE coalesce(e.aliases, [])
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
-                                ELSE e.corpus_ids
+                                THEN coll.distinct(coalesce(e.corpus_ids, []) + entity.corpus_ids)
+                                ELSE coalesce(e.corpus_ids, [])
                             END,
                             e.attrs = CASE
                                 WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
@@ -356,7 +384,9 @@ class Neo4jClient:
                             END,
                             e.updated_at = datetime()
                         RETURN count(e) as merged_count
-                    """, entities=batch_data)
+                    """,
+                        entities=batch_data,
+                    )
                     record = result.single()
                     total_merged += record["merged_count"] if record else 0
 
@@ -369,11 +399,14 @@ class Neo4jClient:
                             "category": e.get("category", ""),
                             "aliases": e.get("aliases", []),
                             "corpus_ids": e.get("corpus_ids", []),
-                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False) if e.get("attrs") else ""
+                            "attrs": json.dumps(e.get("attrs", {}), ensure_ascii=False)
+                            if e.get("attrs")
+                            else "",
                         }
                         for e in groups["Entity"]
                     ]
-                    result = session.run("""
+                    result = session.run(
+                        """
                         UNWIND $entities AS entity
                         MERGE (e:Entity {name: entity.name})
                         ON CREATE SET
@@ -387,13 +420,13 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN coll.distinct(e.aliases + entity.aliases)
-                                ELSE e.aliases
+                                THEN coll.distinct(coalesce(e.aliases, []) + entity.aliases)
+                                ELSE coalesce(e.aliases, [])
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
-                                ELSE e.corpus_ids
+                                THEN coll.distinct(coalesce(e.corpus_ids, []) + entity.corpus_ids)
+                                ELSE coalesce(e.corpus_ids, [])
                             END,
                             e.attrs = CASE
                                 WHEN entity.attrs IS NOT NULL AND entity.attrs <> '' AND entity.attrs <> '{}'
@@ -402,11 +435,15 @@ class Neo4jClient:
                             END,
                             e.updated_at = datetime()
                         RETURN count(e) as merged_count
-                    """, entities=batch_data)
+                    """,
+                        entities=batch_data,
+                    )
                     record = result.single()
                     total_merged += record["merged_count"] if record else 0
 
-                logger.info(f"实体合并完成: {total_merged}/{len(entities)} (geo={len(groups['geo_entity_node'])}, func={len(groups['FunctionNode'])}, event={len(groups['EventNode'])}, other={len(groups['Entity'])})")
+                logger.info(
+                    f"实体合并完成: {total_merged}/{len(entities)} (geo={len(groups['geo_entity_node'])}, func={len(groups['FunctionNode'])}, event={len(groups['EventNode'])}, other={len(groups['Entity'])})"
+                )
                 return {"merged": total_merged, "total": len(entities)}
         except Exception as e:
             logger.error(f"批量合并实体失败: {e}")
@@ -455,7 +492,11 @@ class Neo4jClient:
                             "corpus_ids": t.get("corpus_ids", []),
                             "relation_type": t.get("relation_type", ""),
                             "relation_subtype": t.get("relation_subtype", ""),
-                            "relation_attrs": json.dumps(t.get("relation_attrs", {}), ensure_ascii=False) if t.get("relation_attrs") else ""
+                            "relation_attrs": json.dumps(
+                                t.get("relation_attrs", {}), ensure_ascii=False
+                            )
+                            if t.get("relation_attrs")
+                            else "",
                         }
                         for t in group_triples
                     ]
@@ -501,8 +542,8 @@ class Neo4jClient:
                         ON MATCH SET
                             r.corpus_ids = CASE
                                 WHEN triple.corpus_ids IS NOT NULL AND size(triple.corpus_ids) > 0
-                                THEN coll.distinct(r.corpus_ids + triple.corpus_ids)
-                                ELSE r.corpus_ids
+                                THEN coll.distinct(coalesce(r.corpus_ids, []) + triple.corpus_ids)
+                                ELSE coalesce(r.corpus_ids, [])
                             END,
                             r.relation_type = CASE
                                 WHEN triple.relation_type IS NOT NULL AND triple.relation_type <> ''
@@ -529,8 +570,14 @@ class Neo4jClient:
                     total_merged += merged_count
                     group_stats[rel_type] = merged_count
 
-                logger.info(f"关系合并完成: {total_merged}/{len(triples)} ({dict(group_stats)})")
-                return {"merged": total_merged, "total": len(triples), "groups": group_stats}
+                logger.info(
+                    f"关系合并完成: {total_merged}/{len(triples)} ({dict(group_stats)})"
+                )
+                return {
+                    "merged": total_merged,
+                    "total": len(triples),
+                    "groups": group_stats,
+                }
         except Exception as e:
             logger.error(f"批量合并关系失败: {e}")
             # 降级为逐个处理
@@ -546,10 +593,13 @@ class Neo4jClient:
     def query_entity(self, name: str) -> Optional[Dict]:
         """查询实体"""
         with self.driver.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (e:Entity {name: $name})
                 RETURN e
-            """, name=name)
+            """,
+                name=name,
+            )
             record = result.single()
             if record:
                 return dict(record["e"])
@@ -558,25 +608,29 @@ class Neo4jClient:
     def query_relations(self, entity_name: str) -> List[Dict]:
         """查询实体相关的关系"""
         with self.driver.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (e:Entity {name: $name})-[r:RELATION]-(other)
                 RETURN e.name as head, r.type as relation, other.name as tail, r.evidence as evidence
-            """, name=entity_name)
+            """,
+                name=entity_name,
+            )
             return [dict(record) for record in result]
 
     def get_stats(self) -> Dict:
         """获取统计信息"""
         with self.driver.session() as session:
-            entity_result = session.run("MATCH (e:Entity) RETURN count(e) as count").single()
-            relation_result = session.run("MATCH ()-[r:RELATION]->() RETURN count(r) as count").single()
+            entity_result = session.run(
+                "MATCH (e:Entity) RETURN count(e) as count"
+            ).single()
+            relation_result = session.run(
+                "MATCH ()-[r:RELATION]->() RETURN count(r) as count"
+            ).single()
 
             entity_count = entity_result["count"] if entity_result else 0
             relation_count = relation_result["count"] if relation_result else 0
 
-            return {
-                "entity_count": entity_count,
-                "relation_count": relation_count
-            }
+            return {"entity_count": entity_count, "relation_count": relation_count}
 
     # ===== P12新增：实体对齐相关方法 =====
 
@@ -591,7 +645,8 @@ class Neo4jClient:
             实体信息，包含 entity_id, name, type 等，或 None
         """
         with self.driver.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (e:geo_entity_node)
                 WHERE e.original_id = $original_id
                 RETURN e.entity_id as entity_id,
@@ -601,7 +656,9 @@ class Neo4jClient:
                        e.latitude as latitude,
                        e.source as source
                 LIMIT 1
-            """, original_id=original_id)
+            """,
+                original_id=original_id,
+            )
             record = result.single()
             if record:
                 return dict(record)
@@ -618,7 +675,8 @@ class Neo4jClient:
             实体信息，或 None
         """
         with self.driver.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (e:geo_entity_node)
                 WHERE e.entity_id = $entity_id
                 RETURN e.entity_id as entity_id,
@@ -628,7 +686,9 @@ class Neo4jClient:
                        e.latitude as latitude,
                        e.source as source
                 LIMIT 1
-            """, entity_id=entity_id)
+            """,
+                entity_id=entity_id,
+            )
             record = result.single()
             if record:
                 return dict(record)
@@ -671,12 +731,15 @@ class Neo4jClient:
 
             # 使用原子计数器获取新ID（避免并发冲突）
             # 计数器节点存储各类型实体的下一个编号
-            counter_result = session.run("""
+            counter_result = session.run(
+                """
                 MERGE (counter:EntityCounter {type: $prefix})
                 ON CREATE SET counter.next_id = 1
                 SET counter.next_id = counter.next_id + 1
                 RETURN counter.next_id - 1 as new_id
-            """, prefix=type_prefix)
+            """,
+                prefix=type_prefix,
+            )
 
             counter_record = counter_result.single()
             if not counter_record:
@@ -687,7 +750,8 @@ class Neo4jClient:
             new_entity_id = f"{type_prefix}_{new_id_num}"
 
             # 使用MERGE避免重复创建（如果ID已存在则跳过）
-            create_result = session.run("""
+            create_result = session.run(
+                """
                 MERGE (e:geo_entity_node:Entity {entity_id: $entity_id})
                 ON CREATE SET
                     e.name = $name,
@@ -705,33 +769,42 @@ class Neo4jClient:
                 longitude=entity.get("longitude"),
                 latitude=entity.get("latitude"),
                 aliases=entity.get("aliases", []),
-                source="xiaohongshu"
+                source="xiaohongshu",
             )
 
             created_record = create_result.single()
             if created_record and created_record["created_id"]:
                 # 验证是否是新创建的（避免并发时计数器增加但节点已存在）
                 if created_record["created_name"] == entity["name"]:
-                    logger.info(f"[Neo4j] 创建新实体: {new_entity_id} - {entity['name']}")
+                    logger.info(
+                        f"[Neo4j] 创建新实体: {new_entity_id} - {entity['name']}"
+                    )
                     return created_record["created_id"]
                 else:
                     # 节点已存在且名称不同，需要重新尝试
-                    logger.warning(f"[Neo4j] entity_id已存在: {new_entity_id}, 重新尝试")
+                    logger.warning(
+                        f"[Neo4j] entity_id已存在: {new_entity_id}, 重新尝试"
+                    )
                     # 递增计数器并重试（最多3次）
                     return self._retry_create_with_new_id(session, entity, type_prefix)
             return None
 
-    def _retry_create_with_new_id(self, session, entity: Dict, type_prefix: str, max_retries: int = 3) -> Optional[str]:
+    def _retry_create_with_new_id(
+        self, session, entity: Dict, type_prefix: str, max_retries: int = 3
+    ) -> Optional[str]:
         """重试创建实体（处理并发冲突）"""
         from datetime import datetime
 
         for attempt in range(max_retries):
             # 再次获取计数器
-            counter_result = session.run("""
+            counter_result = session.run(
+                """
                 MERGE (counter:EntityCounter {type: $prefix})
                 SET counter.next_id = counter.next_id + 1
                 RETURN counter.next_id - 1 as new_id
-            """, prefix=type_prefix)
+            """,
+                prefix=type_prefix,
+            )
 
             counter_record = counter_result.single()
             if not counter_record:
@@ -741,7 +814,8 @@ class Neo4jClient:
             new_entity_id = f"{type_prefix}_{new_id_num}"
 
             # 尝试创建
-            create_result = session.run("""
+            create_result = session.run(
+                """
                 MERGE (e:geo_entity_node:Entity {entity_id: $entity_id})
                 ON CREATE SET
                     e.name = $name,
@@ -759,7 +833,7 @@ class Neo4jClient:
                 longitude=entity.get("longitude"),
                 latitude=entity.get("latitude"),
                 aliases=entity.get("aliases", []),
-                source="xiaohongshu"
+                source="xiaohongshu",
             )
 
             created_record = create_result.single()
@@ -814,12 +888,16 @@ class Neo4jClient:
         with self.driver.session() as session:
             for type_prefix, group_entities in type_groups.items():
                 # 批量获取计数器增量
-                counter_result = session.run("""
+                counter_result = session.run(
+                    """
                     MERGE (counter:EntityCounter {type: $prefix})
                     ON CREATE SET counter.next_id = 1
                     SET counter.next_id = counter.next_id + $count
                     RETURN counter.next_id - $count as start_id
-                """, prefix=type_prefix, count=len(group_entities))
+                """,
+                    prefix=type_prefix,
+                    count=len(group_entities),
+                )
 
                 counter_record = counter_result.single()
                 if not counter_record:
@@ -832,18 +910,21 @@ class Neo4jClient:
                 batch_data = []
                 for i, entity in enumerate(group_entities):
                     entity_id = f"{type_prefix}_{start_id + i}"
-                    batch_data.append({
-                        "entity_id": entity_id,
-                        "name": entity["name"],
-                        "type": entity.get("type", "POI"),
-                        "longitude": entity.get("longitude"),
-                        "latitude": entity.get("latitude"),
-                        "aliases": entity.get("aliases", []),
-                        "source": "xiaohongshu"
-                    })
+                    batch_data.append(
+                        {
+                            "entity_id": entity_id,
+                            "name": entity["name"],
+                            "type": entity.get("type", "POI"),
+                            "longitude": entity.get("longitude"),
+                            "latitude": entity.get("latitude"),
+                            "aliases": entity.get("aliases", []),
+                            "source": "xiaohongshu",
+                        }
+                    )
 
                 # 使用UNWIND批量创建
-                create_result = session.run("""
+                create_result = session.run(
+                    """
                     UNWIND $batch AS node
                     MERGE (e:geo_entity_node:Entity {entity_id: node.entity_id})
                     ON CREATE SET
@@ -855,7 +936,9 @@ class Neo4jClient:
                         e.source = node.source,
                         e.created_at = datetime()
                     RETURN e.entity_id as created_id, e.name as created_name
-                """, batch=batch_data)
+                """,
+                    batch=batch_data,
+                )
 
                 # 收集创建成功的ID
                 for record in create_result:
@@ -870,7 +953,9 @@ class Neo4jClient:
                         if record["created_name"] == expected_name:
                             created_ids.append(record["created_id"])
                         else:
-                            logger.warning(f"[Neo4j] entity_id已被占用: {record['created_id']}")
+                            logger.warning(
+                                f"[Neo4j] entity_id已被占用: {record['created_id']}"
+                            )
 
         logger.info(f"[Neo4j] 批量创建完成: {len(created_ids)}/{len(entities)}")
         return {"created": len(created_ids), "entity_ids": created_ids}
