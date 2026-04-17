@@ -70,12 +70,12 @@ class Neo4jClient:
                 ON MATCH SET
                     e.aliases = CASE
                         WHEN $aliases IS NOT NULL AND size($aliases) > 0
-                        THEN apoc.coll.toSet(e.aliases + $aliases)
+                        THEN coll.distinct(e.aliases + $aliases)
                         ELSE e.aliases
                     END,
                     e.corpus_ids = CASE
                         WHEN $corpus_ids IS NOT NULL AND size($corpus_ids) > 0
-                        THEN apoc.coll.toSet(e.corpus_ids + $corpus_ids)
+                        THEN coll.distinct(e.corpus_ids + $corpus_ids)
                         ELSE e.corpus_ids
                     END,
                     e.attrs = CASE
@@ -151,7 +151,7 @@ class Neo4jClient:
                 ON MATCH SET
                     r.corpus_ids = CASE
                         WHEN $corpus_ids IS NOT NULL AND size($corpus_ids) > 0
-                        THEN apoc.coll.toSet(r.corpus_ids + $corpus_ids)
+                        THEN coll.distinct(r.corpus_ids + $corpus_ids)
                         ELSE r.corpus_ids
                     END,
                     r.relation_type = CASE
@@ -249,12 +249,12 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                THEN coll.distinct(e.aliases + entity.aliases)
                                 ELSE e.aliases
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
                                 ELSE e.corpus_ids
                             END,
                             e.attrs = CASE
@@ -295,12 +295,12 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                THEN coll.distinct(e.aliases + entity.aliases)
                                 ELSE e.aliases
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
                                 ELSE e.corpus_ids
                             END,
                             e.attrs = CASE
@@ -341,12 +341,12 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                THEN coll.distinct(e.aliases + entity.aliases)
                                 ELSE e.aliases
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
                                 ELSE e.corpus_ids
                             END,
                             e.attrs = CASE
@@ -387,12 +387,12 @@ class Neo4jClient:
                         ON MATCH SET
                             e.aliases = CASE
                                 WHEN entity.aliases IS NOT NULL AND size(entity.aliases) > 0
-                                THEN apoc.coll.toSet(e.aliases + entity.aliases)
+                                THEN coll.distinct(e.aliases + entity.aliases)
                                 ELSE e.aliases
                             END,
                             e.corpus_ids = CASE
                                 WHEN entity.corpus_ids IS NOT NULL AND size(entity.corpus_ids) > 0
-                                THEN apoc.coll.toSet(e.corpus_ids + entity.corpus_ids)
+                                THEN coll.distinct(e.corpus_ids + entity.corpus_ids)
                                 ELSE e.corpus_ids
                             END,
                             e.attrs = CASE
@@ -501,7 +501,7 @@ class Neo4jClient:
                         ON MATCH SET
                             r.corpus_ids = CASE
                                 WHEN triple.corpus_ids IS NOT NULL AND size(triple.corpus_ids) > 0
-                                THEN apoc.coll.toSet(r.corpus_ids + triple.corpus_ids)
+                                THEN coll.distinct(r.corpus_ids + triple.corpus_ids)
                                 ELSE r.corpus_ids
                             END,
                             r.relation_type = CASE
