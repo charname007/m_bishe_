@@ -1328,6 +1328,66 @@ class JointExtractionResult(BaseModel):
         default="joint", description="抽取策略标识：joint/pipeline"
     )
 
+    @model_validator(mode="after")
+    def validate_triple_entities(self):
+        """验证三元组的head/tail是否为合法实体，清理无效三元组
+
+        P15新增：防止人物相关词（如"男生/女生"）被错误抽取为三元组头尾
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        # 收集合法实体名称
+        valid_entity_names = {e.name for e in self.entities}
+
+        # 收集合法功能节点（FunctionEnum值）
+        valid_function_nodes = {f.value for f in FunctionEnum}
+
+        # 收集合法事件节点（EventCategoryEnum值）
+        valid_event_nodes = {e.value for e in EventCategoryEnum}
+
+        # 过滤无效三元组
+        valid_triples = []
+        invalid_triples = []
+
+        for triple in self.triples:
+            # 获取关系类型值（处理Enum或字符串）
+            relation = getattr(triple.relation, "value", triple.relation)
+            head_valid = triple.head in valid_entity_names
+
+            # 根据关系类型判断tail合法性
+            if relation == "具有功能":
+                tail_valid = triple.tail in (valid_entity_names | valid_function_nodes)
+            elif relation == "发生事件":
+                tail_valid = triple.tail in (valid_entity_names | valid_event_nodes)
+            else:
+                # 其他关系：tail必须是地理实体
+                tail_valid = triple.tail in valid_entity_names
+
+            if head_valid and tail_valid:
+                valid_triples.append(triple)
+            else:
+                invalid_triples.append(triple)
+                reason = []
+                if not head_valid:
+                    reason.append(f"head='{triple.head}'不在实体列表")
+                if not tail_valid:
+                    reason.append(f"tail='{triple.tail}'非法")
+                logger.warning(
+                    f"[JointExtractionResult] 三元组校验失败: <{triple.head}, {relation}, {triple.tail}> "
+                    f"→ {', '.join(reason)}，已清理"
+                )
+
+        if invalid_triples:
+            self.triples = valid_triples
+            logger.info(
+                f"[JointExtractionResult] 清理了 {len(invalid_triples)} 个无效三元组，"
+                f"保留 {len(valid_triples)} 个有效三元组"
+            )
+
+        return self
+
 
 # ===== Self-Check-Joint模型（P9新增，含Reflexion） =====
 
@@ -1847,6 +1907,88 @@ class BatchSelfCheckEvalResult(BaseModel):
     )
     overall_confidence: str = Field(default="medium", description="批量整体置信度")
     retry_suggested: bool = Field(default=False, description="是否建议重新评估")
+
+
+# ===== P15新增：批量Label节点Schema =====
+
+
+class BatchLabelCorpusResult(BaseModel):
+    """单条语料的标注结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    entity_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict, description="实体属性字典"
+    )
+    relation_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict, description="关系属性字典"
+    )
+    confidence: str = Field(default="medium", description="标注置信度")
+
+
+class BatchLabelResult(BaseModel):
+    """批量标注结果"""
+
+    batch_label_results: List[BatchLabelCorpusResult] = Field(
+        default_factory=list, description="批量标注结果"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
+
+
+# ===== P15新增：批量Self-Check-Label节点Schema =====
+
+
+class BatchSelfCheckLabelCorpusResult(BaseModel):
+    """单条语料的标注校验结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    verified_entity_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict, description="校验通过的实体属性"
+    )
+    verified_relation_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict, description="校验通过的关系属性"
+    )
+    attr_completeness: str = Field(
+        default="medium", description="属性完整性: high/medium/low"
+    )
+    confidence: str = Field(default="medium", description="校验置信度")
+
+
+class BatchSelfCheckLabelResult(BaseModel):
+    """批量标注校验结果"""
+
+    verified_results: List[BatchSelfCheckLabelCorpusResult] = Field(
+        default_factory=list, description="校验通过的语料标注结果"
+    )
+    rejected_results: List[Dict[str, Any]] = Field(
+        default_factory=list, description="校验失败的语料"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新标注")
+
+
+# ===== P15新增：批量Entity_Alignment节点Schema =====
+
+
+class BatchEntityAlignmentCorpusResult(BaseModel):
+    """单条语料的实体对齐结果"""
+
+    corpus_id: str = Field(description="语料ID")
+    aligned_entity_attrs: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict, description="对齐后的实体属性"
+    )
+    new_entities: List[str] = Field(
+        default_factory=list, description="需要新增到数据库的实体"
+    )
+    confidence: str = Field(default="medium", description="对齐置信度")
+
+
+class BatchEntityAlignmentResult(BaseModel):
+    """批量实体对齐结果"""
+
+    aligned_results: List[BatchEntityAlignmentCorpusResult] = Field(
+        default_factory=list, description="批量对齐结果"
+    )
+    overall_confidence: str = Field(default="medium", description="批量整体置信度")
 
 
 # ===== QA导师架构模型（P10新增） =====

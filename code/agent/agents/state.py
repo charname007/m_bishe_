@@ -70,7 +70,7 @@ class PhaseEnum(str, Enum):
 
 # ===== 反思循环配置 =====
 
-DEFAULT_MAX_RETRIES = 3  # 默认最大重试次数
+DEFAULT_MAX_RETRIES = 1  # 默认最大重试次数（P16优化：减少LLM调用成本）
 
 
 # ===== 子状态定义（拆分 CorpusState） =====

@@ -26,8 +26,8 @@ class ExtractionConfig:
     """实体名称相似度阈值 (0-1，用于判断是否为同一实体)"""
 
     # ===== 分布式处理配置 =====
-    corpus_per_worker: int = 10
-    """每个 Worker 处理的语料数量"""
+    corpus_per_worker: int = 5
+    """每个 Worker 处理的语料数量（与 batch_llm_size 对齐，实现 Worker 级并发）"""
 
     max_workers: int = 10
     """最大 Worker 数量"""
@@ -76,8 +76,8 @@ class ExtractionConfig:
     enable_self_check: bool = False
     """是否启用 Self-Check + 反思循环模式"""
 
-    self_check_max_retries: int = 3
-    """反思循环最大重试次数"""
+    self_check_max_retries: int = 1
+    """反思循环最大重试次数（P16优化：从3改为1，减少LLM调用成本）"""
 
     self_check_ner_low_threshold: int = 2
     """NER 遗漏实体数量阈值（超过此值触发重抽）"""
@@ -111,8 +111,8 @@ class ExtractionConfig:
     enable_reflexion: bool = True
     """是否启用Reflexion反思机制（仅在联合抽取模式下有效）"""
 
-    reflexion_max_retries: int = 3
-    """Reflexion反思循环最大重试次数"""
+    reflexion_max_retries: int = 1
+    """Reflexion反思循环最大重试次数（P16优化：减少LLM调用成本）"""
 
     # ===== Filter/Normalize二次检查配置（P9新增，可选） =====
     enable_self_check_filter: bool = False
@@ -224,7 +224,7 @@ class ExtractionConfig:
         return cls(
             eval_threshold=get_float("EVAL_THRESHOLD", 3.5),
             similarity_threshold=get_float("SIMILARITY_THRESHOLD", 0.85),
-            corpus_per_worker=get_int("CORPUS_PER_WORKER", 10),
+            corpus_per_worker=get_int("CORPUS_PER_WORKER", 5),
             max_workers=get_int("MAX_WORKERS", 10),
             max_concurrent_corpus=get_int("MAX_CONCURRENT_CORPUS", 50),
             batch_size=get_int("BATCH_SIZE", 100),
@@ -236,7 +236,7 @@ class ExtractionConfig:
             retry_max_interval=get_float("RETRY_MAX_INTERVAL", 30.0),
             retry_max_attempts=get_int("RETRY_MAX_ATTEMPTS", 3),
             enable_self_check=get_bool("ENABLE_SELF_CHECK", False),
-            self_check_max_retries=get_int("SELF_CHECK_MAX_RETRIES", 3),
+            self_check_max_retries=get_int("SELF_CHECK_MAX_RETRIES", 1),
             self_check_ner_low_threshold=get_int("SELF_CHECK_NER_LOW_THRESHOLD", 2),
             self_check_re_low_threshold=get_int("SELF_CHECK_RE_LOW_THRESHOLD", 2),
             enable_filter=get_bool("ENABLE_FILTER", False),
@@ -247,7 +247,7 @@ class ExtractionConfig:
             use_joint_extraction=get_bool("USE_JOINT_EXTRACTION", True),
             enable_full_self_check=get_bool("ENABLE_FULL_SELF_CHECK", True),  # P15修改：默认启用
             enable_reflexion=get_bool("ENABLE_REFLEXION", True),
-            reflexion_max_retries=get_int("REFLEXION_MAX_RETRIES", 3),
+            reflexion_max_retries=get_int("REFLEXION_MAX_RETRIES", 1),
             # P9新增：Filter/Normalize二次检查（可选）
             enable_self_check_filter=get_bool("ENABLE_SELF_CHECK_FILTER", False),
             enable_self_check_normalize=get_bool("ENABLE_SELF_CHECK_NORMALIZE", False),
@@ -279,7 +279,7 @@ class ExtractionConfig:
         return cls(
             eval_threshold=config_dict.get("eval_threshold", 3.5),
             similarity_threshold=config_dict.get("similarity_threshold", 0.85),
-            corpus_per_worker=config_dict.get("corpus_per_worker", 10),
+            corpus_per_worker=config_dict.get("corpus_per_worker", 5),
             max_workers=config_dict.get("max_workers", 10),
             max_concurrent_corpus=config_dict.get("max_concurrent_corpus", 50),
             batch_size=config_dict.get("batch_size", 100),
@@ -291,7 +291,7 @@ class ExtractionConfig:
             retry_max_interval=config_dict.get("retry_max_interval", 30.0),
             retry_max_attempts=config_dict.get("retry_max_attempts", 3),
             enable_self_check=config_dict.get("enable_self_check", False),
-            self_check_max_retries=config_dict.get("self_check_max_retries", 3),
+            self_check_max_retries=config_dict.get("self_check_max_retries", 1),
             self_check_ner_low_threshold=config_dict.get("self_check_ner_low_threshold", 2),
             self_check_re_low_threshold=config_dict.get("self_check_re_low_threshold", 2),
             enable_filter=config_dict.get("enable_filter", False),
@@ -302,7 +302,7 @@ class ExtractionConfig:
             use_joint_extraction=config_dict.get("use_joint_extraction", True),
             enable_full_self_check=config_dict.get("enable_full_self_check", True),  # P15修改：默认启用
             enable_reflexion=config_dict.get("enable_reflexion", True),
-            reflexion_max_retries=config_dict.get("reflexion_max_retries", 3),
+            reflexion_max_retries=config_dict.get("reflexion_max_retries", 1),
             # P9新增：Filter/Normalize二次检查（可选）
             enable_self_check_filter=config_dict.get("enable_self_check_filter", False),
             enable_self_check_normalize=config_dict.get("enable_self_check_normalize", False),

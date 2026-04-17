@@ -404,6 +404,19 @@ ENTITY_DISTINCTION_RULES = """⚠️ **重要区分规则**：
 - 如果是**发生的事情** → 事件
 - 如果是**具体地点名称** → POI"""
 
+# ===== v3.4新增：实体排除规则常量 =====
+# 此常量用于防止人物相关词被误识别为地理实体
+ENTITY_EXCLUSION_RULES = """⚠️ **禁止抽取的实体类型**：
+以下词汇**不是地理实体**，禁止抽取：
+- **人名**：张三、李四、王明等具体姓名
+- **群体身份词**：男生、女生、孩子、老人、学生、游客、行人、居民、年轻人、家长、闺蜜、同事等
+- **模糊指代词**：这里、那边、附近、这边、那里、旁边
+- **时间词**：早上、下午、周末、晚上、去年、明年
+- **纯数字**：123、100元、10分钟
+
+**特别注意**："男生适合玩"、"女生喜欢逛"中的"男生/女生"是**适合人群属性值**，不是实体！
+正确处理：将"男生/女生"作为"具有功能"关系的 `适合人群` 属性，而不是作为实体或三元组的头尾。"""
+
 
 # ===== Step 1: NER 提示词模板 =====
 
@@ -1945,6 +1958,7 @@ BATCH_JOINT_USER = (
 
 """
     + ENTITY_DISTINCTION_RULES
+    + ENTITY_EXCLUSION_RULES
     + """
 
 ---
@@ -2036,11 +2050,13 @@ BATCH_SELF_CHECK_USER = """## 校验任务
 - 是否遗漏重要地理实体？
 - 实体类型是否正确？
 - 是否抽取了非地理实体？
+- ⚠️ **人物实体检测**：是否存在"男生/女生/孩子/老人/学生/游客/闺蜜"等人物相关词被误识别为实体？如有，标记为错误。
 
 ### 2. 三元组校验（每条语料）
 - 是否存在幻觉（无原文依据的三元组）？
 - 关系类型和方向是否正确？
 - 属性是否合理？
+- ⚠️ **人物三元组检测**：三元组的head/tail是否为人物相关词（如"男生/女生"）？如有，标记为无效并建议修正为属性值。
 
 ### 3. 跨语料别名验证
 - 别名映射是否正确？（如"武大"→"武汉大学"是否合理）
@@ -2237,6 +2253,153 @@ BATCH_SELF_CHECK_EVAL_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+# ===== P15新增：批量Label提示词 =====
+
+BATCH_LABEL_SYSTEM = """你是一位"批量属性标注专家"，负责同时为多条语料的实体和关系添加属性标注。
+你的任务是：
+1. 为每个实体标注类型和属性
+2. 为每个关系标注属性
+3. 确保属性有原文依据
+"""
+
+BATCH_LABEL_USER = """## 标注任务
+
+请为以下批量实体和关系添加属性标注：
+
+### 1. 实体属性标注（每条语料）
+- 实体类型：道路/POI/建筑物/街区/功能/事件
+- 特征标签：氛围感、网红、文艺等（开放文本，需原文依据）
+
+### 2. 关系属性标注（每条语料）
+- 置信度：high/medium/low
+- 原文依据：标注证据来源
+
+---
+
+## 待标注实体和关系
+
+{batch_entities_triples}
+
+## 原始文本
+
+{corpus_texts}
+
+---
+
+## 输出要求
+
+请输出：
+1. `batch_label_results`: 每条语料的标注结果（包含corpus_id, entity_attrs, relation_attrs, confidence）
+2. `overall_confidence`: 批量整体置信度
+
+输出JSON格式。
+"""
+
+BATCH_LABEL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_LABEL_SYSTEM),
+        ("human", BATCH_LABEL_USER),
+    ]
+)
+
+
+# ===== P15新增：批量Self-Check-Label提示词 =====
+
+BATCH_SELF_CHECK_LABEL_SYSTEM = """你是一位"批量标注校验专家"，负责同时校验多条语料的属性标注结果。
+你的任务是：
+1. 校验实体属性合理性
+2. 校验关系属性完整性
+3. 决定哪些语料需要重新标注
+"""
+
+BATCH_SELF_CHECK_LABEL_USER = """## 校验任务
+
+请校验以下批量标注结果：
+
+### 1. 实体属性校验（每条语料）
+- 实体类型是否正确？
+- 属性是否有原文依据？
+
+### 2. 关系属性校验（每条语料）
+- 关系置信度是否合理？
+
+---
+
+## 待校验标注结果
+
+{batch_label_results}
+
+## 原始文本
+
+{corpus_texts}
+
+---
+
+## 输出要求
+
+请输出：
+1. `verified_results`: 校验通过的语料标注结果
+2. `rejected_results`: 校验失败的语料
+3. `overall_confidence`: 批量整体置信度
+4. `retry_suggested`: 是否建议重新标注
+
+输出JSON格式。
+"""
+
+BATCH_SELF_CHECK_LABEL_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_SELF_CHECK_LABEL_SYSTEM),
+        ("human", BATCH_SELF_CHECK_LABEL_USER),
+    ]
+)
+
+
+# ===== P15新增：批量Entity_Alignment提示词 =====
+
+BATCH_ENTITY_ALIGNMENT_SYSTEM = """你是一位"批量实体对齐专家"，负责将抽取实体与数据库已有实体对齐。
+你的任务是：
+1. 判断实体是否已存在于数据库
+2. 合理合并相同实体的不同表达
+3. 输出需要新增到数据库的实体
+"""
+
+BATCH_ENTITY_ALIGNMENT_USER = """## 对齐任务
+
+请将以下批量实体与数据库已有实体对齐：
+
+### 1. 实体匹配（每条语料）
+- 判断实体是否与已有实体匹配
+- 记录别名关系
+
+---
+
+## 待对齐实体
+
+{batch_entities}
+
+## 数据库已有实体
+
+{existing_entities}
+
+---
+
+## 输出要求
+
+请输出：
+1. `aligned_results`: 每条语料的对齐结果（包含corpus_id, aligned_entity_attrs, new_entities）
+2. `overall_confidence`: 批量整体置信度
+
+输出JSON格式。
+"""
+
+BATCH_ENTITY_ALIGNMENT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_ENTITY_ALIGNMENT_SYSTEM),
+        ("human", BATCH_ENTITY_ALIGNMENT_USER),
+    ]
+)
+
+
 # ===== 批量处理辅助函数 =====
 
 
@@ -2291,7 +2454,7 @@ def format_cross_corpus_aliases(aliases: List[Dict]) -> str:
 
 
 def format_batch_qa_results_for_check(batch_qa_results: Dict, corpus_texts: Dict) -> str:
-    """格式化批量QA结果用于校验（P15新增）"""
+    """格式化批量QA结果用于校验（P15新增，P17修复数据类型）"""
     if not batch_qa_results:
         return "(无QA结果)"
     lines = []
@@ -2301,15 +2464,24 @@ def format_batch_qa_results_for_check(batch_qa_results: Dict, corpus_texts: Dict
         relation_hints = qa_data.get("relation_hints", [])
         confidence = qa_data.get("confidence", "medium")
 
-        # 格式化QA问答对
+        # 格式化QA问答对（P17修复：qa_pairs 可能是 Pydantic model 或 dict）
         qa_str = ""
         if qa_pairs:
-            qa_str = ", ".join([f"Q:{q.get('question','')} A:{q.get('answer','')}" for q in qa_pairs[:3]])
+            formatted_qa = []
+            for q in qa_pairs[:3]:
+                if isinstance(q, dict):
+                    formatted_qa.append(f"Q:{q.get('question','')} A:{q.get('answer','')}")
+                else:
+                    # Pydantic model 或其他对象
+                    q_dict = q.model_dump() if hasattr(q, 'model_dump') else {}
+                    formatted_qa.append(f"Q:{q_dict.get('question','')} A:{q_dict.get('answer','')}")
+            qa_str = ", ".join(formatted_qa)
 
-        # 格式化实体提示
+        # 格式化实体提示（P17修复：entity_hints 是 List[str]）
         entity_str = ""
         if entity_hints:
-            entity_str = ", ".join([e.get("name", "") for e in entity_hints[:3]])
+            # entity_hints 是字符串列表，直接使用
+            entity_str = ", ".join([str(e) for e in entity_hints[:3]])
 
         lines.append(
             f"- [{corpus_id}] 置信度:{confidence}\n"

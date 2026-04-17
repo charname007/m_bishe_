@@ -26,6 +26,10 @@ from agent.agents import (
 )
 
 
+import pytest
+
+
+@pytest.mark.asyncio
 async def test_batch_preprocessing_without_llm():
     """测试批量预处理节点的创建（不实际调用LLM）"""
 

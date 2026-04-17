@@ -71,6 +71,209 @@ def extract_enum_values_from_list(items: List[Any]) -> List[Any]:
     return [extract_enum_value(item) for item in items]
 
 
+# ===== P16新增：JSON预处理函数 - 处理LLM输出的未转义引号 =====
+
+
+def escape_unescaped_quotes_in_json_strings(text: str) -> str:
+    """
+    转义JSON字符串值内部的未转义引号
+
+    解决LLM在JSON字符串值中使用未转义引号导致的JSON解析失败问题。
+    例如："text with "quote" inside" -> "text with \"quote\" inside"
+
+    Args:
+        text: LLM返回的JSON文本（可能包含markdown代码块）
+
+    Returns:
+        修复后的JSON文本，字符串值内部的引号已转义
+
+    状态机逻辑:
+    - 追踪字符串边界（使用英文双引号作为边界）
+    - 字符串内部遇到引号时，判断是内容引号还是结束引号：
+      - 内容引号：后面跟着文本字符（字母、数字、中文等） -> 需要转义
+      - 结束引号：后面跟着逗号、冒号、括号、空白符 -> 不转义
+    """
+    # 先移除markdown代码块标记（如果有）
+    if "```" in text:
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```", "", text)
+
+    text = text.strip()
+
+    result = []
+    in_string = False
+    i = 0
+
+    while i < len(text):
+        char = text[i]
+
+        if char == '"':
+            if not in_string:
+                # 开始一个JSON字符串 - 这是结构引号
+                in_string = True
+                result.append(char)
+                i += 1
+            else:
+                # 在字符串内部 - 判断这是内容引号还是结束引号
+                if i + 1 >= len(text):
+                    # 文本结束 - 这是结束引号
+                    in_string = False
+                    result.append(char)
+                    i += 1
+                else:
+                    next_char = text[i + 1]
+
+                    # 检查是否看起来像结束引号
+                    # 结束引号后面通常是：逗号、冒号、方括号、花括号、换行、空白
+                    if next_char in [",", ":", "]", "}", "\n", "\r", " ", "\t"]:
+                        # 这是结束引号
+                        in_string = False
+                        result.append(char)
+                        i += 1
+                    else:
+                        # 这看起来是字符串内部的内容引号
+                        # 检查是否已转义
+                        if i > 0 and text[i - 1] == "\\":
+                            # 已转义
+                            result.append(char)
+                            i += 1
+                        else:
+                            # 需要转义
+                            result.append("\\")
+                            result.append(char)
+                            i += 1
+        elif char == "\\" and i + 1 < len(text):
+            # 处理转义序列
+            next_char = text[i + 1]
+            if next_char == '"':
+                # 已转义的引号
+                result.append(char)
+                result.append(next_char)
+                i += 2
+            elif next_char in ["n", "r", "t", "\\", "/"]:
+                # 其他转义序列
+                result.append(char)
+                result.append(next_char)
+                i += 2
+            else:
+                result.append(char)
+                i += 1
+        elif char in ["\n", "\r"] and in_string:
+            # JSON字符串内部的换行符需要处理
+            # JSON规范不允许字符串内有未转义的换行符
+            result.append(" ")
+            i += 1
+        else:
+            result.append(char)
+            i += 1
+
+    return "".join(result)
+
+
+def safe_parse_json_with_quote_fix(parser: PydanticOutputParser, text: str) -> Any:
+    """
+    安全的JSON解析函数，自动处理LLM输出中的常见问题
+
+    P16新增：增加枚举值修复和字段缺失填充
+
+    Args:
+        parser: PydanticOutputParser实例
+        text: LLM返回的文本
+
+    Returns:
+        解析后的Pydantic模型实例
+    """
+    # 先尝试正常解析
+    try:
+        return parser.parse(text)
+    except Exception as e:
+        logger.debug(f"[JSON-Preprocess] Initial parse failed: {e}, applying fixes...")
+
+        # Step 1: 引号转义修复
+        fixed_text = escape_unescaped_quotes_in_json_strings(text)
+
+        try:
+            return parser.parse(fixed_text)
+        except Exception as e2:
+            logger.debug(f"[JSON-Preprocess] Quote fix failed, trying content fix...")
+
+            # Step 2: 内容修复（枚举值映射 + 字段缺失填充）
+            fixed_text = fix_llm_json_content(fixed_text)
+
+            try:
+                return parser.parse(fixed_text)
+            except Exception as e3:
+                logger.warning(f"[JSON-Preprocess] All fixes failed: {e3}")
+                raise e3
+
+
+# P16新增：无效枚举值映射表
+INVALID_ENUM_MAPPING = {
+    # 事件类别修复：休闲活动类 → 人文事件
+    "休闲活动": "人文事件",
+    "娱乐活动": "人文事件",
+    "体育活动": "人文事件",
+    "文化活动": "人文事件",
+    # 功能类型修复（如有）
+    "娱乐": "休闲",
+    "运动": "休闲",
+}
+
+
+def fix_llm_json_content(text: str) -> str:
+    """
+    修复LLM输出的JSON内容中的常见问题
+
+    P16新增：处理两类问题
+    1. 无效枚举值：映射到有效值
+    2. 字段缺失：填充默认值（仅针对三元组的 evidence 和 confidence）
+
+    Args:
+        text: LLM返回的JSON文本
+
+    Returns:
+        修复后的JSON文本
+    """
+    import json
+    import re
+
+    # 修复无效枚举值（直接字符串替换）
+    for invalid, valid in INVALID_ENUM_MAPPING.items():
+        # 匹配 JSON 中的枚举值字段
+        # 例如: "事件类别": "休闲活动" → "事件类别": "人文事件"
+        pattern = rf'"[^"]*类别[^"]*"\s*:\s*"{invalid}"'
+        replacement = f'"事件类别": "{valid}"'
+        text = re.sub(pattern, replacement, text)
+
+    # 修复三元组缺失字段
+    # 匹配不完整的三元组: {"head": "...", "relation": "...", "tail": "..."}
+    # 添加缺失的 evidence 和 confidence
+    def fix_triple(match):
+        triple_str = match.group(0)
+        try:
+            triple = json.loads(triple_str)
+            # 检查缺失字段
+            if "evidence" not in triple:
+                triple["evidence"] = triple.get("head", "") + "具有功能"
+            if "confidence" not in triple:
+                triple["confidence"] = "medium"
+            if "attributes" not in triple:
+                triple["attributes"] = {}
+            return json.dumps(triple, ensure_ascii=False)
+        except:
+            return triple_str
+
+    # 匹配不完整的三元组（没有 evidence/confidence 的）
+    # 注意：需要匹配那些只有 head/relation/tail 但缺少其他字段的
+    triple_pattern = (
+        r'\{"head":\s*"[^"]+",\s*"relation":\s*"[^"]+",\s*"tail":\s*"[^"]+"\}'
+    )
+    text = re.sub(triple_pattern, fix_triple, text)
+
+    logger.info(f"[JSON-ContentFix] Applied enum mapping and field filling")
+    return text
+
+
 # ===== P6改进：辅助函数 - 获取处理文本 =====
 # P15修复：统一使用 node_template.py 中的公开版本，避免重复定义
 from .node_template import get_text_for_processing
@@ -199,7 +402,9 @@ def create_filter_node(llm: Any):
             # 添加格式化指令
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: FilterResult = parser.parse(response.content)
+            result: FilterResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Filter] 结果: is_valid={result.is_valid}, "
@@ -302,7 +507,9 @@ def create_normalize_node(llm: Any):
             prompt_text = NORMALIZE_PROMPT.invoke({"raw_text": raw_text})
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: NormalizeResult = parser.parse(response.content)
+            result: NormalizeResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Normalize] 结果: has_changes={result.has_changes}, "
@@ -393,7 +600,9 @@ def create_qa_scaffold_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: QAScaffoldResult = parser.parse(response.content)
+            result: QAScaffoldResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[QA_Scaffold] 完成: {len(result.qa_pairs)} 个问答对, "
@@ -501,7 +710,9 @@ def create_ner_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: EntityRecognitionResult = parser.parse(response.content)
+            result: EntityRecognitionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             entity_count = (
                 len(result.道路)
@@ -610,7 +821,9 @@ def create_re_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: RelationExtractionResult = parser.parse(response.content)
+            result: RelationExtractionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # v2.2改进：提取三元组及属性（Enum转字符串+强类型属性转字典）
             triples = [
@@ -678,7 +891,9 @@ def create_eval_1_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: EvalResultFirst = parser.parse(response.content)
+            result: EvalResultFirst = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             scores = [
                 {
@@ -739,7 +954,9 @@ def create_eval_2_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: EvalResultSecond = parser.parse(response.content)
+            result: EvalResultSecond = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 更新评分
             final_scores = (
@@ -977,7 +1194,9 @@ def create_eval_simplified_node(
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: EvalResultSimplified = parser.parse(response.content)
+            result: EvalResultSimplified = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 处理评分
             scores = [
@@ -1252,7 +1471,9 @@ def create_label_node(llm: Any, enable_query: bool = False):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: LabelResult = parser.parse(response.content)
+            result: LabelResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # v3.2精简版：仅提取schema定义的属性
             entity_attrs = {}
@@ -1903,7 +2124,9 @@ def create_self_check_ner_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckNERResult = parser.parse(response.content)
+            result: SelfCheckNERResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 应用归一化，生成 final_entities
             final_entities = _apply_entity_normalizations(state["entities"], result)
@@ -2014,7 +2237,9 @@ def create_self_check_re_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckREResult = parser.parse(response.content)
+            result: SelfCheckREResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 应用修正，生成 corrected_triples（供 Eval 使用）
             corrected_triples = _apply_triple_corrections_for_self_check(
@@ -2300,7 +2525,9 @@ def create_joint_ner_re_node(llm: Any, enable_query: bool = False):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: JointExtractionResult = parser.parse(response.content)
+            result: JointExtractionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 转换为现有格式（兼容后续节点）
             # v3.4扩展版：实体类型扩展为6种（新增功能、事件）
@@ -2518,7 +2745,9 @@ def create_self_check_joint_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckJointResult = parser.parse(response.content)
+            result: SelfCheckJointResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 记录反思历史
             reflection_history.append(result.reflection_text)
@@ -2545,7 +2774,8 @@ def create_self_check_joint_node(llm: Any):
                 "reflection_text": result.reflection_text,
                 "improvement_strategy": result.improvement_strategy,
                 "reflection_history": reflection_history,
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.EVAL,
@@ -2622,7 +2852,9 @@ def create_self_check_qa_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckQAResult = parser.parse(response.content)
+            result: SelfCheckQAResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Self-Check-QA] 完成: entity_coverage={result.entity_coverage}, "
@@ -2642,7 +2874,8 @@ def create_self_check_qa_node(llm: Any):
 
             return {
                 "self_check_qa_result": result.model_dump(),
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.JOINT_NER_RE,
@@ -2713,7 +2946,9 @@ def create_self_check_eval_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckEvalResult = parser.parse(response.content)
+            result: SelfCheckEvalResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Self-Check-Eval] 完成: score_consistency={result.score_consistency}, "
@@ -2732,7 +2967,8 @@ def create_self_check_eval_node(llm: Any):
 
             return {
                 "self_check_eval_result": result.model_dump(),
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.LABEL,
@@ -2817,7 +3053,9 @@ def create_self_check_label_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckLabelResult = parser.parse(response.content)
+            result: SelfCheckLabelResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Self-Check-Label] 完成: attr_completeness={result.attr_completeness}, "
@@ -2844,7 +3082,8 @@ def create_self_check_label_node(llm: Any):
                 "self_check_label_result": result.model_dump(),
                 "entity_attrs": entity_attrs,
                 "relation_attrs": relation_attrs,
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.DONE,
@@ -2920,7 +3159,9 @@ def create_self_check_filter_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckFilterResult = parser.parse(response.content)
+            result: SelfCheckFilterResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Self-Check-Filter] 完成: verified_is_valid={result.verified_is_valid}, "
@@ -2959,7 +3200,8 @@ def create_self_check_filter_node(llm: Any):
                 "filter_result": updated_filter_result
                 if updated_filter_result
                 else state.get("filter_result", {}),
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.NORMALIZE
@@ -3042,7 +3284,9 @@ def create_self_check_normalize_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckNormalizeResult = parser.parse(response.content)
+            result: SelfCheckNormalizeResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Self-Check-Normalize] 完成: semantics_preserved={result.semantics_preserved}, "
@@ -3068,7 +3312,8 @@ def create_self_check_normalize_node(llm: Any):
             return {
                 "self_check_normalize_result": result.model_dump(),
                 "normalized_text": updated_normalized_text,
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count
+                + (1 if result.retry_suggested else 0),  # P17修复：只在建议重试时增加
                 "retry_suggested": result.retry_suggested,
                 "retry_reason": result.retry_reason,
                 "current_step": StepEnum.QA_SCAFFOLD,
@@ -3146,7 +3391,7 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                 "needs_fallback": False,
             }
 
-        max_retries = 3
+        max_retries = 1  # P16优化：减少LLM调用成本
         retry_delay = 2.0  # 初始延迟秒数
 
         for retry in range(max_retries):
@@ -3164,7 +3409,9 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
                 response = await llm.ainvoke(full_prompt)
-                result: BatchExtractionResult = parser.parse(response.content)
+                result: BatchExtractionResult = safe_parse_json_with_quote_fix(
+                    parser, response.content
+                )
 
                 # 转换为字典格式（P15修复：将JointTriple转换为字典，避免后续.get()错误）
                 batch_results = {}
@@ -3319,7 +3566,9 @@ def create_batch_self_check_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
-            result: BatchSelfCheckResult = parser.parse(response.content)
+            result: BatchSelfCheckResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Batch_Self_Check] 完成: 通过 {len(result.verified_results)} 条, "
@@ -3444,7 +3693,9 @@ def create_batch_self_check_qa_node(llm: Any):
 
         try:
             # 格式化输入
-            qa_results_str = format_batch_qa_results_for_check(batch_qa_results, corpus_texts)
+            qa_results_str = format_batch_qa_results_for_check(
+                batch_qa_results, corpus_texts
+            )
             texts_str = format_corpus_texts_for_check(corpus_texts)
 
             # 调用LLM
@@ -3457,7 +3708,9 @@ def create_batch_self_check_qa_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
-            result: BatchSelfCheckQAResult = parser.parse(response.content)
+            result: BatchSelfCheckQAResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Batch_Self_Check_QA] 完成: 通过 {len(result.verified_results)} 条, "
@@ -3478,7 +3731,9 @@ def create_batch_self_check_qa_node(llm: Any):
             )
 
             return {
-                "verified_results": [r.model_dump(mode="json") for r in result.verified_results],
+                "verified_results": [
+                    r.model_dump(mode="json") for r in result.verified_results
+                ],
                 "rejected_results": result.rejected_results,
                 "batch_self_check_qa_result": result.model_dump(mode="json"),
                 "overall_confidence": result.overall_confidence,
@@ -3630,7 +3885,9 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
-            result: BatchEvalResult = parser.parse(response.content)
+            result: BatchEvalResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 转换为字典格式
             eval_results_dict = {}
@@ -3789,7 +4046,9 @@ def create_batch_self_check_eval_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
-            result: BatchSelfCheckEvalResult = parser.parse(response.content)
+            result: BatchSelfCheckEvalResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Batch_Self_Check_Eval] 完成: 通过 {len(result.verified_results)} 条, "
@@ -3809,7 +4068,9 @@ def create_batch_self_check_eval_node(llm: Any):
             )
 
             return {
-                "verified_results": [r.model_dump(mode="json") for r in result.verified_results],
+                "verified_results": [
+                    r.model_dump(mode="json") for r in result.verified_results
+                ],
                 "rejected_results": result.rejected_results,
                 "batch_self_check_eval_result": result.model_dump(mode="json"),
                 "overall_confidence": result.overall_confidence,
@@ -3845,6 +4106,398 @@ def create_batch_self_check_eval_node(llm: Any):
     return batch_self_check_eval_node
 
 
+# ===== P15新增：批量Label节点 =====
+
+
+def create_batch_label_node(llm: Any):
+    """
+    创建批量属性标注节点
+
+    职责：
+    1. 为批量实体添加类型和属性标注
+    2. 为批量关系添加属性标注
+    3. 确保属性有原文依据
+
+    Args:
+        llm: LLM实例
+
+    Returns:
+        batch_label_node 函数
+    """
+    from .schemas import BatchLabelResult
+    from .prompts import (
+        BATCH_LABEL_PROMPT,
+        format_corpus_texts_for_check,
+    )
+
+    parser = PydanticOutputParser(pydantic_object=BatchLabelResult)
+
+    async def batch_label_node(
+        batch_eval_results: Dict, corpus_texts: Dict, writer: StreamWriter
+    ) -> Dict:
+        """
+        批量属性标注
+
+        Args:
+            batch_eval_results: {corpus_id: {entities, triples, corrected_triples}}
+            corpus_texts: {corpus_id: text} 原始文本
+            writer: StreamWriter
+
+        Returns:
+            {
+                "batch_label_results": {corpus_id: {entity_attrs, relation_attrs}},
+                "overall_confidence": "high/medium/low",
+            }
+        """
+        batch_size = len(batch_eval_results)
+        logger.info(f"[Batch_Label] 标注 {batch_size} 条语料")
+
+        writer(
+            {
+                "step": "batch_label",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_eval_results:
+            logger.info("[Batch_Label] 无结果，返回空")
+            return {
+                "batch_label_results": {},
+                "overall_confidence": "medium",
+            }
+
+        # 检查是否有语料无实体，直接标记为空属性
+        no_entity_corpus = []
+        has_entity_corpus = {}
+        for corpus_id, data in batch_eval_results.items():
+            entities = data.get("entities", {})
+            if not entities or not any(entities.values()):
+                no_entity_corpus.append(corpus_id)
+            else:
+                has_entity_corpus[corpus_id] = data
+
+        # 无实体的语料直接返回空属性
+        no_entity_results = {
+            corpus_id: {
+                "entity_attrs": {},
+                "relation_attrs": {},
+                "confidence": "low",
+            }
+            for corpus_id in no_entity_corpus
+        }
+
+        if not has_entity_corpus:
+            logger.info("[Batch_Label] 所有语料无实体")
+            writer(
+                {
+                    "step": "batch_label",
+                    "status": "completed",
+                    "batch_size": batch_size,
+                    "all_no_entities": True,
+                }
+            )
+            return {
+                "batch_label_results": no_entity_results,
+                "overall_confidence": "low",
+            }
+
+        try:
+            # 格式化输入
+            entities_triples_str = ""
+            for corpus_id, data in has_entity_corpus.items():
+                entities = data.get("entities", {})
+                triples = data.get("corrected_triples", data.get("triples", []))
+                confidence = data.get("confidence", "medium")
+
+                # 格式化实体
+                entity_str = ""
+                for etype, names in entities.items():
+                    if names:
+                        entity_str += f"{etype}: {', '.join(names[:3])}; "
+
+                # 格式化三元组
+                triple_str = ""
+                if triples:
+                    triple_str = ", ".join(
+                        [
+                            f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
+                            for t in triples[:3]
+                        ]
+                    )
+
+                entities_triples_str += (
+                    f"- [{corpus_id}] 置信度:{confidence}\n"
+                    f"  实体: {entity_str}\n"
+                    f"  三元组: {triple_str}\n"
+                )
+
+            texts_str = format_corpus_texts_for_check(
+                {cid: corpus_texts.get(cid, "") for cid in has_entity_corpus}
+            )
+
+            # 调用LLM
+            prompt_text = BATCH_LABEL_PROMPT.invoke(
+                {
+                    "batch_entities_triples": entities_triples_str,
+                    "corpus_texts": texts_str,
+                }
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchLabelResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
+
+            # 转换为字典格式
+            label_results_dict = {}
+            for r in result.batch_label_results:
+                label_results_dict[r.corpus_id] = {
+                    "entity_attrs": r.entity_attrs,
+                    "relation_attrs": r.relation_attrs,
+                    "confidence": r.confidence,
+                }
+
+            # 合并无实体的结果
+            all_results = {**no_entity_results, **label_results_dict}
+
+            logger.info(
+                f"[Batch_Label] 完成: {len(all_results)} 条语料, "
+                f"整体置信度: {result.overall_confidence}"
+            )
+
+            writer(
+                {
+                    "step": "batch_label",
+                    "status": "completed",
+                    "batch_size": len(all_results),
+                    "overall_confidence": result.overall_confidence,
+                }
+            )
+
+            return {
+                "batch_label_results": all_results,
+                "batch_label_result": result.model_dump(mode="json"),
+                "overall_confidence": result.overall_confidence,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Label] 失败: {e}")
+            writer(
+                {
+                    "step": "batch_label",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
+
+            # 标注失败时，保守策略：返回空属性
+            fallback_results = {
+                corpus_id: {
+                    "entity_attrs": {},
+                    "relation_attrs": {},
+                    "confidence": "low",
+                }
+                for corpus_id in batch_eval_results
+            }
+            return {
+                "batch_label_results": fallback_results,
+                "overall_confidence": "low",
+            }
+
+    return batch_label_node
+
+
+# ===== P15新增：批量Self-Check-Label节点 =====
+
+
+def create_batch_self_check_label_node(llm: Any):
+    """创建批量标注校验节点"""
+    from .schemas import BatchSelfCheckLabelResult
+    from .prompts import BATCH_SELF_CHECK_LABEL_PROMPT, format_corpus_texts_for_check
+
+    parser = PydanticOutputParser(pydantic_object=BatchSelfCheckLabelResult)
+
+    async def batch_self_check_label_node(
+        batch_label_results: Dict, corpus_texts: Dict, writer: StreamWriter
+    ) -> Dict:
+        """批量标注校验"""
+        batch_size = len(batch_label_results)
+        logger.info(f"[Batch_Self_Check_Label] 校验 {batch_size} 条语料")
+
+        writer(
+            {
+                "step": "batch_self_check_label",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_label_results:
+            return {
+                "verified_results": [],
+                "rejected_results": [],
+                "overall_confidence": "medium",
+                "retry_suggested": False,
+            }
+
+        try:
+            # 格式化输入
+            label_str = ""
+            for corpus_id, data in batch_label_results.items():
+                entity_attrs = data.get("entity_attrs", {})
+                relation_attrs = data.get("relation_attrs", {})
+                label_str += f"- [{corpus_id}] 实体属性: {len(entity_attrs)}个, 关系属性: {len(relation_attrs)}个\n"
+
+            texts_str = format_corpus_texts_for_check(corpus_texts)
+
+            prompt_text = BATCH_SELF_CHECK_LABEL_PROMPT.invoke(
+                {"batch_label_results": label_str, "corpus_texts": texts_str}
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchSelfCheckLabelResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
+
+            logger.info(
+                f"[Batch_Self_Check_Label] 完成: 通过 {len(result.verified_results)} 条"
+            )
+
+            writer(
+                {
+                    "step": "batch_self_check_label",
+                    "status": "completed",
+                    "verified_count": len(result.verified_results),
+                }
+            )
+
+            return {
+                "verified_results": [
+                    r.model_dump(mode="json") for r in result.verified_results
+                ],
+                "rejected_results": result.rejected_results,
+                "overall_confidence": result.overall_confidence,
+                "retry_suggested": result.retry_suggested,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Self_Check_Label] 失败: {e}")
+            return {
+                "verified_results": [
+                    {
+                        "corpus_id": cid,
+                        "verified_entity_attrs": {},
+                        "verified_relation_attrs": {},
+                        "attr_completeness": "low",
+                        "confidence": "low",
+                    }
+                    for cid in batch_label_results
+                ],
+                "rejected_results": [],
+                "overall_confidence": "low",
+                "retry_suggested": False,
+            }
+
+    return batch_self_check_label_node
+
+
+# ===== P15新增：批量Entity_Alignment节点 =====
+
+
+def create_batch_entity_alignment_node(llm: Any):
+    """创建批量实体对齐节点"""
+    from .schemas import BatchEntityAlignmentResult
+    from .prompts import BATCH_ENTITY_ALIGNMENT_PROMPT
+
+    parser = PydanticOutputParser(pydantic_object=BatchEntityAlignmentResult)
+
+    async def batch_entity_alignment_node(
+        batch_label_results: Dict,
+        corpus_texts: Dict,
+        existing_entities: List[str],
+        writer: StreamWriter,
+    ) -> Dict:
+        """批量实体对齐"""
+        batch_size = len(batch_label_results)
+        logger.info(f"[Batch_Entity_Alignment] 对齐 {batch_size} 条语料")
+
+        writer(
+            {
+                "step": "batch_entity_alignment",
+                "status": "started",
+                "batch_size": batch_size,
+            }
+        )
+
+        if not batch_label_results:
+            return {"aligned_results": {}, "overall_confidence": "medium"}
+
+        try:
+            # 格式化输入
+            entities_str = ""
+            for corpus_id, data in batch_label_results.items():
+                entity_attrs = data.get("entity_attrs", {})
+                entities = list(entity_attrs.keys())[:5]
+                entities_str += f"- [{corpus_id}] 实体: {', '.join(entities)}\n"
+
+            existing_str = (
+                ", ".join(existing_entities[:20]) if existing_entities else "(无)"
+            )
+
+            prompt_text = BATCH_ENTITY_ALIGNMENT_PROMPT.invoke(
+                {"batch_entities": entities_str, "existing_entities": existing_str}
+            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
+
+            response = await llm.ainvoke(full_prompt)
+            result: BatchEntityAlignmentResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
+
+            # 转换为字典格式
+            aligned_dict = {}
+            for r in result.aligned_results:
+                aligned_dict[r.corpus_id] = {
+                    "aligned_entity_attrs": r.aligned_entity_attrs,
+                    "new_entities": r.new_entities,
+                    "confidence": r.confidence,
+                }
+
+            logger.info(f"[Batch_Entity_Alignment] 完成: {len(aligned_dict)} 条")
+
+            writer(
+                {
+                    "step": "batch_entity_alignment",
+                    "status": "completed",
+                    "batch_size": len(aligned_dict),
+                }
+            )
+
+            return {
+                "aligned_results": aligned_dict,
+                "overall_confidence": result.overall_confidence,
+            }
+
+        except Exception as e:
+            logger.error(f"[Batch_Entity_Alignment] 失败: {e}")
+            return {
+                "aligned_results": {
+                    cid: {
+                        "aligned_entity_attrs": {},
+                        "new_entities": [],
+                        "confidence": "low",
+                    }
+                    for cid in batch_label_results
+                },
+                "overall_confidence": "low",
+            }
+
+    return batch_entity_alignment_node
+
+
 # ===== P10新增：批量处理入口函数 =====
 
 
@@ -3854,25 +4507,39 @@ async def process_corpus_batch_with_llm(
     config: ExtractionConfig,
     batch_joint_node: Any = None,
     batch_self_check_node: Any = None,
+    batch_eval_node: Any = None,  # P17新增
+    batch_label_node: Any = None,  # P17新增
+    batch_self_check_eval_node: Any = None,  # P17新增
+    batch_self_check_label_node: Any = None,  # P17新增
 ) -> Dict:
     """
     批量处理语料（一次LLM调用处理batch_llm_size条）
+
+    P17改进：添加完整的校验节点链
+    Batch_Joint → Batch_Self_Check → Batch_Eval → Batch_Self_Check_Eval → Batch_Label → Batch_Self_Check_Label
 
     Args:
         llm: LLM实例
         corpus_list: 语料列表 [{"id": ..., "text": ...}, ...]
         config: ExtractionConfig
+        batch_joint_node: 批量联合抽取节点（可选）
+        batch_self_check_node: 批量校验节点（可选）
+        batch_eval_node: 批量评估节点（可选，P17新增）
+        batch_label_node: 批量标注节点（可选，P17新增）
+        batch_self_check_eval_node: 批量评估校验节点（可选，P17新增）
+        batch_self_check_label_node: 批量标注校验节点（可选，P17新增）
 
     Returns:
         {
-            "batch_results": {corpus_id: {entities, triples}},
+            "batch_results": {corpus_id: {entities, triples, eval_passed, entity_attrs, relation_attrs}},
             "cross_corpus_aliases": [...],
-            "fallback_results": [...],  # fallback单条处理的结果
+            "fallback_corpus_list": [...],  # fallback单条处理的结果
         }
     """
     batch_llm_size = config.batch_llm_size
     enable_batch_llm = config.enable_batch_llm
     batch_llm_fallback = config.batch_llm_fallback
+    eval_threshold = config.eval_threshold
 
     # 如果不启用批量LLM，直接返回空（使用单条处理）
     if not enable_batch_llm:
@@ -3887,10 +4554,22 @@ async def process_corpus_batch_with_llm(
         batch_joint_node = create_batch_joint_extraction_node(llm, batch_llm_size)
     if batch_self_check_node is None:
         batch_self_check_node = create_batch_self_check_node(llm)
+    # P17新增：创建 eval 和 label 及其校验节点
+    if batch_eval_node is None:
+        batch_eval_node = create_batch_eval_node(llm, eval_threshold)
+    if batch_label_node is None:
+        batch_label_node = create_batch_label_node(llm)
+    if batch_self_check_eval_node is None:
+        batch_self_check_eval_node = create_batch_self_check_eval_node(llm)
+    if batch_self_check_label_node is None:
+        batch_self_check_label_node = create_batch_self_check_label_node(llm)
 
     all_batch_results = {}
     all_cross_corpus_aliases = []
     fallback_corpus_list = []
+
+    # 构建语料文本映射（用于 eval 和 label）
+    corpus_texts = {corpus["id"]: corpus["text"] for corpus in corpus_list}
 
     # 分批处理（每批batch_llm_size条）
     for i in range(0, len(corpus_list), batch_llm_size):
@@ -3903,7 +4582,7 @@ async def process_corpus_batch_with_llm(
         def dummy_writer(event):
             pass
 
-        # 批量抽取
+        # ===== Step 1: 批量抽取 =====
         extraction_result = await batch_joint_node(batch_corpus, dummy_writer)
 
         if extraction_result.get("needs_fallback"):
@@ -3924,19 +4603,17 @@ async def process_corpus_batch_with_llm(
                     }
             continue
 
-        # 批量校验（可选）
         batch_results = extraction_result["batch_results"]
         cross_corpus_aliases = extraction_result["cross_corpus_aliases"]
 
-        # 如果启用Self-Check，进行校验
+        # ===== Step 2: 批量校验（可选）=====
         if config.enable_self_check or config.enable_full_self_check:
             check_result = await batch_self_check_node(
                 batch_results, cross_corpus_aliases, dummy_writer
             )
 
             # 处理校验结果
-            for r in check_result["verified_results"]:
-                all_batch_results[r["corpus_id"]] = r
+            verified_results = check_result["verified_results"]
 
             # 校验失败的语料，加入fallback列表
             if batch_llm_fallback:
@@ -3952,8 +4629,132 @@ async def process_corpus_batch_with_llm(
 
         else:
             # 不校验，直接使用抽取结果
-            all_batch_results.update(batch_results)
+            verified_results = [
+                {
+                    "corpus_id": corpus_id,
+                    "entities": data.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                    "triples": data.get("triples", []),
+                    "confidence": data.get("confidence", "medium"),
+                }
+                for corpus_id, data in batch_results.items()
+            ]
             all_cross_corpus_aliases.extend(cross_corpus_aliases)
+
+        # ===== Step 3: 批量评估（P17新增）=====
+        if verified_results:
+            # 构建评估输入格式 + verified_results_dict（用于后续label）
+            verified_results_dict = {r["corpus_id"]: r for r in verified_results}
+            eval_input = {}
+            for r in verified_results:
+                eval_input[r["corpus_id"]] = {
+                    "entities": r.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                    "triples": r.get("triples", []),
+                }
+
+            eval_result = await batch_eval_node(eval_input, corpus_texts, dummy_writer)
+
+            # ===== Step 3.5: 批量评估校验（P17新增）=====
+            if config.enable_full_self_check:
+                eval_check_result = await batch_self_check_eval_node(
+                    eval_result["batch_eval_results"], corpus_texts, dummy_writer
+                )
+
+                # 处理评估校验结果
+                for r in eval_check_result["rejected_results"]:
+                    corpus_id = r.get("corpus_id")
+                    if batch_llm_fallback:
+                        for corpus in batch_corpus:
+                            if corpus["id"] == corpus_id:
+                                fallback_corpus_list.append(corpus)
+                                break
+
+                # 只保留通过校验的评估结果
+                verified_eval_results = {
+                    r["corpus_id"]: eval_result["batch_eval_results"].get(
+                        r["corpus_id"], {}
+                    )
+                    for r in eval_check_result["verified_results"]
+                }
+            else:
+                # 不校验，直接使用评估结果
+                verified_eval_results = eval_result["batch_eval_results"]
+
+            # 处理评估结果
+            for corpus_id, eval_data in verified_eval_results.items():
+                # 更新三元组（可能被修正）
+                triples = eval_data.get("corrected_triples", [])
+                eval_passed = eval_data.get("eval_passed", False)
+
+                # 评估不通过的语料，加入fallback列表
+                if not eval_passed and batch_llm_fallback:
+                    for corpus in batch_corpus:
+                        if corpus["id"] == corpus_id:
+                            fallback_corpus_list.append(corpus)
+                            break
+                    continue  # 不加入最终结果
+
+                # 更新结果
+                all_batch_results[corpus_id] = {
+                    "entities": verified_results_dict.get(corpus_id, {}).get(
+                        "entities", DEFAULT_ENTITY_DICT.copy()
+                    ),
+                    "triples": triples,
+                    "eval_passed": eval_passed,
+                    "eval_scores": eval_data.get("scores", []),
+                    "confidence": eval_data.get("confidence", "medium"),
+                }
+
+        # ===== Step 4: 批量标注（P17新增）=====
+        if all_batch_results:
+            # 构建标注输入格式
+            label_input = {}
+            for corpus_id, data in all_batch_results.items():
+                if corpus_id in verified_results_dict:
+                    label_input[corpus_id] = {
+                        "entities": data.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                        "triples": data.get("triples", []),
+                    }
+
+            if label_input:
+                label_result = await batch_label_node(
+                    label_input, corpus_texts, dummy_writer
+                )
+
+                # ===== Step 4.5: 批量标注校验（P17新增）=====
+                if config.enable_full_self_check:
+                    label_check_result = await batch_self_check_label_node(
+                        label_result["batch_label_results"], corpus_texts, dummy_writer
+                    )
+
+                    # 处理标注校验结果
+                    for r in label_check_result["rejected_results"]:
+                        corpus_id = r.get("corpus_id")
+                        if batch_llm_fallback:
+                            for corpus in batch_corpus:
+                                if corpus["id"] == corpus_id:
+                                    fallback_corpus_list.append(corpus)
+                                    break
+
+                    # 只保留通过校验的标注结果
+                    verified_label_results = {
+                        r["corpus_id"]: label_result["batch_label_results"].get(
+                            r["corpus_id"], {}
+                        )
+                        for r in label_check_result["verified_results"]
+                    }
+                else:
+                    # 不校验，直接使用标注结果
+                    verified_label_results = label_result["batch_label_results"]
+
+                # 处理标注结果
+                for corpus_id, label_data in verified_label_results.items():
+                    if corpus_id in all_batch_results:
+                        all_batch_results[corpus_id]["entity_attrs"] = label_data.get(
+                            "entity_attrs", {}
+                        )
+                        all_batch_results[corpus_id]["relation_attrs"] = label_data.get(
+                            "relation_attrs", {}
+                        )
 
     return {
         "batch_results": all_batch_results,
@@ -4044,7 +4845,9 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{query_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
-                query_result: MentorQueryResponse = query_parser.parse(response.content)
+                query_result: MentorQueryResponse = (
+                    query_safe_parse_json_with_quote_fix(parser, response.content)
+                )
 
                 logger.info(
                     f"[QA_Mentor] 查询回答完成: 置信度={query_result.response_confidence}, "
@@ -4139,7 +4942,9 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{scaffold_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
-                result: QAMentorScaffoldResult = scaffold_parser.parse(response.content)
+                result: QAMentorScaffoldResult = (
+                    scaffold_safe_parse_json_with_quote_fix(parser, response.content)
+                )
 
                 logger.info(
                     f"[QA_Mentor] 完成: {len(result.qa_pairs)} 个问答对, "
@@ -4347,7 +5152,9 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: QAApprovalResult = parser.parse(response.content)
+            result: QAApprovalResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[QA_Approval] 完成: overall_status={result.overall_status}, "
@@ -4475,7 +5282,9 @@ def create_revision_joint_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: JointExtractionResult = parser.parse(response.content)
+            result: JointExtractionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 转换为现有格式（v3.4扩展版：6种实体类型）
             entities_dict = {
@@ -5460,7 +6269,9 @@ def create_joint_ner_re_node_v3(llm: Any):
             )
 
             response = await llm.ainvoke(full_prompt_with_format)
-            result: JointExtractionResult = parser.parse(response.content)
+            result: JointExtractionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 转换为现有格式（v3.4扩展版：6种实体类型）
             entities_dict = {
@@ -5570,7 +6381,9 @@ def create_filter_node_v3(llm: Any):
             prompt_text = FILTER_PROMPT_V2.invoke({"raw_text": state["raw_text"]})
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: FilterResult = parser.parse(response.content)
+            result: FilterResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.info(
                 f"[Filter_V2] 结果: is_valid={result.is_valid}, "
@@ -5684,7 +6497,9 @@ def create_self_check_joint_node_v3(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: SelfCheckJointResultV2 = parser.parse(response.content)
+            result: SelfCheckJointResultV2 = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             # 提取四维度评分
             dimension_scores = result.dimension_scores
@@ -5800,7 +6615,9 @@ def create_re_node_v3(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: RelationExtractionResult = parser.parse(response.content)
+            result: RelationExtractionResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             triples = [
                 {
@@ -5908,7 +6725,9 @@ def create_label_node_v3(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result: LabelResult = parser.parse(response.content)
+            result: LabelResult = safe_parse_json_with_quote_fix(
+                parser, response.content
+            )
 
             logger.debug(f"[Label_V2] 完成: {len(result.entities)}个实体属性")
 
@@ -6022,7 +6841,7 @@ def create_batch_filter_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result = parser.parse(response.content)
+            result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, processed_corpus, skipped_corpus = {}, [], []
             for r in result.results:
                 # 使用正确的字段名：is_valid（语义相反）, is_non_wuhan_region
@@ -6095,7 +6914,7 @@ def create_batch_normalize_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result = parser.parse(response.content)
+            result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, normalized_corpus = {}, []
             for r in result.results:
                 batch_results[r.corpus_id] = {
@@ -6161,7 +6980,7 @@ def create_batch_qa_scaffold_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
-            result = parser.parse(response.content)
+            result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, qa_corpus = {}, []
             for r in result.results:
                 batch_results[r.corpus_id] = {
@@ -6211,7 +7030,10 @@ async def process_batch_preprocessing(
     enable_normalize: bool = True,
     enable_qa_scaffold: bool = True,
 ) -> Dict:
-    """批量前置节点处理：Filter → Normalize → QA_Scaffold，一次LLM调用处理多条语料"""
+    """批量前置节点处理：Filter → Normalize → QA_Scaffold → Self_Check_QA（可选），一次LLM调用处理多条语料
+
+    P17改进：添加 QA_Scaffold 校验节点
+    """
     logger.info(f"[Batch_Preprocessing] 开始批量预处理 {len(corpus_list)} 条语料")
 
     def dummy_writer(e):
@@ -6223,6 +7045,10 @@ async def process_batch_preprocessing(
         [],
         [],
     )
+
+    # 构建语料文本映射（用于校验节点）
+    corpus_texts = {corpus["id"]: corpus["text"] for corpus in corpus_list}
+
     if enable_filter:
         filter_node = create_batch_filter_node(llm)
         filter_result = await filter_node(current_corpus, dummy_writer)
@@ -6232,6 +7058,7 @@ async def process_batch_preprocessing(
         if filter_result.get("error"):
             fallback_corpus.extend(current_corpus)
             current_corpus = []
+
     if enable_normalize and current_corpus:
         normalize_node = create_batch_normalize_node(llm)
         normalize_result = await normalize_node(current_corpus, dummy_writer)
@@ -6242,16 +7069,48 @@ async def process_batch_preprocessing(
         if normalize_result.get("error"):
             fallback_corpus.extend(current_corpus)
             current_corpus = []
+
     if enable_qa_scaffold and current_corpus:
         qa_node = create_batch_qa_scaffold_node(llm)
         qa_result = await qa_node(current_corpus, dummy_writer)
-        preprocessing_results["qa_scaffold"] = qa_result.get(
+        # P17修复：batch_results 是 {corpus_id: {qa_pairs, ...}} 格式，用于后续校验
+        preprocessing_results["qa_scaffold"] = qa_result.get("batch_results", {})
+        # batch_qa_scaffold_result 是原始Pydantic model_dump，用于日志/调试
+        preprocessing_results["qa_scaffold_raw"] = qa_result.get(
             "batch_qa_scaffold_result", {}
         )
         current_corpus = qa_result.get("qa_corpus", current_corpus)
         if qa_result.get("error"):
             fallback_corpus.extend(current_corpus)
             current_corpus = []
+
+        # P17新增：QA_Scaffold 校验（仅在 enable_full_self_check 时）
+        if (
+            config.enable_full_self_check
+            and current_corpus
+            and preprocessing_results.get("qa_scaffold")
+        ):
+            qa_self_check_node = create_batch_self_check_qa_node(llm)
+            qa_check_result = await qa_self_check_node(
+                preprocessing_results["qa_scaffold"], corpus_texts, dummy_writer
+            )
+            preprocessing_results["qa_self_check"] = qa_check_result
+
+            # 处理校验结果：校验失败的语料加入 fallback
+            for r in qa_check_result.get("rejected_results", []):
+                corpus_id = r.get("corpus_id")
+                if config.batch_llm_fallback:
+                    for corpus in current_corpus:
+                        if corpus["id"] == corpus_id:
+                            fallback_corpus.append(corpus)
+                            break
+
+            # 只保留通过校验的语料
+            verified_ids = {
+                r.get("corpus_id") for r in qa_check_result.get("verified_results", [])
+            }
+            current_corpus = [c for c in current_corpus if c["id"] in verified_ids]
+
     logger.info(
         f"[Batch_Preprocessing] 完成: {len(current_corpus)}成功, {len(skipped_corpus)}跳过, {len(fallback_corpus)}fallback"
     )

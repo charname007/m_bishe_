@@ -1656,7 +1656,7 @@ def build_distributed_workflow(
 
                 results = []
 
-                # 转换批量结果为单条结果格式
+                # 转换批量结果为单条结果格式（P17改进：使用批处理返回的eval和label结果）
                 for corpus_id, data in batch_result["batch_results"].items():
                     # 构建兼容的结果格式
                     result = {
@@ -1664,9 +1664,12 @@ def build_distributed_workflow(
                         "entities": data.get("entities", DEFAULT_ENTITY_DICT.copy()),  # v3.4修复：使用6种实体类型
                         "triples": data.get("triples", []),
                         "corrected_triples": data.get("triples", []),
-                        "eval_passed": True,
-                        "entity_attrs": {},
-                        "relation_attrs": {},
+                        # P17改进：使用批处理返回的 eval_passed（而非硬编码 True）
+                        "eval_passed": data.get("eval_passed", True),
+                        # P17改进：使用批处理返回的 entity_attrs 和 relation_attrs
+                        "entity_attrs": data.get("entity_attrs", {}),
+                        "relation_attrs": data.get("relation_attrs", {}),
+                        "eval_scores": data.get("eval_scores", []),
                         "verification_confidence": data.get("confidence", "medium"),
                         "batch_processed": True,  # 标记为批量处理
                         "cross_corpus_aliases": batch_result["cross_corpus_aliases"],

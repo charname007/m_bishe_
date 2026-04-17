@@ -75,12 +75,8 @@ def init_clients():
     return pg_client, neo4j_client
 
 
-def init_workflow(corpus_per_worker: int = DEFAULT_BATCH_SIZE):
-    """初始化LLM和workflow
-
-    Args:
-        corpus_per_worker: 每个worker处理的语料数量，默认与batch_size相同
-    """
+def init_workflow():
+    """初始化LLM和workflow"""
     api_key = os.getenv("DEEPSEEK_API_KEY")
     base_url = os.getenv("DEEPSEEK_API_BASE_URL")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -96,7 +92,7 @@ def init_workflow(corpus_per_worker: int = DEFAULT_BATCH_SIZE):
     config.enable_entity_alignment = True
     config.enable_batch_llm = True
     config.enable_qa_mentor = True  # P15新增：启用QA导师双向交互
-    config.corpus_per_worker = corpus_per_worker  # 与batch_size同步
+    # corpus_per_worker 保持默认值 5，与 batch_llm_size 对齐实现 Worker 级并发
 
     workflow = build_distributed_workflow(llm, config)
 
@@ -150,7 +146,7 @@ async def main(
 
     # 初始化
     pg_client, neo4j_client = init_clients()
-    workflow, config = init_workflow(corpus_per_worker=batch_size)  # 同步设置
+    workflow, config = init_workflow()
 
     # 确保表有status字段
     pg_client.ensure_corpus_status_columns(DEFAULT_TABLE)

@@ -63,6 +63,16 @@ from .schemas import (
     BatchQAScaffoldItemResult, BatchQAScaffoldResult,
     # P15新增：批量Self-Check节点模型
     BatchSelfCheckQACorpusResult, BatchSelfCheckQAResult,
+    # P15新增：批量Eval节点模型
+    BatchEvalCorpusResult, BatchEvalResult,
+    # P15新增：批量Self-Check-Eval节点模型
+    BatchSelfCheckEvalCorpusResult, BatchSelfCheckEvalResult,
+    # P15新增：批量Label节点模型
+    BatchLabelCorpusResult, BatchLabelResult,
+    # P15新增：批量Self-Check-Label节点模型
+    BatchSelfCheckLabelCorpusResult, BatchSelfCheckLabelResult,
+    # P15新增：批量Entity_Alignment节点模型
+    BatchEntityAlignmentCorpusResult, BatchEntityAlignmentResult,
     # P10新增：QA导师模型
     ApprovalStatusEnum, ApprovalFeedback, NodeApprovalResult, QAApprovalResult,
     MentorGuidance, QAMentorScaffoldResult,
@@ -97,6 +107,14 @@ from .prompts import (
     BATCH_SELF_CHECK_QA_PROMPT,
     # P15新增：批量Eval提示词
     BATCH_EVAL_PROMPT,
+    # P15新增：批量Self-Check-Eval提示词
+    BATCH_SELF_CHECK_EVAL_PROMPT,
+    # P15新增：批量Label提示词
+    BATCH_LABEL_PROMPT,
+    # P15新增：批量Self-Check-Label提示词
+    BATCH_SELF_CHECK_LABEL_PROMPT,
+    # P15新增：批量Entity_Alignment提示词
+    BATCH_ENTITY_ALIGNMENT_PROMPT,
     # P10新增：QA导师模式提示词
     QA_MENTOR_PROMPT, QA_APPROVAL_PROMPT, REVISION_JOINT_PROMPT,
     # P11新增：实体对齐提示词
@@ -166,6 +184,12 @@ from .nodes import (
     create_batch_eval_node,
     # P15新增：批量Self-Check-Eval节点
     create_batch_self_check_eval_node,
+    # P15新增：批量Label节点
+    create_batch_label_node,
+    # P15新增：批量Self-Check-Label节点
+    create_batch_self_check_label_node,
+    # P15新增：批量Entity_Alignment节点
+    create_batch_entity_alignment_node,
     # P10新增：QA导师节点
     create_qa_mentor_node,
     create_qa_approval_node,
@@ -254,6 +278,14 @@ __all__ = [
     "BatchSelfCheckQACorpusResult", "BatchSelfCheckQAResult",
     # P15新增：批量Eval节点模型
     "BatchEvalCorpusResult", "BatchEvalResult",
+    # P15新增：批量Self-Check-Eval节点模型
+    "BatchSelfCheckEvalCorpusResult", "BatchSelfCheckEvalResult",
+    # P15新增：批量Label节点模型
+    "BatchLabelCorpusResult", "BatchLabelResult",
+    # P15新增：批量Self-Check-Label节点模型
+    "BatchSelfCheckLabelCorpusResult", "BatchSelfCheckLabelResult",
+    # P15新增：批量Entity_Alignment节点模型
+    "BatchEntityAlignmentCorpusResult", "BatchEntityAlignmentResult",
     "ApprovalStatusEnum", "ApprovalFeedback", "NodeApprovalResult", "QAApprovalResult",
     "MentorGuidance", "QAMentorScaffoldResult",
     "EntityCandidate", "EntityAlignmentItem", "EntityAlignmentResult",
@@ -274,6 +306,14 @@ __all__ = [
     "BATCH_SELF_CHECK_QA_PROMPT",
     # P15新增：批量Eval提示词
     "BATCH_EVAL_PROMPT",
+    # P15新增：批量Self-Check-Eval提示词
+    "BATCH_SELF_CHECK_EVAL_PROMPT",
+    # P15新增：批量Label提示词
+    "BATCH_LABEL_PROMPT",
+    # P15新增：批量Self-Check-Label提示词
+    "BATCH_SELF_CHECK_LABEL_PROMPT",
+    # P15新增：批量Entity_Alignment提示词
+    "BATCH_ENTITY_ALIGNMENT_PROMPT",
     "QA_MENTOR_PROMPT", "QA_APPROVAL_PROMPT", "REVISION_JOINT_PROMPT",
     "ENTITY_ALIGNMENT_PROMPT",
 
@@ -324,6 +364,14 @@ __all__ = [
     "create_batch_self_check_qa_node",
     # P15新增：批量Eval节点
     "create_batch_eval_node",
+    # P15新增：批量Self-Check-Eval节点
+    "create_batch_self_check_eval_node",
+    # P15新增：批量Label节点
+    "create_batch_label_node",
+    # P15新增：批量Self-Check-Label节点
+    "create_batch_self_check_label_node",
+    # P15新增：批量Entity_Alignment节点
+    "create_batch_entity_alignment_node",
     "create_qa_mentor_node", "create_qa_approval_node", "create_revision_joint_node",
     "create_entity_alignment_node",
     # P13新增：优化版节点
