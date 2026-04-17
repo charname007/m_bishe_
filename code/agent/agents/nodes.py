@@ -208,6 +208,25 @@ def safe_parse_json_with_quote_fix(parser: PydanticOutputParser, text: str) -> A
                 raise e3
 
 
+def truncate_for_log(text: Any, max_length: int = 2000) -> str:
+    """
+    截断文本用于日志输出，避免日志过长
+
+    Args:
+        text: 要截断的文本（可以是字符串或其他类型）
+        max_length: 最大长度（默认2000字符）
+
+    Returns:
+        截断后的文本字符串
+    """
+    if text is None:
+        return ""
+    str_text = str(text)
+    if len(str_text) <= max_length:
+        return str_text
+    return f"{str_text[:max_length]}... [截断，总长度: {len(str_text)}]"
+
+
 def parse_batch_extraction_lenient(text: str) -> Dict[str, Any]:
     """
     批量抽取宽松解析：
@@ -258,7 +277,9 @@ def parse_batch_extraction_lenient(text: str) -> Dict[str, Any]:
                 continue
             e_type = e.get("type", "POI")
             evidence = e.get("evidence") or name
-            cleaned_entities.append({**e, "name": name, "type": e_type, "evidence": evidence})
+            cleaned_entities.append(
+                {**e, "name": name, "type": e_type, "evidence": evidence}
+            )
 
         triples = item.get("triples", [])
         if not isinstance(triples, list):
@@ -436,6 +457,7 @@ from .prompts import (
     format_label_for_approval,
     format_revision_feedbacks,
     format_reflection_for_approval,
+    format_batch_entities_triples_for_eval,
     # P14新增：导师查询提示词
     MENTOR_QUERY_PROMPT,
     BATCH_MENTOR_QUERY_PROMPT,
@@ -1212,7 +1234,13 @@ def rule_based_validation(
 def sanitize_triples_for_pipeline(
     triples: List[Any], context: str = "unknown"
 ) -> List[Dict[str, Any]]:
-    """清洗三元组，过滤缺失 head/relation/tail 的脏数据。"""
+    """清洗三元组，过滤缺失 head/relation/tail 的脏数据。
+
+    兼容字段别名：
+    - subject -> head
+    - predicate -> relation
+    - object -> tail
+    """
     if not triples:
         return []
 
@@ -1232,8 +1260,16 @@ def sanitize_triples_for_pipeline(
             continue
 
         head = t.get("head")
+        if head is None or (isinstance(head, str) and not head.strip()):
+            head = t.get("subject")
+
         relation = t.get("relation")
+        if relation is None or (isinstance(relation, str) and not relation.strip()):
+            relation = t.get("predicate")
+
         tail = t.get("tail")
+        if tail is None or (isinstance(tail, str) and not tail.strip()):
+            tail = t.get("object")
 
         if hasattr(relation, "value"):
             relation = relation.value
@@ -1353,7 +1389,7 @@ def create_eval_simplified_node(
 
             # 处理评分
             scores = []
-            for s in (result.scores or []):
+            for s in result.scores or []:
                 if not s or not getattr(s, "triple", None):
                     continue
                 triple_obj = s.triple
@@ -1968,20 +2004,37 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
 
                 corpus_id = corpus_state.get("corpus_id", "unknown")
 
+                # P22新增：获取对齐后的实体ID映射
+                entity_alignment_result = corpus_state.get(
+                    "entity_alignment_result", {}
+                )
+                aligned_entity_ids = entity_alignment_result.get(
+                    "aligned_entity_ids", {}
+                )
+
                 # 收集实体
                 entities = corpus_state.get("entities", {})
                 for entity_type, names in entities.items():
                     for name in names:
-                        all_entities.append(
-                            {
-                                "name": name,
-                                "type": entity_type,
-                                "corpus_id": corpus_id,
-                                "attrs": corpus_state.get("entity_attrs", {}).get(
-                                    name, {}
-                                ),
-                            }
-                        )
+                        entity_data = {
+                            "name": name,
+                            "type": entity_type,
+                            "corpus_id": corpus_id,
+                            "attrs": corpus_state.get("entity_attrs", {}).get(name, {}),
+                        }
+                        # P22新增：如果实体已对齐，设置数据库ID
+                        db_entity_id = aligned_entity_ids.get(name, "")
+                        if db_entity_id:
+                            entity_data["db_entity_id"] = db_entity_id
+                            # 从aligned_entity_attrs获取更多数据库信息
+                            aligned_attrs = entity_alignment_result.get(
+                                "aligned_entity_attrs", {}
+                            ).get(name, {})
+                            if aligned_attrs.get("source"):
+                                entity_data["source"] = aligned_attrs.get("source")
+                            if aligned_attrs.get("db_name"):
+                                entity_data["db_name"] = aligned_attrs.get("db_name")
+                        all_entities.append(entity_data)
 
                 # 收集三元组，并写入relation_attrs
                 relation_attrs = corpus_state.get("relation_attrs", {})
@@ -2001,17 +2054,35 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     if hasattr(triple, "model_dump"):
                         triple = triple.model_dump(mode="json")
                     if not isinstance(triple, dict):
-                        logger.warning(f"[Aggregator] 跳过非字典三元组: corpus={corpus_id}")
+                        logger.warning(
+                            f"[Aggregator] 跳过非字典三元组: corpus={corpus_id}"
+                        )
                         continue
                     # P21修复：支持 subject/object 字段映射到 head/tail
                     if "head" not in triple or not triple.get("head"):
                         triple["head"] = triple.get("subject", "")
                     if "tail" not in triple or not triple.get("tail"):
                         triple["tail"] = triple.get("object", "")
-                    if not triple.get("head") or not triple.get("relation") or not triple.get("tail"):
-                        logger.warning(f"[Aggregator] 跳过缺失字段三元组: corpus={corpus_id}, triple={triple}")
+                    # 兼容 predicate 字段映射到 relation（避免误判缺失字段）
+                    if "relation" not in triple or not triple.get("relation"):
+                        triple["relation"] = triple.get("predicate", "")
+                    if (
+                        not triple.get("head")
+                        or not triple.get("relation")
+                        or not triple.get("tail")
+                    ):
+                        logger.warning(
+                            f"[Aggregator] 跳过缺失字段三元组: corpus={corpus_id}, triple={triple}"
+                        )
                         continue
                     triple["_corpus_id"] = corpus_id
+
+                    # P22新增：为三元组的head/tail设置对齐ID
+                    head_name = triple.get("head", "")
+                    tail_name = triple.get("tail", "")
+                    triple["head_db_entity_id"] = aligned_entity_ids.get(head_name, "")
+                    triple["tail_db_entity_id"] = aligned_entity_ids.get(tail_name, "")
+
                     # 查找关系属性（使用标准格式）
                     triple_key = (
                         f"<{triple['head']}, {triple['relation']}, {triple['tail']}>"
@@ -2219,6 +2290,27 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
                 if other_names:
                     aliases[standard_name] = other_names
 
+                # P22修复：保留对齐ID（优先使用标准名的db_entity_id）
+                db_entity_id = ""
+                db_name = ""
+                source = ""
+                # 先检查标准名是否有对齐ID
+                for occ in occurrences:
+                    if occ.get("name") == standard_name:
+                        if occ.get("db_entity_id"):
+                            db_entity_id = occ.get("db_entity_id", "")
+                            db_name = occ.get("db_name", "")
+                            source = occ.get("source", "")
+                            break
+                # 如果标准名没有对齐ID，检查其他别名是否有
+                if not db_entity_id:
+                    for occ in occurrences:
+                        if occ.get("db_entity_id"):
+                            db_entity_id = occ.get("db_entity_id", "")
+                            db_name = occ.get("db_name", "")
+                            source = occ.get("source", "")
+                            break
+
                 unique_entities.append(
                     {
                         "name": standard_name,
@@ -2228,6 +2320,9 @@ def deduplicate_entities(entities: List[Dict], threshold: float) -> tuple:
                         "occurrence_count": len(occurrences),
                         "corpus_ids": list(set(o["corpus_id"] for o in occurrences)),
                         "attrs": entity_attrs,
+                        "db_entity_id": db_entity_id,
+                        "db_name": db_name,
+                        "source": source,
                     }
                 )
 
@@ -3586,7 +3681,9 @@ def create_self_check_normalize_node(llm: Any):
 # ===== P10新增：批量LLM调用节点 =====
 
 
-def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
+def create_batch_joint_extraction_node(
+    llm: Any, batch_llm_size: int = 5, retry_attempts: int = 1
+):
     """
     创建批量联合抽取节点
 
@@ -3636,7 +3733,7 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                 "needs_fallback": False,
             }
 
-        max_retries = 2  # 同阶段重试优先，减少直接fallback
+        max_retries = max(int(retry_attempts or 0) + 1, 1)
         retry_delay = 2.0  # 初始延迟秒数
 
         for retry in range(max_retries):
@@ -3654,6 +3751,9 @@ def create_batch_joint_extraction_node(llm: Any, batch_llm_size: int = 5):
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
                 response = await llm.ainvoke(full_prompt)
+                # P21改进：输出LLM原始响应到日志
+                logger.info(f"[Batch_Joint] LLM响应: {truncate_for_log(response.content)}")
+                logger.debug(f"[Batch_Joint] LLM完整响应: {response.content}")
                 try:
                     result: BatchExtractionResult = safe_parse_json_with_quote_fix(
                         parser, response.content
@@ -3861,6 +3961,9 @@ def create_batch_self_check_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Self_Check] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Self_Check] LLM完整响应: {response.content}")
             result: BatchSelfCheckResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -3884,9 +3987,8 @@ def create_batch_self_check_node(llm: Any):
                             final_entities[entity_type].remove(entity)
 
                 # 合并三元组：verified + corrected
-                final_triples = (
-                    r_dict.get("verified_triples", []) +
-                    r_dict.get("corrected_triples", [])
+                final_triples = r_dict.get("verified_triples", []) + r_dict.get(
+                    "corrected_triples", []
                 )
 
                 # 计算修正数量
@@ -3897,7 +3999,8 @@ def create_batch_self_check_node(llm: Any):
                 final_result = {
                     "corpus_id": r_dict["corpus_id"],
                     "entities": final_entities,
-                    "full_entities": r_dict.get("verified_full_entities", []) + r_dict.get("corrected_full_entities", []),
+                    "full_entities": r_dict.get("verified_full_entities", [])
+                    + r_dict.get("corrected_full_entities", []),
                     "triples": final_triples,
                     "confidence": r_dict.get("confidence", "medium"),
                     "has_geo_info": r_dict.get("has_geo_info", True),
@@ -4044,6 +4147,9 @@ def create_batch_self_check_qa_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Self_Check_QA] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Self_Check_QA] LLM完整响应: {response.content}")
             result: BatchSelfCheckQAResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -4057,15 +4163,14 @@ def create_batch_self_check_qa_node(llm: Any):
 
                 # 合并QA问答对：verified + corrected + added
                 final_qa_pairs = (
-                    r_dict.get("verified_qa_pairs", []) +
-                    r_dict.get("corrected_qa_pairs", []) +
-                    r_dict.get("added_qa_pairs", [])
+                    r_dict.get("verified_qa_pairs", [])
+                    + r_dict.get("corrected_qa_pairs", [])
+                    + r_dict.get("added_qa_pairs", [])
                 )
 
                 # 计算修正数量
-                corrections = (
-                    len(r_dict.get("corrected_qa_pairs", [])) +
-                    len(r_dict.get("added_qa_pairs", []))
+                corrections = len(r_dict.get("corrected_qa_pairs", [])) + len(
+                    r_dict.get("added_qa_pairs", [])
                 )
                 correction_count += corrections
 
@@ -4152,8 +4257,8 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
 
     职责：
     1. 对批量三元组进行评分（SEM、FAC、CON）
-    2. 判断是否需要修正
-    3. 决定每条语料的评估是否通过
+    2. 对批量实体进行评分（SEM/FAC/CON）
+    3. 判断是否需要修正并决定每条语料的评估是否通过
 
     Args:
         llm: LLM实例
@@ -4165,7 +4270,7 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
     from .schemas import BatchEvalResult
     from .prompts import (
         BATCH_EVAL_PROMPT,
-        format_batch_triples_for_eval,
+        format_batch_entities_triples_for_eval,
         format_corpus_texts_for_check,
     )
 
@@ -4206,58 +4311,49 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
                 "overall_confidence": "medium",
             }
 
-        # 检查是否有语料无三元组，直接标记为通过
+        # 检查是否有语料无三元组：三元组评估直接通过；实体评估继续执行
         no_triple_corpus = []
-        has_triple_corpus = {}
         for corpus_id, data in batch_extraction_results.items():
             if not data.get("triples"):
                 no_triple_corpus.append(corpus_id)
-            else:
-                has_triple_corpus[corpus_id] = data
 
-        # 无三元组的语料直接通过
+        # 无三元组语料的默认结果：三元组通过，实体通过（若模型未返回实体评分则沿用默认）
         no_triple_results = {
             corpus_id: {
                 "scores": [],
+                "entity_scores": [],
+                "triple_eval_passed": True,
+                "entity_eval_passed": True,
                 "eval_passed": True,
                 "corrected_triples": [],
+                "entity_issues": [],
                 "confidence": "low",
             }
             for corpus_id in no_triple_corpus
         }
 
-        if not has_triple_corpus:
-            logger.info("[Batch_Eval] 所有语料无三元组")
-            writer(
-                {
-                    "step": "batch_eval",
-                    "status": "completed",
-                    "batch_size": batch_size,
-                    "all_no_triples": True,
-                }
-            )
-            return {
-                "batch_eval_results": no_triple_results,
-                "overall_confidence": "low",
-            }
-
         try:
             # 格式化输入
-            triples_str = format_batch_triples_for_eval(has_triple_corpus)
+            eval_input_str = format_batch_entities_triples_for_eval(
+                batch_extraction_results
+            )
             texts_str = format_corpus_texts_for_check(
-                {cid: corpus_texts.get(cid, "") for cid in has_triple_corpus}
+                {cid: corpus_texts.get(cid, "") for cid in batch_extraction_results}
             )
 
             # 调用LLM
             prompt_text = BATCH_EVAL_PROMPT.invoke(
                 {
-                    "batch_triples": triples_str,
+                    "batch_entities_triples": eval_input_str,
                     "corpus_texts": texts_str,
                 }
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Eval] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Eval] LLM完整响应: {response.content}")
             result: BatchEvalResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -4265,15 +4361,51 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
             # 转换为字典格式
             eval_results_dict = {}
             for r in result.batch_eval_results:
+                triple_eval_passed = bool(
+                    getattr(r, "triple_eval_passed", r.eval_passed)
+                )
+                entity_eval_passed = bool(
+                    getattr(r, "entity_eval_passed", r.eval_passed)
+                )
+                merged_eval_passed = bool(
+                    getattr(
+                        r,
+                        "eval_passed",
+                        (triple_eval_passed and entity_eval_passed),
+                    )
+                )
                 eval_results_dict[r.corpus_id] = {
                     "scores": r.scores,
-                    "eval_passed": r.eval_passed,
+                    "entity_scores": getattr(r, "entity_scores", []),
+                    "triple_eval_passed": triple_eval_passed,
+                    "entity_eval_passed": entity_eval_passed,
+                    "eval_passed": merged_eval_passed,
                     "corrected_triples": r.corrected_triples,
+                    "entity_issues": getattr(r, "entity_issues", []),
                     "confidence": r.confidence,
                 }
 
-            # 合并无三元组的结果
-            all_results = {**no_triple_results, **eval_results_dict}
+            # 回填无三元组语料默认结果（若模型遗漏）
+            for corpus_id, default_result in no_triple_results.items():
+                if corpus_id not in eval_results_dict:
+                    eval_results_dict[corpus_id] = default_result
+
+            # 覆盖缺失语料（容错保护）
+            all_results = {}
+            for corpus_id in batch_extraction_results.keys():
+                all_results[corpus_id] = eval_results_dict.get(
+                    corpus_id,
+                    {
+                        "scores": [],
+                        "entity_scores": [],
+                        "triple_eval_passed": False,
+                        "entity_eval_passed": False,
+                        "eval_passed": False,
+                        "corrected_triples": [],
+                        "entity_issues": ["Batch_Eval 结果缺失"],
+                        "confidence": "low",
+                    },
+                )
 
             logger.info(
                 f"[Batch_Eval] 完成: {len(all_results)} 条语料, "
@@ -4309,8 +4441,12 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
             fallback_results = {
                 corpus_id: {
                     "scores": [],
+                    "entity_scores": [],
+                    "triple_eval_passed": True,
+                    "entity_eval_passed": True,
                     "eval_passed": True,
                     "corrected_triples": [],
+                    "entity_issues": [],
                     "confidence": "low",
                 }
                 for corpus_id in batch_extraction_results
@@ -4393,6 +4529,12 @@ def create_batch_self_check_eval_node(llm: Any):
             # 格式化输入
             eval_str = ""
             for corpus_id, data in batch_eval_results.items():
+                # P21修复：安全处理可能为非字典的数据
+                if not isinstance(data, dict):
+                    logger.warning(f"[Batch_Self_Check_Eval] corpus_id={corpus_id} data不是字典: {type(data)}")
+                    eval_str += f"- [{corpus_id}] 数据格式异常: {type(data).__name__}\n"
+                    continue
+
                 scores = data.get("scores", [])
                 eval_passed = data.get("eval_passed", True)
                 confidence = data.get("confidence", "medium")
@@ -4400,21 +4542,35 @@ def create_batch_self_check_eval_node(llm: Any):
 
                 score_str = ""
                 if scores:
-                    score_str = ", ".join(
-                        [
-                            f"<{s.get('triple', {}).get('head', '')},...> SEM:{s.get('SEM', 0)}"
-                            for s in scores[:3]
-                        ]
-                    )
+                    # P21修复：安全处理 scores 元素，triple 可能是字符串而非字典
+                    safe_scores = []
+                    for s in scores[:3]:
+                        if not isinstance(s, dict):
+                            safe_scores.append(f"[非字典:{type(s).__name__}]")
+                            continue
+                        triple_val = s.get('triple')
+                        if isinstance(triple_val, dict):
+                            head = triple_val.get('head', '')
+                        elif triple_val is None:
+                            head = ''
+                        else:
+                            # triple 是字符串或其他类型
+                            head = str(triple_val)[:20]  # 截取前20字符作为显示
+                        safe_scores.append(f"<{head},...> SEM:{s.get('SEM', 0)}")
+                    score_str = ", ".join(safe_scores)
 
                 triples_str = ""
                 if corrected_triples:
-                    triples_str = ", ".join(
-                        [
+                    # P21修复：安全处理 corrected_triples 元素
+                    safe_triples = []
+                    for t in corrected_triples[:5]:
+                        if not isinstance(t, dict):
+                            safe_triples.append(f"[非字典:{type(t).__name__}]")
+                            continue
+                        safe_triples.append(
                             f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
-                            for t in corrected_triples[:5]
-                        ]
-                    )
+                        )
+                    triples_str = ", ".join(safe_triples)
 
                 eval_str += f"- [{corpus_id}] 通过:{eval_passed} 置信度:{confidence}\n  评分: {score_str}\n  三元组: {triples_str}\n"
 
@@ -4430,6 +4586,9 @@ def create_batch_self_check_eval_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Self_Check_Eval] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Self_Check_Eval] LLM完整响应: {response.content}")
             result: BatchSelfCheckEvalResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -4442,9 +4601,8 @@ def create_batch_self_check_eval_node(llm: Any):
                 r_dict = r.model_dump(mode="json")
 
                 # 合并三元组：verified + corrected
-                final_triples = (
-                    r_dict.get("verified_triples", []) +
-                    r_dict.get("corrected_triples", [])
+                final_triples = r_dict.get("verified_triples", []) + r_dict.get(
+                    "corrected_triples", []
                 )
 
                 # 计算修正数量
@@ -4500,19 +4658,25 @@ def create_batch_self_check_eval_node(llm: Any):
             )
 
             # 校验失败时，保守策略：全部通过但标记低置信度
+            # P21修复：安全处理非字典数据
+            verified_results = []
+            for cid, data in batch_eval_results.items():
+                if isinstance(data, dict):
+                    verified_triples = data.get("corrected_triples", [])
+                else:
+                    logger.warning(f"[Batch_Self_Check_Eval] fallback: corpus_id={cid} data不是字典")
+                    verified_triples = []
+                verified_results.append({
+                    "corpus_id": cid,
+                    "verified_triples": verified_triples,
+                    "corrected_triples": [],
+                    "rejected_triples": [],
+                    "correction_records": [],
+                    "score_consistency": "low",
+                    "confidence": "low",
+                })
             return {
-                "verified_results": [
-                    {
-                        "corpus_id": cid,
-                        "verified_triples": data.get("corrected_triples", []),
-                        "corrected_triples": [],
-                        "rejected_triples": [],
-                        "correction_records": [],
-                        "score_consistency": "low",
-                        "confidence": "low",
-                    }
-                    for cid, data in batch_eval_results.items()
-                ],
+                "verified_results": verified_results,
                 "rejected_results": [],
                 "overall_confidence": "low",
                 "correction_count": 0,
@@ -4665,6 +4829,9 @@ def create_batch_label_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Label] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Label] LLM完整响应: {response.content}")
             result: BatchLabelResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -4785,6 +4952,9 @@ def create_batch_self_check_label_node(llm: Any):
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
 
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Self_Check_Label] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Self_Check_Label] LLM完整响应: {response.content}")
             result: BatchSelfCheckLabelResult = safe_parse_json_with_quote_fix(
                 parser, response.content
             )
@@ -4812,9 +4982,8 @@ def create_batch_self_check_label_node(llm: Any):
                     final_relation_attrs.pop(key, None)
 
                 # 计算修正数量
-                corrections = (
-                    len(r_dict.get("corrected_entity_attrs", {})) +
-                    len(r_dict.get("corrected_relation_attrs", {}))
+                corrections = len(r_dict.get("corrected_entity_attrs", {})) + len(
+                    r_dict.get("corrected_relation_attrs", {})
                 )
                 correction_count += corrections
 
@@ -4823,11 +4992,17 @@ def create_batch_self_check_label_node(llm: Any):
                     "entity_attrs": final_entity_attrs,  # 最终实体属性
                     "relation_attrs": final_relation_attrs,  # 最终关系属性
                     "verified_entity_attrs": r_dict.get("verified_entity_attrs", {}),
-                    "verified_relation_attrs": r_dict.get("verified_relation_attrs", {}),
+                    "verified_relation_attrs": r_dict.get(
+                        "verified_relation_attrs", {}
+                    ),
                     "corrected_entity_attrs": r_dict.get("corrected_entity_attrs", {}),
-                    "corrected_relation_attrs": r_dict.get("corrected_relation_attrs", {}),
+                    "corrected_relation_attrs": r_dict.get(
+                        "corrected_relation_attrs", {}
+                    ),
                     "rejected_entity_attrs": r_dict.get("rejected_entity_attrs", []),
-                    "rejected_relation_attrs": r_dict.get("rejected_relation_attrs", []),
+                    "rejected_relation_attrs": r_dict.get(
+                        "rejected_relation_attrs", []
+                    ),
                     "attr_completeness": r_dict.get("attr_completeness", "medium"),
                     "confidence": r_dict.get("confidence", "medium"),
                 }
@@ -4907,9 +5082,8 @@ def create_batch_entity_alignment_node(llm: Any):
         nonlocal _embedding_model_cache
         if _embedding_model_cache is None:
             from sentence_transformers import SentenceTransformer
-            from settings import settings
 
-            config = settings.get_extraction_config()
+            config = ExtractionConfig.from_env()
             model_name = config.alignment_embedding_model
             logger.info(f"[Batch_Entity_Alignment] 加载embedding模型: {model_name}")
             _embedding_model_cache = SentenceTransformer(model_name)
@@ -4986,13 +5160,17 @@ def create_batch_entity_alignment_node(llm: Any):
             amap_embeddings.append(emb_list)
 
         geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
-        amap_embeddings_np = np.array(amap_embeddings) if amap_embeddings else np.array([])
+        amap_embeddings_np = (
+            np.array(amap_embeddings) if amap_embeddings else np.array([])
+        )
         logger.info(
             f"[Batch_Entity_Alignment] 预加载embedding: geo={len(geo_entities)}, amap={len(amap_entities)}"
         )
         return geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np
 
-    def _batch_similarity_search(query_embeddings_np, db_embeddings_np, db_entities, top_k):
+    def _batch_similarity_search(
+        query_embeddings_np, db_embeddings_np, db_entities, top_k
+    ):
         """内存批量cosine similarity检索"""
         import numpy as np
 
@@ -5046,7 +5224,7 @@ def create_batch_entity_alignment_node(llm: Any):
             from settings import settings
             from kg.postgres_client import PostgresClient
 
-            config = settings.get_extraction_config()
+            config = ExtractionConfig.from_env()
 
             # 收集全batch实体（去重），并建立 corpus -> entity 映射
             corpus_entity_attrs = {}
@@ -5064,6 +5242,7 @@ def create_batch_entity_alignment_node(llm: Any):
                 aligned_dict = {
                     str(cid): {
                         "aligned_entity_attrs": {},
+                        "aligned_entity_ids": {},
                         "new_entities": [],
                         "confidence": "high",
                     }
@@ -5077,7 +5256,9 @@ def create_batch_entity_alignment_node(llm: Any):
                 nonlocal _db_cache
                 if _db_cache is None:
                     _db_cache = _load_db_embeddings(pg_client)
-                geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = _db_cache
+                geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = (
+                    _db_cache
+                )
 
             # 计算query embedding并检索候选
             model = _get_embedding_model()
@@ -5105,15 +5286,15 @@ def create_batch_entity_alignment_node(llm: Any):
                 candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
                 for c in candidates:
                     if c.get("source") == "amap_poi_wgs84":
-                        amap_id = c.get("id")
-                        c["db_entity_id"] = (
-                            f"poi_{amap_id}" if amap_id is not None else c.get("entity_id", "")
-                        )
-                        c["db_original_id"] = c.get("original_id")
+                        # amap数据：使用original_id作为Neo4j匹配键
+                        # original_id格式如 'amap_B0FFLCH14H' 对应Neo4j的original_id属性
+                        c["db_entity_id"] = c.get("original_id", "")
+                        c["db_original_id"] = c.get("original_id", "")
                         c["db_name"] = c.get("name", "")
                         c["db_type"] = c.get("type", "")
                     else:
-                        c["db_entity_id"] = c.get("entity_id")
+                        # geo_entity_names数据：entity_id直接对应Neo4j的entity_id
+                        c["db_entity_id"] = c.get("entity_id", "")
                         c["db_name"] = c.get("name", "")
                         c["db_type"] = c.get("type", "")
 
@@ -5182,7 +5363,9 @@ def create_batch_entity_alignment_node(llm: Any):
                     prompt_text = BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT.invoke(
                         {
                             "raw_text": json.dumps(corpus_texts, ensure_ascii=False),
-                            "items_json": json.dumps(items_for_prompt, ensure_ascii=False),
+                            "items_json": json.dumps(
+                                items_for_prompt, ensure_ascii=False
+                            ),
                         }
                     )
                     full_prompt = (
@@ -5190,6 +5373,9 @@ def create_batch_entity_alignment_node(llm: Any):
                         f"{batch_alignment_parser.get_format_instructions()}"
                     )
                     response = await llm.ainvoke(full_prompt)
+                    # P21改进：输出LLM原始响应到日志
+                    logger.info(f"[Batch_Entity_Alignment] LLM响应: {truncate_for_log(response.content)}")
+                    logger.debug(f"[Batch_Entity_Alignment] LLM完整响应: {response.content}")
                     parsed_result: BatchEntityAlignmentDecisionResult = (
                         safe_parse_json_with_quote_fix(
                             batch_alignment_parser, response.content
@@ -5269,7 +5455,16 @@ def create_batch_entity_alignment_node(llm: Any):
                     status = d.get("status", "new_entity")
                     status_counter[status] = status_counter.get(status, 0) + 1
                     if status == "aligned":
-                        aligned_entity_attrs[entity_name] = attrs
+                        # 从best_candidate提取数据库ID信息
+                        best_candidate = d.get("best_candidate", {})
+                        aligned_entity_attrs[entity_name] = {
+                            **attrs,
+                            "db_entity_id": best_candidate.get("db_entity_id", ""),
+                            "db_original_id": best_candidate.get("db_original_id", ""),
+                            "db_name": best_candidate.get("db_name", ""),
+                            "db_type": best_candidate.get("db_type", ""),
+                            "source": best_candidate.get("source", ""),
+                        }
                     elif status == "new_entity":
                         new_entities.append(entity_name)
 
@@ -5281,14 +5476,25 @@ def create_batch_entity_alignment_node(llm: Any):
                     corpus_conf = "high"
                 else:
                     ratio = overall_sum / max(overall_cnt * 2, 1)
-                    corpus_conf = "high" if ratio >= 0.7 else "medium" if ratio >= 0.4 else "low"
+                    corpus_conf = (
+                        "high" if ratio >= 0.7 else "medium" if ratio >= 0.4 else "low"
+                    )
 
                 aligned_dict[corpus_id] = {
                     "aligned_entity_attrs": aligned_entity_attrs,
+                    "aligned_entity_ids": {
+                        name: attrs.get("db_entity_id", "")
+                        for name, attrs in aligned_entity_attrs.items()
+                    },
                     "new_entities": new_entities,
                     "confidence": corpus_conf,
                 }
 
+                # 日志样例：展示ID映射
+                id_samples = [
+                    (name, attrs.get("db_entity_id", ""))
+                    for name, attrs in list(aligned_entity_attrs.items())[:3]
+                ]
                 alignment_detail_logs.append(
                     {
                         "corpus_id": corpus_id,
@@ -5298,6 +5504,7 @@ def create_batch_entity_alignment_node(llm: Any):
                         "confidence": corpus_conf,
                         "aligned_samples": list(aligned_entity_attrs.keys())[:5],
                         "new_samples": new_entities[:5],
+                        "id_mapping_samples": id_samples,
                     }
                 )
 
@@ -5336,6 +5543,7 @@ def create_batch_entity_alignment_node(llm: Any):
                 "aligned_results": {
                     cid: {
                         "aligned_entity_attrs": {},
+                        "aligned_entity_ids": {},
                         "new_entities": [],
                         "confidence": "low",
                     }
@@ -5361,7 +5569,6 @@ async def process_corpus_batch_with_llm(
     batch_label_node: Any = None,  # P17����
     batch_self_check_eval_node: Any = None,  # P17����
     batch_self_check_label_node: Any = None,  # P17����
-    
     batch_entity_alignment_node: Any = None,  # P21 added
     qa_llm: Any = None,
 ) -> Dict:
@@ -5424,9 +5631,7 @@ async def process_corpus_batch_with_llm(
         0.0,
         min(
             1.0,
-            float(
-                getattr(config, "mentor_label_missing_ratio_threshold", 0.8) or 0.8
-            ),
+            float(getattr(config, "mentor_label_missing_ratio_threshold", 0.8) or 0.8),
         ),
     )
     mentor_label_min_missing_attrs = max(
@@ -5441,7 +5646,11 @@ async def process_corpus_batch_with_llm(
         }
 
     if batch_joint_node is None:
-        batch_joint_node = create_batch_joint_extraction_node(llm, batch_llm_size)
+        batch_joint_node = create_batch_joint_extraction_node(
+            llm,
+            batch_llm_size,
+            retry_attempts=batch_stage_retry_attempts,
+        )
     if batch_self_check_node is None:
         batch_self_check_node = create_batch_self_check_node(llm)
     if batch_eval_node is None:
@@ -5484,7 +5693,9 @@ async def process_corpus_batch_with_llm(
                 ids.add(str(item.get("corpus_id")))
         return ids
 
-    def _has_missing_coverage(stage_name: str, expected_ids: set, actual_ids: set) -> bool:
+    def _has_missing_coverage(
+        stage_name: str, expected_ids: set, actual_ids: set
+    ) -> bool:
         if not expected_ids:
             return False
         missing_ids = sorted(expected_ids - actual_ids)
@@ -5493,7 +5704,9 @@ async def process_corpus_batch_with_llm(
                 f"[{stage_name}] 结果覆盖不完整: expected={len(expected_ids)}, "
                 f"actual={len(actual_ids)}, missing={missing_ids[:5]}"
             )
-            return True
+            # 批处理模式下：覆盖不完整仅告警，不判定为阶段失败。
+            # 缺失样本由后续缺口处理逻辑兜底（按当前策略继续流转或单条标记）。
+            return False
         return False
 
     def _flatten_entities(entities: Dict) -> List[Dict]:
@@ -5556,9 +5769,7 @@ async def process_corpus_batch_with_llm(
             failed = bool(is_failed(last_result))
             if not failed:
                 if attempt > 0:
-                    logger.info(
-                        f"[{stage_name}] 批量重试成功: 第{attempt + 1}次尝试"
-                    )
+                    logger.info(f"[{stage_name}] 批量重试成功: 第{attempt + 1}次尝试")
                 return last_result
 
             err_msg = ""
@@ -5573,6 +5784,9 @@ async def process_corpus_batch_with_llm(
                 logger.error(
                     f"[{stage_name}] 批量重试耗尽({batch_stage_retry_attempts + 1}次): {err_msg}"
                 )
+        # 重试耗尽后，确保结果带有 error 字段
+        if isinstance(last_result, dict) and not last_result.get("error"):
+            last_result["error"] = f"{stage_name} 重试耗尽: {err_msg}"
         return last_result
 
     async def _mentor_batch_answer_queries(
@@ -5616,9 +5830,7 @@ async def process_corpus_batch_with_llm(
                     "previous_guidance": guidance_text,
                 }
             )
-            full_prompt = (
-                f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
-            )
+            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await qa_model.ainvoke(full_prompt)
             result: BatchMentorQueryResponse = safe_parse_json_with_quote_fix(
                 parser, response.content
@@ -5700,9 +5912,7 @@ async def process_corpus_batch_with_llm(
                 return None
             return rerun_delta
         except Exception as e:
-            logger.warning(
-                f"[Batch-Mentor-Inline] {source_node} 导师处理失败: {e}"
-            )
+            logger.warning(f"[Batch-Mentor-Inline] {source_node} 导师处理失败: {e}")
             return None
 
     all_batch_results = {}
@@ -5820,7 +6030,9 @@ async def process_corpus_batch_with_llm(
             if batch_skip_on_repeated_failure and check_result.get("error"):
                 err = str(check_result.get("error"))
                 _mark_many_skipped(
-                    list(batch_results.keys()), err, "batch_self_check_failed_after_retries"
+                    list(batch_results.keys()),
+                    err,
+                    "batch_self_check_failed_after_retries",
                 )
                 logger.warning(
                     f"[Batch {batch_num}] Batch_Self_Check 反复失败，按策略直接跳过本批"
@@ -5864,6 +6076,43 @@ async def process_corpus_batch_with_llm(
                     )
 
             all_cross_corpus_aliases.extend(check_result["verified_aliases"])
+
+            # P18修复：处理覆盖不完整时缺失的语料
+            verified_ids = _list_corpus_id_set(check_result.get("verified_results", []))
+            rejected_ids = _list_corpus_id_set(check_result.get("rejected_results", []))
+            covered_ids = verified_ids | rejected_ids
+            expected_ids = _dict_id_set(batch_results)
+            missing_ids = expected_ids - covered_ids
+
+            if missing_ids:
+                logger.warning(
+                    f"[Batch_Self_Check] 覆盖不完整，缺失 {len(missing_ids)} 条语料: {list(missing_ids)[:5]}"
+                )
+                if not batch_skip_on_repeated_failure and batch_llm_fallback:
+                    for corpus in batch_corpus:
+                        cid = str(corpus.get("id"))
+                        if cid in missing_ids and cid not in fallback_corpus_ids:
+                            fallback_corpus_ids.add(cid)
+                            fallback_corpus_list.append(corpus)
+                            logger.warning(
+                                f"[Batch_Self_Check] 语料 {cid} 未覆盖，加入 fallback"
+                            )
+                elif batch_skip_on_repeated_failure:
+                    for cid in missing_ids:
+                        all_batch_results[cid] = {
+                            "entities": DEFAULT_ENTITY_DICT.copy(),
+                            "triples": [],
+                            "eval_passed": False,
+                            "eval_scores": [],
+                            "entity_attrs": {},
+                            "relation_attrs": {},
+                            "confidence": "error",
+                            "error": "batch_self_check_coverage_missing",
+                            "skip_reason": "batch_self_check_coverage_missing",
+                        }
+                        logger.warning(
+                            f"[Batch_Self_Check] 语料 {cid} 未覆盖，按策略直接跳过"
+                        )
         else:
             verified_results = [
                 {
@@ -5952,14 +6201,18 @@ async def process_corpus_batch_with_llm(
 
             if rerun_joint_corpus:
                 joint_rerun_count = len(rerun_joint_corpus)
-                rerun_joint_result = await batch_joint_node(rerun_joint_corpus, dummy_writer)
+                rerun_joint_result = await batch_joint_node(
+                    rerun_joint_corpus, dummy_writer
+                )
                 rerun_joint_map = rerun_joint_result.get("batch_results", {}) or {}
                 for corpus_id, rerun_joint in rerun_joint_map.items():
                     old_joint = verified_results_dict.get(corpus_id, {})
                     old_conf = old_joint.get("confidence", "medium")
                     verified_results_dict[corpus_id] = {
                         "corpus_id": corpus_id,
-                        "entities": rerun_joint.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                        "entities": rerun_joint.get(
+                            "entities", DEFAULT_ENTITY_DICT.copy()
+                        ),
                         "triples": rerun_joint.get("triples", []),
                         "confidence": rerun_joint.get("confidence", old_conf),
                     }
@@ -5991,7 +6244,10 @@ async def process_corpus_batch_with_llm(
                     _dict_id_set(r.get("batch_eval_results", {})),
                 ),
             )
-            eval_result = eval_result or {"batch_eval_results": {}, "error": "Batch_Eval 未返回有效结果"}
+            eval_result = eval_result or {
+                "batch_eval_results": {},
+                "error": "Batch_Eval 未返回有效结果",
+            }
             if batch_skip_on_repeated_failure and eval_result.get("error"):
                 err = str(eval_result.get("error"))
                 _mark_many_skipped(
@@ -6072,12 +6328,20 @@ async def process_corpus_batch_with_llm(
                 verified_eval_results = {}
                 for r in eval_check_result["verified_results"]:
                     corpus_id = r["corpus_id"]
+                    source_eval = eval_result["batch_eval_results"].get(corpus_id, {})
                     verified_eval_results[corpus_id] = {
                         "corrected_triples": r.get("verified_triples", []),
-                        "scores": eval_result["batch_eval_results"]
-                        .get(corpus_id, {})
-                        .get("scores", []),
-                        "eval_passed": True,
+                        "scores": source_eval.get("scores", []),
+                        # 保留实体评估字段，避免 full self-check 路径丢失实体评估结论
+                        "entity_scores": source_eval.get("entity_scores", []),
+                        "entity_issues": source_eval.get("entity_issues", []),
+                        "triple_eval_passed": source_eval.get(
+                            "triple_eval_passed", True
+                        ),
+                        "entity_eval_passed": source_eval.get(
+                            "entity_eval_passed", True
+                        ),
+                        "eval_passed": source_eval.get("eval_passed", True),
                         "confidence": r.get("confidence", "medium"),
                     }
             else:
@@ -6141,7 +6405,9 @@ async def process_corpus_batch_with_llm(
                     if not joint_data:
                         continue
                     rerun_eval_input[corpus_id] = {
-                        "entities": joint_data.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                        "entities": joint_data.get(
+                            "entities", DEFAULT_ENTITY_DICT.copy()
+                        ),
                         "triples": joint_data.get("triples", []),
                         "mentor_note": mentor_resp.get("answer", ""),
                     }
@@ -6150,7 +6416,9 @@ async def process_corpus_batch_with_llm(
                     rerun_eval_batch = await batch_eval_node(
                         rerun_eval_input, corpus_texts, dummy_writer
                     )
-                    rerun_eval_map = rerun_eval_batch.get("batch_eval_results", {}) or {}
+                    rerun_eval_map = (
+                        rerun_eval_batch.get("batch_eval_results", {}) or {}
+                    )
                     for corpus_id, rerun_eval in rerun_eval_map.items():
                         old_eval = verified_eval_results.get(corpus_id, {})
                         updated_eval_results[corpus_id] = {
@@ -6158,7 +6426,23 @@ async def process_corpus_batch_with_llm(
                                 "corrected_triples",
                                 old_eval.get("corrected_triples", []),
                             ),
-                            "scores": rerun_eval.get("scores", old_eval.get("scores", [])),
+                            "scores": rerun_eval.get(
+                                "scores", old_eval.get("scores", [])
+                            ),
+                            "entity_scores": rerun_eval.get(
+                                "entity_scores", old_eval.get("entity_scores", [])
+                            ),
+                            "entity_issues": rerun_eval.get(
+                                "entity_issues", old_eval.get("entity_issues", [])
+                            ),
+                            "triple_eval_passed": rerun_eval.get(
+                                "triple_eval_passed",
+                                old_eval.get("triple_eval_passed", True),
+                            ),
+                            "entity_eval_passed": rerun_eval.get(
+                                "entity_eval_passed",
+                                old_eval.get("entity_eval_passed", True),
+                            ),
                             "eval_passed": rerun_eval.get(
                                 "eval_passed", old_eval.get("eval_passed", False)
                             ),
@@ -6181,6 +6465,14 @@ async def process_corpus_batch_with_llm(
                         "triples": triples,
                         "eval_passed": False,
                         "eval_scores": eval_data.get("scores", []),
+                        "entity_eval_scores": eval_data.get("entity_scores", []),
+                        "entity_issues": eval_data.get("entity_issues", []),
+                        "triple_eval_passed": eval_data.get(
+                            "triple_eval_passed", False
+                        ),
+                        "entity_eval_passed": eval_data.get(
+                            "entity_eval_passed", False
+                        ),
                         "confidence": eval_data.get("confidence", "medium"),
                         "reextract_needed": False,
                         "error": "batch_eval_not_passed_after_retries",
@@ -6281,6 +6573,20 @@ async def process_corpus_batch_with_llm(
                             "triples": current_triples,
                             "eval_passed": current_passed,
                             "eval_scores": current_scores,
+                            "entity_eval_scores": reeval_data.get(
+                                "entity_scores", eval_data.get("entity_scores", [])
+                            ),
+                            "entity_issues": reeval_data.get(
+                                "entity_issues", eval_data.get("entity_issues", [])
+                            ),
+                            "triple_eval_passed": reeval_data.get(
+                                "triple_eval_passed",
+                                eval_data.get("triple_eval_passed", current_passed),
+                            ),
+                            "entity_eval_passed": reeval_data.get(
+                                "entity_eval_passed",
+                                eval_data.get("entity_eval_passed", current_passed),
+                            ),
                             "confidence": current_confidence,
                             "reextract_needed": not current_passed,
                         }
@@ -6292,6 +6598,14 @@ async def process_corpus_batch_with_llm(
                             "triples": triples,
                             "eval_passed": False,
                             "eval_scores": eval_data.get("scores", []),
+                            "entity_eval_scores": eval_data.get("entity_scores", []),
+                            "entity_issues": eval_data.get("entity_issues", []),
+                            "triple_eval_passed": eval_data.get(
+                                "triple_eval_passed", False
+                            ),
+                            "entity_eval_passed": eval_data.get(
+                                "entity_eval_passed", False
+                            ),
                             "confidence": eval_data.get("confidence", "medium"),
                             "reextract_needed": True,
                         }
@@ -6304,6 +6618,10 @@ async def process_corpus_batch_with_llm(
                     "triples": triples,
                     "eval_passed": eval_passed,
                     "eval_scores": eval_data.get("scores", []),
+                    "entity_eval_scores": eval_data.get("entity_scores", []),
+                    "entity_issues": eval_data.get("entity_issues", []),
+                    "triple_eval_passed": eval_data.get("triple_eval_passed", True),
+                    "entity_eval_passed": eval_data.get("entity_eval_passed", True),
                     "confidence": eval_data.get("confidence", "medium"),
                     "reextract_needed": False,
                 }
@@ -6314,7 +6632,8 @@ async def process_corpus_batch_with_llm(
                 merged_data = all_batch_results.get(corpus_id, {})
                 label_input[corpus_id] = {
                     "entities": merged_data.get(
-                        "entities", joint_data.get("entities", DEFAULT_ENTITY_DICT.copy())
+                        "entities",
+                        joint_data.get("entities", DEFAULT_ENTITY_DICT.copy()),
                     ),
                     "triples": sanitize_triples_for_pipeline(
                         merged_data.get("triples", joint_data.get("triples", [])),
@@ -6342,7 +6661,9 @@ async def process_corpus_batch_with_llm(
                 if batch_skip_on_repeated_failure and label_result.get("error"):
                     err = str(label_result.get("error"))
                     _mark_many_skipped(
-                        list(label_input.keys()), err, "batch_label_failed_after_retries"
+                        list(label_input.keys()),
+                        err,
+                        "batch_label_failed_after_retries",
                     )
                     logger.warning(
                         f"[Batch {batch_num}] Batch_Label 反复失败，按策略直接跳过本批"
@@ -6353,7 +6674,9 @@ async def process_corpus_batch_with_llm(
                     label_check_result = await _run_batch_stage_with_retry(
                         f"Batch {batch_num}/Batch_Self_Check_Label",
                         lambda: batch_self_check_label_node(
-                            label_result["batch_label_results"], corpus_texts, dummy_writer
+                            label_result["batch_label_results"],
+                            corpus_texts,
+                            dummy_writer,
                         ),
                         lambda r: (not isinstance(r, dict))
                         or bool(r.get("error"))
@@ -6373,7 +6696,9 @@ async def process_corpus_batch_with_llm(
                         "rejected_results": [],
                         "error": "Batch_Self_Check_Label 未返回有效结果",
                     }
-                    if batch_skip_on_repeated_failure and label_check_result.get("error"):
+                    if batch_skip_on_repeated_failure and label_check_result.get(
+                        "error"
+                    ):
                         err = str(label_check_result.get("error"))
                         _mark_many_skipped(
                             list(label_result.get("batch_label_results", {}).keys()),
@@ -6493,7 +6818,9 @@ async def process_corpus_batch_with_llm(
                         if not eval_data:
                             continue
                         rerun_label_input[corpus_id] = {
-                            "entities": eval_data.get("entities", DEFAULT_ENTITY_DICT.copy()),
+                            "entities": eval_data.get(
+                                "entities", DEFAULT_ENTITY_DICT.copy()
+                            ),
                             "triples": sanitize_triples_for_pipeline(
                                 eval_data.get("triples", []),
                                 context=f"batch_label_mentor_rerun:{corpus_id}",
@@ -6505,7 +6832,9 @@ async def process_corpus_batch_with_llm(
                         rerun_label_batch = await batch_label_node(
                             rerun_label_input, corpus_texts, dummy_writer
                         )
-                        rerun_label_map = rerun_label_batch.get("batch_label_results", {}) or {}
+                        rerun_label_map = (
+                            rerun_label_batch.get("batch_label_results", {}) or {}
+                        )
                         for corpus_id, rerun_label in rerun_label_map.items():
                             label_data = verified_label_results.get(corpus_id, {})
                             updated_label_results[corpus_id] = {
@@ -6513,7 +6842,8 @@ async def process_corpus_batch_with_llm(
                                     "entity_attrs", label_data.get("entity_attrs", {})
                                 ),
                                 "relation_attrs": rerun_label.get(
-                                    "relation_attrs", label_data.get("relation_attrs", {})
+                                    "relation_attrs",
+                                    label_data.get("relation_attrs", {}),
                                 ),
                                 "confidence": label_data.get("confidence", "medium"),
                             }
@@ -6533,7 +6863,11 @@ async def process_corpus_batch_with_llm(
 
             # P21新增：批量实体对齐（可选）
             enable_entity_alignment = getattr(config, "enable_entity_alignment", False)
-            if enable_entity_alignment and batch_entity_alignment_node and updated_label_results:
+            if (
+                enable_entity_alignment
+                and batch_entity_alignment_node
+                and updated_label_results
+            ):
                 logger.info("[Batch_Entity_Alignment] 开始批量实体对齐")
 
                 # 获取数据库已有实体（用于对齐匹配）
@@ -6541,15 +6875,20 @@ async def process_corpus_batch_with_llm(
                 try:
                     from settings import settings
                     from kg.postgres_client import PostgresClient
+
                     pg_config = settings.get_postgres_config()
                     with PostgresClient(**pg_config) as pg_client:
                         # 从 geo_entity_names 表获取已有实体名称
                         with pg_client.conn.cursor() as cur:
                             cur.execute("SELECT name FROM geo_entity_names LIMIT 1000")
                             existing_entities = [row[0] for row in cur.fetchall()]
-                    logger.debug(f"[Batch_Entity_Alignment] 获取到 {len(existing_entities)} 个已有实体")
+                    logger.debug(
+                        f"[Batch_Entity_Alignment] 获取到 {len(existing_entities)} 个已有实体"
+                    )
                 except Exception as e:
-                    logger.warning(f"[Batch_Entity_Alignment] 获取已有实体失败: {e}, 使用空列表")
+                    logger.warning(
+                        f"[Batch_Entity_Alignment] 获取已有实体失败: {e}, 使用空列表"
+                    )
                     existing_entities = []
 
                 # 调用实体对齐节点
@@ -6590,13 +6929,13 @@ async def process_corpus_batch_with_llm(
                 aligned_results = alignment_result.get("aligned_results", {})
                 for corpus_id, aligned_data in aligned_results.items():
                     target_corpus_id = (
-                        corpus_id
-                        if corpus_id in all_batch_results
-                        else str(corpus_id)
+                        corpus_id if corpus_id in all_batch_results else str(corpus_id)
                     )
                     if target_corpus_id in all_batch_results:
                         # 合并对齐后的实体属性
-                        aligned_attrs = aligned_data.get("aligned_entity_attrs", {}) or {}
+                        aligned_attrs = (
+                            aligned_data.get("aligned_entity_attrs", {}) or {}
+                        )
                         new_entities = aligned_data.get("new_entities", []) or []
                         aligned_entity_names = list(aligned_attrs.keys())
 
@@ -6620,11 +6959,20 @@ async def process_corpus_batch_with_llm(
                         all_batch_results[target_corpus_id]["aligned_entities"] = (
                             aligned_entity_names
                         )
-                        all_batch_results[target_corpus_id]["new_entities"] = new_entities
-                        all_batch_results[target_corpus_id]["entity_alignment_result"] = {
+                        all_batch_results[target_corpus_id]["new_entities"] = (
+                            new_entities
+                        )
+                        # 提取对齐后的实体ID映射
+                        aligned_entity_ids = (
+                            aligned_data.get("aligned_entity_ids", {}) or {}
+                        )
+                        all_batch_results[target_corpus_id][
+                            "entity_alignment_result"
+                        ] = {
                             "alignment_items": [],
                             "aligned_entities": aligned_entity_names,
                             "aligned_entity_attrs": aligned_attrs,
+                            "aligned_entity_ids": aligned_entity_ids,
                             "new_entities": new_entities,
                             "created_entities": [],
                             "created_count": 0,
@@ -6638,10 +6986,13 @@ async def process_corpus_batch_with_llm(
                             f"[Batch_Entity_Alignment][Corpus {target_corpus_id}] "
                             f"aligned={len(aligned_entity_names)}, "
                             f"new={len(new_entities)}, "
+                            f"ids_mapped={len(aligned_entity_ids)}, "
                             f"confidence={aligned_data.get('confidence', 'medium')}"
                         )
 
-                logger.info(f"[Batch_Entity_Alignment] 完成: {len(aligned_results)} 条语料")
+                logger.info(
+                    f"[Batch_Entity_Alignment] 完成: {len(aligned_results)} 条语料"
+                )
 
     return {
         "batch_results": all_batch_results,
@@ -6649,6 +7000,7 @@ async def process_corpus_batch_with_llm(
         "fallback_corpus_list": fallback_corpus_list,
         "needs_single_processing": len(fallback_corpus_list) > 0,
     }
+
 
 def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
     """
@@ -6728,8 +7080,8 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{query_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
-                query_result: MentorQueryResponse = (
-                    safe_parse_json_with_quote_fix(query_parser, response.content)
+                query_result: MentorQueryResponse = safe_parse_json_with_quote_fix(
+                    query_parser, response.content
                 )
 
                 logger.info(
@@ -6825,8 +7177,8 @@ def create_qa_mentor_node(llm: Any, config: ExtractionConfig):
                 )
                 full_prompt = f"{prompt_text.messages[1].content}\n\n{scaffold_parser.get_format_instructions()}"
                 response = await llm.ainvoke(full_prompt)
-                result: QAMentorScaffoldResult = (
-                    safe_parse_json_with_quote_fix(scaffold_parser, response.content)
+                result: QAMentorScaffoldResult = safe_parse_json_with_quote_fix(
+                    scaffold_parser, response.content
                 )
 
                 logger.info(
@@ -7050,7 +7402,7 @@ def create_qa_approval_node(llm: Any, config: ExtractionConfig):
                     "step": "qa_approval",
                     "corpus_id": corpus_id,
                     "status": "completed",
-                    "overall_status": result.overall_status.value,
+                    "overall_status": extract_enum_value(result.overall_status),
                     "overall_confidence": result.overall_confidence,
                     "retry_suggested": result.retry_suggested,
                     "revision_cycle": revision_cycle_count + 1,
@@ -7767,9 +8119,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 # 为amap候选计算正确的neo4j entity_id
                 for c in candidates:
                     if c.get("source") == "amap_poi_wgs84":
-                        amap_id = c.get("id")
-                        c["db_entity_id"] = f"poi_{amap_entity_id_base + amap_id}"
-                        c["db_original_id"] = c.get("original_id")
+                        # P22修复：使用original_id作为db_entity_id（如amap_B0FFLCH14H）
+                        c["db_entity_id"] = c.get("original_id", "")
+                        c["db_original_id"] = c.get("original_id", "")
                         # 清理不需要的字段
                         c.pop("id", None)
                         c.pop("original_id", None)
@@ -7871,12 +8223,13 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                     )
                     response = await llm.ainvoke(full_prompt)
                     parsed_result: BatchEntityAlignmentDecisionResult = (
-                        safe_parse_json_with_quote_fix(batch_alignment_parser, response.content)
+                        safe_parse_json_with_quote_fix(
+                            batch_alignment_parser, response.content
+                        )
                     )
 
                     decision_map = {
-                        d.extracted_name: d
-                        for d in (parsed_result.decisions or [])
+                        d.extracted_name: d for d in (parsed_result.decisions or [])
                     }
                     valid_statuses = {"aligned", "new_entity", "skip"}
 
@@ -7905,7 +8258,9 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                         alignment_item["alignment_status"] = llm_status
                         alignment_item["llm_decision"] = llm_decision
 
-                        if llm_status == "aligned" and 0 <= best_index < len(candidates):
+                        if llm_status == "aligned" and 0 <= best_index < len(
+                            candidates
+                        ):
                             best_match = candidates[best_index]
                             _mark_aligned(entity_name, alignment_item, best_match)
                             logger.debug(
@@ -8781,6 +9136,9 @@ def create_batch_filter_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Filter] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Filter] LLM完整响应: {response.content}")
             result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, processed_corpus, skipped_corpus = {}, [], []
             for r in result.results:
@@ -8854,6 +9212,9 @@ def create_batch_normalize_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_Normalize] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_Normalize] LLM完整响应: {response.content}")
             result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, normalized_corpus = {}, []
             for r in result.results:
@@ -8920,6 +9281,9 @@ def create_batch_qa_scaffold_node(llm: Any):
             )
             full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
             response = await llm.ainvoke(full_prompt)
+            # P21改进：输出LLM原始响应到日志
+            logger.info(f"[Batch_QA_Scaffold] LLM响应: {truncate_for_log(response.content)}")
+            logger.debug(f"[Batch_QA_Scaffold] LLM完整响应: {response.content}")
             result = safe_parse_json_with_quote_fix(parser, response.content)
             batch_results, qa_corpus = {}, []
             for r in result.results:

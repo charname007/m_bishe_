@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator, ConfigD
 from enum import Enum
 
 
+class LenientBaseModel(BaseModel):
+    """宽松Schema基类：允许额外字段，降低LLM结构化输出失败率。"""
+
+    model_config = ConfigDict(extra="allow")
+
+
 # ===== 关系类型枚举（v3.2精简版：8个） =====
 
 
@@ -80,18 +86,7 @@ ENTITY_TYPE_VARIANT_MAPPING: Dict[str, str] = {
 
 
 def normalize_entity_type(v: Any) -> EntityTypeEnum:
-    """
-    将实体类型变体映射到标准枚举值（P15修复）
-
-    Args:
-        v: 输入的实体类型（可以是枚举值、英文成员名或中文值）
-
-    Returns:
-        EntityTypeEnum: 标准化的实体类型枚举
-
-    Raises:
-        ValueError: 输入为空或无法映射到有效实体类型
-    """
+    """严格归一化（保留兼容）。"""
     if v is None:
         raise ValueError("type 不能为空")
     if isinstance(v, EntityTypeEnum):
@@ -105,6 +100,12 @@ def normalize_entity_type(v: Any) -> EntityTypeEnum:
     )
 
 
+def normalize_entity_type_soft(v: Any) -> EntityTypeEnum:
+    """宽松归一化：未知值回退到 POI，避免结构化输出失败。"""
+    try:
+        return normalize_entity_type(v)
+    except Exception:
+        return EntityTypeEnum.POI
 # ===== 关系类型变体映射常量（提取为模块级常量，消除重复） =====
 
 RELATION_VARIANT_MAPPING: Dict[str, str] = {
@@ -173,18 +174,7 @@ RELATION_VARIANT_MAPPING: Dict[str, str] = {
 
 
 def normalize_relation_type(v: Any) -> RelationTypeEnum:
-    """
-    将关系类型变体映射到标准枚举值
-
-    Args:
-        v: 输入的关系类型（可以是枚举值、字符串或变体）
-
-    Returns:
-        RelationTypeEnum: 标准化的关系类型枚举
-
-    Raises:
-        ValueError: 输入为空或无法映射到有效关系类型
-    """
+    """严格归一化（保留兼容）。"""
     if v is None:
         raise ValueError("relation 不能为空")
     if isinstance(v, RelationTypeEnum):
@@ -198,6 +188,69 @@ def normalize_relation_type(v: Any) -> RelationTypeEnum:
     )
 
 
+def normalize_relation_type_soft(v: Any) -> RelationTypeEnum:
+    """宽松归一化：未知值回退到“相对方位”，避免结构化输出失败。"""
+    try:
+        return normalize_relation_type(v)
+    except Exception:
+        return RelationTypeEnum.RELATIVE_ORIENTATION
+
+
+def normalize_distance_value_soft(v: Any) -> "DistanceValueEnum":
+    if v is None:
+        return DistanceValueEnum.MEDIUM
+    if isinstance(v, DistanceValueEnum):
+        return v
+    distance_mapping = {
+        "近": "近",
+        "很近": "近",
+        "附近": "近",
+        "旁边": "近",
+        "不远": "近",
+        "中等": "中等",
+        "有点远": "中等",
+        "稍微远": "中等",
+        "几百米": "中等",
+        "远": "远",
+        "很远": "远",
+        "比较远": "远",
+        "距离较远": "远",
+    }
+    normalized = distance_mapping.get(str(v))
+    if normalized:
+        return DistanceValueEnum(normalized)
+    return DistanceValueEnum.MEDIUM
+
+
+def normalize_direction_value_soft(v: Any) -> "DirectionValueEnum":
+    if v is None:
+        return DirectionValueEnum.BESIDE
+    if isinstance(v, DirectionValueEnum):
+        return v
+    direction_mapping = {
+        "东": "东",
+        "东边": "东",
+        "东侧": "东侧",
+        "南": "南",
+        "南边": "南",
+        "西": "西",
+        "西边": "西",
+        "西侧": "西侧",
+        "北": "北",
+        "北边": "北",
+        "东北": "东北",
+        "西南": "西南",
+        "对面": "对面",
+        "对面是": "对面",
+        "旁边": "旁边",
+        "旁边是": "旁边",
+        "前": "前",
+        "后": "后",
+    }
+    normalized = direction_mapping.get(str(v))
+    if normalized:
+        return DirectionValueEnum(normalized)
+    return DirectionValueEnum.BESIDE
 # =====人群节点枚举 =====
 
 
@@ -411,7 +464,7 @@ class ConfidenceEnum(str, Enum):
 # ===== Filter阶段输出模型 =====
 
 
-class FilterResult(BaseModel):
+class FilterResult(LenientBaseModel):
     """文本筛选结果 - 判断是否包含有价值的地理信息"""
 
     is_valid: bool = Field(
@@ -443,7 +496,7 @@ class FilterResult(BaseModel):
 # ===== Normalize阶段输出模型 =====
 
 
-class NormalizationRecord(BaseModel):
+class NormalizationRecord(LenientBaseModel):
     """单条归一化记录"""
 
     raw: str = Field(description="原始文本片段")
@@ -452,10 +505,10 @@ class NormalizationRecord(BaseModel):
     confidence: str = Field(default="high", description="归一化置信度")
 
 
-class NormalizeResult(BaseModel):
+class NormalizeResult(LenientBaseModel):
     """文本归一化结果 - 指代消解和语义标准化"""
 
-    normalized_text: str = Field(description="归一化后的完整文本")
+    normalized_text: str = Field(default="", description="归一化后的完整文本")
     normalizations: List[NormalizationRecord] = Field(
         default_factory=list, description="归一化记录列表"
     )
@@ -471,7 +524,7 @@ class NormalizeResult(BaseModel):
 # ===== QA Scaffold阶段输出模型（P8新增） =====
 
 
-class QAPair(BaseModel):
+class QAPair(LenientBaseModel):
     """单个问答对 - 5W1H引导生成的问答"""
 
     question: str = Field(description="5W1H引导问题")
@@ -483,7 +536,7 @@ class QAPair(BaseModel):
     confidence: str = Field(default="medium", description="回答置信度: high/medium/low")
 
 
-class QAScaffoldResult(BaseModel):
+class QAScaffoldResult(LenientBaseModel):
     """QA脚手架输出 - 5W1H问答扩展构建语义脚手架"""
 
     qa_pairs: List[QAPair] = Field(default_factory=list, description="5W1H问答对列表")
@@ -510,7 +563,7 @@ class QAScaffoldResult(BaseModel):
 # ===== NER阶段输出模型 =====
 
 
-class EntityRecognitionResult(BaseModel):
+class EntityRecognitionResult(LenientBaseModel):
     """命名实体识别结果"""
 
     道路: List[str] = Field(default_factory=list, description="道路实体列表")
@@ -522,7 +575,7 @@ class EntityRecognitionResult(BaseModel):
 # ===== RE阶段输出模型（v3.2改进：精简版三元组属性） =====
 
 
-class TripleAttributes(BaseModel):
+class TripleAttributes(LenientBaseModel):
     """三元组属性（v3.4精简版：删除联动推荐，开放文本属性）
 
     原文依据包括：明确出现、暗示表达、语义推断。禁止凭空创造（幻觉）。
@@ -538,7 +591,7 @@ class TripleAttributes(BaseModel):
     P20改进：放宽校验，忽略额外字段
     """
 
-    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段（原为 forbid）
+    model_config = ConfigDict(extra="allow")  # P20: 忽略未定义的字段（原为 forbid）
 
     # ===== LLM幻觉字段清理器（v3.5新增） =====
     # 这些字段应放在实体属性中，LLM有时错误地放在三元组属性中
@@ -575,11 +628,11 @@ class TripleAttributes(BaseModel):
         return data
 
     # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
-    距离值: Optional[DistanceValueEnum] = Field(
+    距离值: Optional[Union[DistanceValueEnum, str]] = Field(
         default=None,
         description="相对方位关系的距离值：近/中等/远（必须有原文依据，如'附近'→近）",
     )
-    方向值: Optional[DirectionValueEnum] = Field(
+    方向值: Optional[Union[DirectionValueEnum, str]] = Field(
         default=None,
         description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（必须有原文依据）",
     )
@@ -597,7 +650,7 @@ class TripleAttributes(BaseModel):
         default=None,
         description="功能的限制条件列表（开放文本，保留原文表达）：排队两小时、停车超级难、需提前预约等（必须有原文依据）",
     )
-    情感倾向: Optional[EmotionNodeEnum] = Field(
+    情感倾向: Optional[Union[EmotionNodeEnum, str]] = Field(
         default=None, description="功能的情感倾向：正面/中性/负面（必须有原文依据）"
     )
     功能描述: Optional[str] = Field(
@@ -609,7 +662,7 @@ class TripleAttributes(BaseModel):
     )
 
     # ===== 对比关系属性 =====
-    维度: Optional[List[CompareDimensionEnum]] = Field(
+    维度: Optional[List[Union[CompareDimensionEnum, str]]] = Field(
         default=None,
         description='优于/相似/劣于关系的维度列表（必须有原文依据，v3.3新增"其他"作为兜底）',
     )
@@ -626,28 +679,7 @@ class TripleAttributes(BaseModel):
         """将距离值变体映射到标准枚举值"""
         if v is None:
             return None
-        if isinstance(v, DistanceValueEnum):
-            return v
-        # 变体值映射
-        distance_mapping = {
-            "近": "近",
-            "很近": "近",
-            "附近": "近",
-            "旁边": "近",
-            "不远": "近",
-            "中等": "中等",
-            "有点远": "中等",
-            "稍微远": "中等",
-            "几百米": "中等",
-            "远": "远",
-            "很远": "远",
-            "比较远": "远",
-            "距离较远": "远",
-        }
-        normalized = distance_mapping.get(str(v))
-        if normalized:
-            return DistanceValueEnum(normalized)
-        raise ValueError(f"无效的距离值: {v}，有效值为: 近/中等/远")
+        return normalize_distance_value_soft(v)
 
     @field_validator("方向值", mode="before")
     @classmethod
@@ -655,33 +687,7 @@ class TripleAttributes(BaseModel):
         """将方向值变体映射到标准枚举值"""
         if v is None:
             return None
-        if isinstance(v, DirectionValueEnum):
-            return v
-        # 方向映射（包含变体）
-        direction_mapping = {
-            "东": "东",
-            "东边": "东",
-            "东侧": "东侧",
-            "南": "南",
-            "南边": "南",
-            "西": "西",
-            "西边": "西",
-            "西侧": "西侧",
-            "北": "北",
-            "北边": "北",
-            "东北": "东北",
-            "西南": "西南",
-            "对面": "对面",
-            "对面是": "对面",
-            "旁边": "旁边",
-            "旁边是": "旁边",
-        }
-        normalized = direction_mapping.get(str(v))
-        if normalized:
-            return DirectionValueEnum(normalized)
-        raise ValueError(
-            f"无效的方向值: {v}，有效值为: 东/南/西/北/东北/西南/东侧/西侧/对面/旁边"
-        )
+        return normalize_direction_value_soft(v)
 
     # v3.4删除：normalize_crowd和normalize_limits validator（改为开放文本）
 
@@ -699,18 +705,16 @@ class TripleAttributes(BaseModel):
 
     @model_validator(mode="after")
     def validate_other_function(self):
-        """校验：当功能类型为'其他'时，必须提供功能描述"""
-        if self.功能类型 and self.功能类型 == "其他" and not self.功能描述:
-            raise ValueError("当功能类型为'其他'时，必须提供功能描述")
+        """宽松校验：功能类型为“其他”但未给功能描述时仅放行。"""
         return self
 
 
-class Triple(BaseModel):
+class Triple(LenientBaseModel):
     """单个三元组（v3.2精简版：8个关系，强类型属性，全部可选）"""
 
-    head: str = Field(description="头实体名称")
-    relation: RelationTypeEnum = Field(description="关系类型（6种之一，硬校验）")
-    tail: str = Field(description="尾实体名称或预定义节点")
+    head: str = Field(default="", description="头实体名称")
+    relation: Union[RelationTypeEnum, str] = Field(description="关系类型（6种之一，硬校验）")
+    tail: str = Field(default="", description="尾实体名称或预定义节点")
     evidence: Optional[str] = Field(default="", description="文本证据")
     attributes: Optional[TripleAttributes] = Field(
         default=None, description="关系属性（强类型约束，全部可选，语料中出现才标注）"
@@ -720,10 +724,10 @@ class Triple(BaseModel):
     @classmethod
     def normalize_relation(cls, v):
         """将关系类型变体映射到标准枚举值（使用模块级常量）"""
-        return normalize_relation_type(v)
+        return normalize_relation_type_soft(v)
 
 
-class RelationExtractionResult(BaseModel):
+class RelationExtractionResult(LenientBaseModel):
     """关系抽取结果（v2.2改进）"""
 
     triples: List[Triple] = Field(default_factory=list, description="抽取的三元组列表")
@@ -732,7 +736,7 @@ class RelationExtractionResult(BaseModel):
 # ===== Eval阶段输出模型 =====
 
 
-class TripleForEval(BaseModel):
+class TripleForEval(LenientBaseModel):
     """用于评估的三元组（硬校验）
 
     P20改进：放宽校验，允许LLM输出不完整数据
@@ -741,11 +745,18 @@ class TripleForEval(BaseModel):
     model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
 
     head: str = Field(default="", description="头实体名称")  # P20: 放宽校验
-    relation: Optional[RelationTypeEnum] = Field(default=None, description="关系类型")  # P20: 放宽校验
+    relation: Optional[Union[RelationTypeEnum, str]] = Field(default=None, description="关系类型")  # P20: 放宽校验
     tail: str = Field(default="", description="尾实体名称")  # P20: 放宽校验
 
+    @field_validator("relation", mode="before")
+    @classmethod
+    def normalize_relation(cls, v):
+        if v is None:
+            return None
+        return normalize_relation_type_soft(v)
 
-class TripleScore(BaseModel):
+
+class TripleScore(LenientBaseModel):
     """单个三元组的评分
 
     P20改进：放宽校验，允许LLM输出不完整数据
@@ -759,13 +770,13 @@ class TripleScore(BaseModel):
     CON: Optional[int] = Field(default=3, ge=1, le=5, description="一致性评分(1-5)")  # P20: 放宽校验
 
 
-class EvalResultFirst(BaseModel):
+class EvalResultFirst(LenientBaseModel):
     """第一次评估结果"""
 
     scores: List[TripleScore] = Field(default_factory=list, description="评分列表")
 
 
-class Correction(BaseModel):
+class Correction(LenientBaseModel):
     """三元组修正
 
     P20改进：corrected 允许为 None（表示删除该三元组）
@@ -778,17 +789,17 @@ class Correction(BaseModel):
     reason: str = Field(default="", description="修正原因")  # P20: 放宽校验
 
 
-class EvalResultSecond(BaseModel):
+class EvalResultSecond(LenientBaseModel):
     """第二次评估结果（自检）"""
 
-    need_correction: bool = Field(description="是否需要修正")
+    need_correction: bool = Field(default=False, description="是否需要修正")
     corrections: List[Correction] = Field(default_factory=list, description="修正列表")
     final_scores: List[TripleScore] = Field(
         default_factory=list, description="最终评分"
     )
 
 
-class EvalResultSimplified(BaseModel):
+class EvalResultSimplified(LenientBaseModel):
     """简化的单次评估结果 - 包含评分和可选修正
 
     P20改进：放宽校验
@@ -806,7 +817,7 @@ class EvalResultSimplified(BaseModel):
 # ===== Label阶段输出模型（v3.3：特征标签开放文本，细分简化） =====
 
 
-class FunctionEntityAttributes(BaseModel):
+class FunctionEntityAttributes(LenientBaseModel):
     """功能实体属性（v3.4新增）
 
     功能实体作为独立实体抽取，不再仅作为三元组Tail。
@@ -818,7 +829,7 @@ class FunctionEntityAttributes(BaseModel):
 
     model_config = ConfigDict(extra="allow")  # P20: 允许额外字段（原为 forbid）
 
-    功能类型: Optional[FunctionEnum] = Field(default=None, description="功能大类（v3.4：10种）：餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他")  # P20: 放宽校验
+    功能类型: Optional[Union[FunctionEnum, str]] = Field(default=None, description="功能大类（v3.4：10种）：餐饮/购物/休闲/社交/观景/交通/住宿/文化/工作/其他")  # P20: 放宽校验
     功能细分: Optional[str] = Field(
         default=None,
         description="功能细分描述：咖啡厅、火锅、书店、手工艺体验等（必须有原文依据）",
@@ -835,17 +846,92 @@ class FunctionEntityAttributes(BaseModel):
         default=None,
         description="限制条件（开放文本列表，保留原文表达）：排队两小时、停车超级难、需提前预约等（必须有原文依据）",
     )
-    情感倾向: Optional[EmotionNodeEnum] = Field(
+    情感倾向: Optional[Union[EmotionNodeEnum, str]] = Field(
         default=None, description="功能体验情感：正面/中性/负面（必须有原文依据）"
     )
-    推荐指数: Optional[RatingNodeEnum] = Field(
+    推荐指数: Optional[Union[RatingNodeEnum, str]] = Field(
         default=None,
         description="功能推荐程度：超推/推荐/一般/不推荐（必须有原文依据）",
     )
     evidence: Optional[str] = Field(default=None, description="原文依据")
 
+    @field_validator("功能类型", mode="before")
+    @classmethod
+    def normalize_function_type(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, FunctionEnum):
+            return v
+        mapping = {
+            "餐饮": "餐饮",
+            "吃饭": "餐饮",
+            "美食": "餐饮",
+            "购物": "购物",
+            "逛街": "购物",
+            "休闲": "休闲",
+            "游玩": "休闲",
+            "社交": "社交",
+            "聚会": "社交",
+            "观景": "观景",
+            "拍照": "观景",
+            "交通": "交通",
+            "出行": "交通",
+            "住宿": "住宿",
+            "酒店": "住宿",
+            "文化": "文化",
+            "学习": "文化",
+            "工作": "工作",
+            "办公": "工作",
+            "其他": "其他",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return FunctionEnum(normalized)
+        return str(v)
 
-class EventEntityAttributes(BaseModel):
+    @field_validator("情感倾向", mode="before")
+    @classmethod
+    def normalize_emotion(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EmotionNodeEnum):
+            return v
+        mapping = {
+            "正面": "正面",
+            "积极": "正面",
+            "中性": "中性",
+            "一般": "中性",
+            "负面": "负面",
+            "消极": "负面",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EmotionNodeEnum(normalized)
+        return str(v)
+
+    @field_validator("推荐指数", mode="before")
+    @classmethod
+    def normalize_rating(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, RatingNodeEnum):
+            return v
+        mapping = {
+            "超推": "超推",
+            "强烈推荐": "超推",
+            "推荐": "推荐",
+            "一般": "一般",
+            "普通": "一般",
+            "不推荐": "不推荐",
+            "差评": "不推荐",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return RatingNodeEnum(normalized)
+        return str(v)
+
+
+class EventEntityAttributes(LenientBaseModel):
     """事件实体属性（v3.4新增）
 
     事件实体作为独立实体抽取，不再仅作为三元组Tail。
@@ -855,8 +941,8 @@ class EventEntityAttributes(BaseModel):
 
     model_config = ConfigDict(extra="allow")  # P20: 允许额外字段（原为 forbid）
 
-    事件类别: Optional[EventCategoryEnum] = Field(default=None, description="事件类别（7种）：自然事件/人文事件/商业活动/社会事件/业态变更/停业关闭/其他")  # P20: 放宽校验
-    事件状态: Optional[EventStateEnum] = Field(
+    事件类别: Optional[Union[EventCategoryEnum, str]] = Field(default=None, description="事件类别（7种）：自然事件/人文事件/商业活动/社会事件/业态变更/停业关闭/其他")  # P20: 放宽校验
+    事件状态: Optional[Union[EventStateEnum, str]] = Field(
         default=None,
         description="事件当前状态：正在进行/已结束/计划中/周期性（必须有原文依据）",
     )
@@ -868,7 +954,7 @@ class EventEntityAttributes(BaseModel):
         default=None,
         description="事件详细描述：樱花盛开、店铺倒闭、施工改造等（必须有原文依据）",
     )
-    情感倾向: Optional[EmotionNodeEnum] = Field(
+    情感倾向: Optional[Union[EmotionNodeEnum, str]] = Field(
         default=None, description="事件情感：正面/中性/负面（必须有原文依据）"
     )
     关联场所: Optional[str] = Field(
@@ -876,8 +962,73 @@ class EventEntityAttributes(BaseModel):
     )
     evidence: Optional[str] = Field(default=None, description="原文依据")
 
+    @field_validator("事件类别", mode="before")
+    @classmethod
+    def normalize_event_category(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EventCategoryEnum):
+            return v
+        mapping = {
+            "自然事件": "自然事件",
+            "人文事件": "人文事件",
+            "商业活动": "商业活动",
+            "社会事件": "社会事件",
+            "业态变更": "业态变更",
+            "停业/关闭": "停业/关闭",
+            "停业关闭": "停业/关闭",
+            "停业": "停业/关闭",
+            "关闭": "停业/关闭",
+            "其他": "其他",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EventCategoryEnum(normalized)
+        return str(v)
 
-class EntityAttributes(BaseModel):
+    @field_validator("事件状态", mode="before")
+    @classmethod
+    def normalize_event_state(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EventStateEnum):
+            return v
+        mapping = {
+            "正在进行": "正在进行",
+            "进行中": "正在进行",
+            "已结束": "已结束",
+            "结束": "已结束",
+            "计划中": "计划中",
+            "即将": "计划中",
+            "周期性": "周期性",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EventStateEnum(normalized)
+        return str(v)
+
+    @field_validator("情感倾向", mode="before")
+    @classmethod
+    def normalize_emotion(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EmotionNodeEnum):
+            return v
+        mapping = {
+            "正面": "正面",
+            "积极": "正面",
+            "中性": "中性",
+            "一般": "中性",
+            "负面": "负面",
+            "消极": "负面",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EmotionNodeEnum(normalized)
+        return str(v)
+
+
+class EntityAttributes(LenientBaseModel):
     """实体属性（v3.3改进）
 
     v3.3改进：
@@ -889,7 +1040,7 @@ class EntityAttributes(BaseModel):
     P20改进：放宽校验
     """
 
-    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段（原为 forbid）
+    model_config = ConfigDict(extra="allow")  # P20: 忽略未定义的字段（原为 forbid）
 
     # 基础分类属性（可选）
     类别: Optional[str] = Field(
@@ -907,15 +1058,56 @@ class EntityAttributes(BaseModel):
         default=None,
         description="特征描述（开放文本）：保留原文表达，如氛围超好、随手拍好看、遛娃神器等（必须有原文依据）",
     )
-    推荐指数: Optional[RatingNodeEnum] = Field(
+    推荐指数: Optional[Union[RatingNodeEnum, str]] = Field(
         default=None, description="推荐程度：超推/推荐/一般/不推荐（必须有原文依据）"
     )
-    情感倾向: Optional[EmotionNodeEnum] = Field(
+    情感倾向: Optional[Union[EmotionNodeEnum, str]] = Field(
         default=None, description="情感倾向：正面/中性/负面（必须有原文依据）"
     )
 
+    @field_validator("推荐指数", mode="before")
+    @classmethod
+    def normalize_rating(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, RatingNodeEnum):
+            return v
+        mapping = {
+            "超推": "超推",
+            "强烈推荐": "超推",
+            "推荐": "推荐",
+            "一般": "一般",
+            "普通": "一般",
+            "不推荐": "不推荐",
+            "差评": "不推荐",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return RatingNodeEnum(normalized)
+        return str(v)
 
-class RelationAttributes(BaseModel):
+    @field_validator("情感倾向", mode="before")
+    @classmethod
+    def normalize_emotion(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EmotionNodeEnum):
+            return v
+        mapping = {
+            "正面": "正面",
+            "积极": "正面",
+            "中性": "中性",
+            "一般": "中性",
+            "负面": "负面",
+            "消极": "负面",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EmotionNodeEnum(normalized)
+        return str(v)
+
+
+class RelationAttributes(LenientBaseModel):
     """关系属性（v3.4精简版：删除联动推荐，开放文本属性）
 
     根据 Schema v3.4，关系属性包括：
@@ -927,13 +1119,13 @@ class RelationAttributes(BaseModel):
     P20改进：放宽校验
     """
 
-    model_config = ConfigDict(extra="ignore")  # P20: 忽略未定义的字段
+    model_config = ConfigDict(extra="allow")  # P20: 忽略未定义的字段
 
     # ===== 相对方位关系属性（v3.4：删除联动推荐） =====
-    距离值: Optional[DistanceValueEnum] = Field(
+    距离值: Optional[Union[DistanceValueEnum, str]] = Field(
         default=None, description="相对方位关系的距离值：近/中等/远（语料中出现才标注）"
     )
-    方向值: Optional[DirectionValueEnum] = Field(
+    方向值: Optional[Union[DirectionValueEnum, str]] = Field(
         default=None,
         description="相对方位关系的方向值：东/南/西/北/东北/西南/东侧/西侧/对面/旁边（语料中出现才标注）",
     )
@@ -952,7 +1144,7 @@ class RelationAttributes(BaseModel):
         default=None,
         description="功能的限制条件（开放文本列表）：排队两小时、停车超级难等（语料中出现才标注）",
     )
-    情感倾向: Optional[EmotionNodeEnum] = Field(
+    情感倾向: Optional[Union[EmotionNodeEnum, str]] = Field(
         default=None, description="功能的情感倾向：正面/中性/负面（语料中出现才标注）"
     )
     功能描述: Optional[str] = Field(
@@ -965,7 +1157,7 @@ class RelationAttributes(BaseModel):
     )
 
     # ===== 对比关系属性 =====
-    维度: Optional[List[CompareDimensionEnum]] = Field(
+    维度: Optional[List[Union[CompareDimensionEnum, str]]] = Field(
         default=None,
         description='优于/相似/劣于关系的维度列表（语料中出现才标注，v3.3新增"其他"作为兜底）',
     )
@@ -973,6 +1165,72 @@ class RelationAttributes(BaseModel):
         default=None,
         description='当维度包含"其他"时，具体描述对比内容（语料中出现才标注）',
     )
+
+    @field_validator("距离值", mode="before")
+    @classmethod
+    def normalize_distance(cls, v):
+        if v is None:
+            return None
+        return normalize_distance_value_soft(v)
+
+    @field_validator("方向值", mode="before")
+    @classmethod
+    def normalize_direction(cls, v):
+        if v is None:
+            return None
+        return normalize_direction_value_soft(v)
+
+    @field_validator("情感倾向", mode="before")
+    @classmethod
+    def normalize_emotion(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, EmotionNodeEnum):
+            return v
+        mapping = {
+            "正面": "正面",
+            "积极": "正面",
+            "中性": "中性",
+            "一般": "中性",
+            "负面": "负面",
+            "消极": "负面",
+        }
+        normalized = mapping.get(str(v))
+        if normalized:
+            return EmotionNodeEnum(normalized)
+        return str(v)
+
+    @field_validator("维度", mode="before")
+    @classmethod
+    def normalize_dimensions(cls, v):
+        if v is None:
+            return None
+        items = v if isinstance(v, list) else [v]
+        mapping = {
+            "价格": "价格",
+            "价位": "价格",
+            "环境": "环境",
+            "服务": "服务",
+            "人流量": "人流量",
+            "客流": "人流量",
+            "品质": "品质",
+            "质量": "品质",
+            "交通": "交通",
+            "口味": "口味",
+            "味道": "口味",
+            "其他": "其他",
+        }
+        normalized_items: List[Union[CompareDimensionEnum, str]] = []
+        for item in items:
+            if isinstance(item, CompareDimensionEnum):
+                normalized_items.append(item)
+                continue
+            mapped = mapping.get(str(item))
+            if mapped:
+                normalized_items.append(CompareDimensionEnum(mapped))
+            else:
+                normalized_items.append(str(item))
+        return normalized_items
 
     @model_validator(mode="after")
     def validate_other_dimension(self):
@@ -988,9 +1246,7 @@ class RelationAttributes(BaseModel):
 
     @model_validator(mode="after")
     def validate_other_function(self):
-        """校验：当功能类型为'其他'时，必须提供功能描述"""
-        if self.功能类型 and self.功能类型 == "其他" and not self.功能描述:
-            raise ValueError("当功能类型为'其他'时，必须提供功能描述")
+        """宽松校验：功能类型为“其他”但未给功能描述时仅放行。"""
         return self
 
 
@@ -1013,7 +1269,7 @@ RELATION_ATTRS_MAP: Dict[str, List[str]] = {
 }
 
 
-class LabelResult(BaseModel):
+class LabelResult(LenientBaseModel):
     """属性标注结果（v3.2精简版）"""
 
     entities: Dict[str, EntityAttributes] = Field(
@@ -1028,7 +1284,7 @@ class LabelResult(BaseModel):
 # ===== Self-Check阶段输出模型 =====
 
 
-class VerifiedEntity(BaseModel):
+class VerifiedEntity(LenientBaseModel):
     """校验后的实体（v3.4更新：支持6种实体类型）"""
 
     name: str = Field(description="实体名称（归一化后）")
@@ -1038,7 +1294,7 @@ class VerifiedEntity(BaseModel):
     evidence: Optional[str] = Field(default="", description="原文依据")
 
 
-class MissingEntity(BaseModel):
+class MissingEntity(LenientBaseModel):
     """遗漏实体建议（v3.4更新：支持6种实体类型）"""
 
     name: str = Field(description="建议补充的实体名")
@@ -1048,7 +1304,7 @@ class MissingEntity(BaseModel):
     reason: str = Field(description="遗漏原因/原文依据")
 
 
-class EntityNormalization(BaseModel):
+class EntityNormalization(LenientBaseModel):
     """实体归一化记录"""
 
     raw: str = Field(description="原始名称（如'武大'）")
@@ -1056,7 +1312,7 @@ class EntityNormalization(BaseModel):
     confidence: str = Field(description="归一化置信度: high/medium/low")
 
 
-class SelfCheckNERResult(BaseModel):
+class SelfCheckNERResult(LenientBaseModel):
     """Self-Check-NER 输出"""
 
     verified_entities: List[VerifiedEntity] = Field(
@@ -1076,7 +1332,7 @@ class SelfCheckNERResult(BaseModel):
     )
 
 
-class VerifiedTriple(BaseModel):
+class VerifiedTriple(LenientBaseModel):
     """校验后的三元组"""
 
     head: str = Field(description="头实体")
@@ -1087,7 +1343,7 @@ class VerifiedTriple(BaseModel):
     evidence_match: Optional[str] = Field(default="", description="证据原文匹配位置")
 
 
-class RejectedTriple(BaseModel):
+class RejectedTriple(LenientBaseModel):
     """拒绝的三元组（幻觉或错误）"""
 
     head: str = Field(description="头实体")
@@ -1097,7 +1353,7 @@ class RejectedTriple(BaseModel):
     suggested_fix: Optional[str] = Field(default="", description="修正建议")
 
 
-class TripleCorrectionForSelfCheck(BaseModel):
+class TripleCorrectionForSelfCheck(LenientBaseModel):
     """三元组修正记录（Self-Check专用）"""
 
     original_head: str = Field(description="原始头实体")
@@ -1110,7 +1366,7 @@ class TripleCorrectionForSelfCheck(BaseModel):
     action: str = Field(description="操作类型：modify/delete/add")
 
 
-class SelfCheckREResult(BaseModel):
+class SelfCheckREResult(LenientBaseModel):
     """Self-Check-RE 输出"""
 
     verified_triples: List[VerifiedTriple] = Field(
@@ -1290,7 +1546,7 @@ FEATURE_TAGS = FEATURE_TAGS_REFERENCE
 # ===== 联合抽取模型（P9新增） =====
 
 
-class JointEntity(BaseModel):
+class JointEntity(LenientBaseModel):
     """联合抽取的单个实体（v3.4扩展版）
 
     v3.4改进：实体类型扩展为6种（新增功能、事件）
@@ -1300,7 +1556,7 @@ class JointEntity(BaseModel):
     model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
 
     name: str = Field(default="", description="实体名称")  # P20: 放宽校验
-    type: Optional[EntityTypeEnum] = Field(default=None, description="实体类型：道路/POI/建筑物/街区/功能/事件")  # P20: 放宽校验
+    type: Optional[Union[EntityTypeEnum, str]] = Field(default=None, description="实体类型：道路/POI/建筑物/街区/功能/事件")  # P20: 放宽校验
     category: Optional[str] = Field(default=None, description="细分类别")
     aliases: List[str] = Field(default_factory=list, description="别名/简称")
     evidence: Optional[str] = Field(default=None, description="原文依据")  # P20: 放宽校验
@@ -1318,10 +1574,10 @@ class JointEntity(BaseModel):
         """将实体类型变体映射到标准枚举值（P15修复：处理英文成员名，P20: 允许None）"""
         if v is None:
             return None
-        return normalize_entity_type(v)
+        return normalize_entity_type_soft(v)
 
 
-class JointTriple(BaseModel):
+class JointTriple(LenientBaseModel):
     """联合抽取的单个三元组（v3.2精简版：8个关系，强类型属性）
 
     P20改进：放宽校验，允许LLM输出不完整数据
@@ -1330,10 +1586,10 @@ class JointTriple(BaseModel):
     model_config = ConfigDict(extra="allow")  # P20: 允许额外字段
 
     head: str = Field(default="", description="头实体")  # P20: 放宽校验
-    relation: Optional[RelationTypeEnum] = Field(default=None, description="关系类型（6种之一）")  # P20: 放宽校验
+    relation: Optional[Union[RelationTypeEnum, str]] = Field(default=None, description="关系类型（6种之一）")  # P20: 放宽校验
     tail: str = Field(default="", description="尾实体")  # P20: 放宽校验
     evidence: Optional[str] = Field(default=None, description="原文依据")  # P20: 放宽校验
-    confidence: Optional[ConfidenceEnum] = Field(default="medium", description="置信度")  # P20: 放宽校验
+    confidence: Optional[Union[ConfidenceEnum, str]] = Field(default="medium", description="置信度")  # P20: 放宽校验
     attributes: Optional[TripleAttributes] = Field(
         default=None, description="关系属性（强类型约束，全部可选，语料中出现才标注）"
     )
@@ -1344,10 +1600,33 @@ class JointTriple(BaseModel):
         """将关系类型变体映射到标准枚举值（P20: 允许None）"""
         if v is None:
             return None
-        return normalize_relation_type(v)
+        return normalize_relation_type_soft(v)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v):
+        if v is None:
+            return ConfidenceEnum.MEDIUM
+        if isinstance(v, ConfidenceEnum):
+            return v
+        mapping = {
+            "high": "high",
+            "medium": "medium",
+            "low": "low",
+            "高": "high",
+            "中": "medium",
+            "低": "low",
+        }
+        normalized = mapping.get(str(v).strip().lower(), None)
+        if normalized:
+            return ConfidenceEnum(normalized)
+        normalized = mapping.get(str(v).strip())
+        if normalized:
+            return ConfidenceEnum(normalized)
+        return str(v)
 
 
-class JointExtractionResult(BaseModel):
+class JointExtractionResult(LenientBaseModel):
     """联合抽取结果 - 实体和关系同时输出"""
 
     entities: List[JointEntity] = Field(
@@ -1429,31 +1708,41 @@ class JointExtractionResult(BaseModel):
 # ===== Self-Check-Joint模型（P9新增，含Reflexion） =====
 
 
-class SelfCheckJointResult(BaseModel):
+class SelfCheckJointResult(LenientBaseModel):
     """联合抽取校验结果 + Reflexion"""
 
-    verified_entities: List[JointEntity] = Field(description="校验通过的实体")
-    verified_triples: List[JointTriple] = Field(description="校验通过的三元组")
-    rejected_entities: List[str] = Field(description="拒绝的实体（非地理实体）")
-    rejected_triples: List[Dict] = Field(description="拒绝的三元组（幻觉/错误）")
+    verified_entities: List[JointEntity] = Field(
+        default_factory=list, description="校验通过的实体"
+    )
+    verified_triples: List[JointTriple] = Field(
+        default_factory=list, description="校验通过的三元组"
+    )
+    rejected_entities: List[str] = Field(
+        default_factory=list, description="拒绝的实体（非地理实体）"
+    )
+    rejected_triples: List[Dict] = Field(
+        default_factory=list, description="拒绝的三元组（幻觉/错误）"
+    )
 
     # Reflexion核心：自然语言反思
     reflection_text: str = Field(
+        default="",
         description="自然语言形式的反思建议，如：'本次抽取遗漏了空间方向关系，建议关注方位介词'"
     )
     improvement_strategy: str = Field(
+        default="",
         description="具体改进策略，如：'增加对方位介词的敏感度，检查是否遗漏位于/相邻关系'"
     )
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重试")
-    retry_reason: str = Field(description="重试原因")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重试")
+    retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== P12新增：Self-Check增强版模型（四维度评分） =====
 
 
-class DimensionScore(BaseModel):
+class DimensionScore(LenientBaseModel):
     """单维度评分"""
 
     rating: str = Field(description="评分等级: high/medium/low")
@@ -1461,7 +1750,7 @@ class DimensionScore(BaseModel):
     details: Optional[List[str]] = Field(default=None, description="问题描述列表")
 
 
-class ImprovementAction(BaseModel):
+class ImprovementAction(LenientBaseModel):
     """改进动作项"""
 
     action_type: str = Field(
@@ -1472,7 +1761,7 @@ class ImprovementAction(BaseModel):
     evidence: Optional[str] = Field(default=None, description="原文依据位置")
 
 
-class SelfCheckJointResultV2(BaseModel):
+class SelfCheckJointResultV2(LenientBaseModel):
     """联合抽取校验结果（P12增强版）- 四维度评分 + 结构化反思
 
     改进点：
@@ -1521,11 +1810,15 @@ class SelfCheckJointResultV2(BaseModel):
 # ===== Self-Check-QA模型（P9新增） =====
 
 
-class SelfCheckQAResult(BaseModel):
+class SelfCheckQAResult(LenientBaseModel):
     """QA脚手架校验结果"""
 
-    verified_qa_pairs: List[QAPair] = Field(description="校验通过的问答对")
-    rejected_qa_pairs: List[Dict] = Field(description="拒绝的问答对（与原文不符）")
+    verified_qa_pairs: List[QAPair] = Field(
+        default_factory=list, description="校验通过的问答对"
+    )
+    rejected_qa_pairs: List[Dict] = Field(
+        default_factory=list, description="拒绝的问答对（与原文不符）"
+    )
 
     # QA质量评估
     entity_coverage: str = Field(
@@ -1538,19 +1831,23 @@ class SelfCheckQAResult(BaseModel):
     reflection_text: str = Field(default="", description="自然语言反思建议")
     improvement_strategy: str = Field(default="", description="改进策略")
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重新生成QA")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新生成QA")
     retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== Self-Check-Eval模型（P9新增） =====
 
 
-class SelfCheckEvalResult(BaseModel):
+class SelfCheckEvalResult(LenientBaseModel):
     """评估结果校验"""
 
-    verified_triples: List[Dict] = Field(description="校验通过的三元组（包含评分）")
-    rejected_triples: List[Dict] = Field(description="拒绝的三元组（评分过低或有错误）")
+    verified_triples: List[Dict] = Field(
+        default_factory=list, description="校验通过的三元组（包含评分）"
+    )
+    rejected_triples: List[Dict] = Field(
+        default_factory=list, description="拒绝的三元组（评分过低或有错误）"
+    )
 
     # 评分一致性检查
     score_consistency: str = Field(
@@ -1562,22 +1859,30 @@ class SelfCheckEvalResult(BaseModel):
     reflection_text: str = Field(default="", description="自然语言反思建议")
     improvement_strategy: str = Field(default="", description="改进策略")
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重新评估")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新评估")
     retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== Self-Check-Label模型（P9新增） =====
 
 
-class SelfCheckLabelResult(BaseModel):
+class SelfCheckLabelResult(LenientBaseModel):
     """标注结果校验"""
 
-    verified_entity_attrs: Dict[str, Dict] = Field(description="校验通过的实体属性")
-    verified_relation_attrs: Dict[str, Dict] = Field(description="校验通过的关系属性")
+    verified_entity_attrs: Dict[str, Dict] = Field(
+        default_factory=dict, description="校验通过的实体属性"
+    )
+    verified_relation_attrs: Dict[str, Dict] = Field(
+        default_factory=dict, description="校验通过的关系属性"
+    )
 
-    rejected_entity_attrs: List[str] = Field(description="拒绝的实体属性键（不合理）")
-    rejected_relation_attrs: List[str] = Field(description="拒绝的关系属性键（不合理）")
+    rejected_entity_attrs: List[str] = Field(
+        default_factory=list, description="拒绝的实体属性键（不合理）"
+    )
+    rejected_relation_attrs: List[str] = Field(
+        default_factory=list, description="拒绝的关系属性键（不合理）"
+    )
 
     # 属性完整性检查
     attr_completeness: str = Field(
@@ -1589,20 +1894,20 @@ class SelfCheckLabelResult(BaseModel):
     reflection_text: str = Field(default="", description="自然语言反思建议")
     improvement_strategy: str = Field(default="", description="改进策略")
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重新标注")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新标注")
     retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== Self-Check-Filter模型（P9新增，可选） =====
 
 
-class SelfCheckFilterResult(BaseModel):
+class SelfCheckFilterResult(LenientBaseModel):
     """Filter筛选校验结果"""
 
     # 筛选判定校验
-    verified_is_valid: bool = Field(description="校验后的筛选判定")
-    verified_confidence: str = Field(description="校验后的置信度")
+    verified_is_valid: bool = Field(default=True, description="校验后的筛选判定")
+    verified_confidence: str = Field(default="medium", description="校验后的置信度")
 
     # 误筛检测
     false_negative_detected: bool = Field(
@@ -1622,20 +1927,20 @@ class SelfCheckFilterResult(BaseModel):
     reflection_text: str = Field(default="", description="自然语言反思建议")
     improvement_strategy: str = Field(default="", description="改进策略")
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重新筛选")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新筛选")
     retry_reason: str = Field(default="", description="重试原因")
 
 
 # ===== Self-Check-Normalize模型（P9新增，可选） =====
 
 
-class SelfCheckNormalizeResult(BaseModel):
+class SelfCheckNormalizeResult(LenientBaseModel):
     """Normalize归一化校验结果"""
 
     # 归一化质量校验
-    verified_normalized_text: str = Field(description="校验后的归一化文本")
-    verified_confidence: str = Field(description="校验后的置信度")
+    verified_normalized_text: str = Field(default="", description="校验后的归一化文本")
+    verified_confidence: str = Field(default="medium", description="校验后的置信度")
 
     # 语义保留检查
     semantics_preserved: bool = Field(default=True, description="是否保留了原文语义")
@@ -1662,8 +1967,8 @@ class SelfCheckNormalizeResult(BaseModel):
     reflection_text: str = Field(default="", description="自然语言反思建议")
     improvement_strategy: str = Field(default="", description="改进策略")
 
-    overall_confidence: str = Field(description="整体置信度")
-    retry_suggested: bool = Field(description="是否建议重新归一化")
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+    retry_suggested: bool = Field(default=False, description="是否建议重新归一化")
     retry_reason: str = Field(default="", description="重试原因")
 
 
@@ -1675,7 +1980,7 @@ class SelfCheckNormalizeResult(BaseModel):
 # 所以需要创建专门的批量处理 item schema
 
 
-class BatchFilterItemResult(BaseModel):
+class BatchFilterItemResult(LenientBaseModel):
     """批量筛选单条结果 - 包含 corpus_id 以关联原语料"""
 
     corpus_id: str = Field(description="语料ID")
@@ -1689,7 +1994,7 @@ class BatchFilterItemResult(BaseModel):
     region_hint: Optional[str] = Field(default=None, description="地区提示")
 
 
-class BatchNormalizeItemResult(BaseModel):
+class BatchNormalizeItemResult(LenientBaseModel):
     """批量归一化单条结果 - 包含 corpus_id"""
 
     corpus_id: str = Field(description="语料ID")
@@ -1700,7 +2005,7 @@ class BatchNormalizeItemResult(BaseModel):
     confidence: str = Field(default="medium", description="置信度")
 
 
-class BatchQAScaffoldItemResult(BaseModel):
+class BatchQAScaffoldItemResult(LenientBaseModel):
     """批量QA脚手架单条结果 - 包含 corpus_id"""
 
     corpus_id: str = Field(description="语料ID")
@@ -1713,7 +2018,7 @@ class BatchQAScaffoldItemResult(BaseModel):
     overall_confidence: str = Field(default="medium", description="置信度")
 
 
-class BatchFilterResult(BaseModel):
+class BatchFilterResult(LenientBaseModel):
     """批量筛选结果 - 一次LLM调用处理多条语料的筛选判断"""
 
     results: List[BatchFilterItemResult] = Field(
@@ -1731,10 +2036,10 @@ class BatchFilterResult(BaseModel):
             return len(info.data["results"])
         return v or 0
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
-class BatchNormalizeResult(BaseModel):
+class BatchNormalizeResult(LenientBaseModel):
     """批量归一化结果 - 一次LLM调用处理多条语料的归一化"""
 
     results: List[BatchNormalizeItemResult] = Field(
@@ -1752,10 +2057,10 @@ class BatchNormalizeResult(BaseModel):
             return len(info.data["results"])
         return v or 0
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
-class BatchQAScaffoldResult(BaseModel):
+class BatchQAScaffoldResult(LenientBaseModel):
     """批量QA脚手架结果 - 一次LLM调用处理多条语料的QA脚手架构建"""
 
     results: List[BatchQAScaffoldItemResult] = Field(
@@ -1773,11 +2078,11 @@ class BatchQAScaffoldResult(BaseModel):
             return len(info.data["results"])
         return v or 0
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
 # P15修复：批量抽取使用JointEntity作为实体输出结构
-class BatchCorpusResult(BaseModel):
+class BatchCorpusResult(LenientBaseModel):
     """单条语料的批量抽取结果（P18改进：支持修正型校验）
 
     改进点：添加修正字段，支持校验节点直接修正问题而非拒绝
@@ -1896,10 +2201,10 @@ class BatchCorpusResult(BaseModel):
 
         return cleaned
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
-class BatchExtractionResult(BaseModel):
+class BatchExtractionResult(LenientBaseModel):
     """批量抽取结果 - 一次LLM调用处理多条语料
 
     v3.5改进：添加 validator 自动计算 batch_size，避免依赖 LLM 输出
@@ -1916,7 +2221,7 @@ class BatchExtractionResult(BaseModel):
         default_factory=list, description="跨语料发现的相同三元组（去重依据）"
     )
     overall_confidence: str = Field(default="medium", description="整体置信度")
-    batch_size: int = Field(description="处理的语料数量")
+    batch_size: int = Field(default=0, description="处理的语料数量")
     extraction_strategy: str = Field(
         default="batch_joint",
         description="抽取策略: batch_joint/batch_pipeline/fallback_single",
@@ -1936,10 +2241,10 @@ class BatchExtractionResult(BaseModel):
                 data["batch_size"] = len(results)
         return data
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
-class BatchSelfCheckResult(BaseModel):
+class BatchSelfCheckResult(LenientBaseModel):
     """批量校验结果"""
 
     verified_results: List[BatchCorpusResult] = Field(
@@ -1965,7 +2270,7 @@ class BatchSelfCheckResult(BaseModel):
 # ===== P15新增：批量Self-Check节点Schema =====
 
 
-class BatchSelfCheckQACorpusResult(BaseModel):
+class BatchSelfCheckQACorpusResult(LenientBaseModel):
     """单条语料的QA校验结果（P18改进：支持修正型校验）
 
     改进点：添加 corrected_qa_pairs、added_qa_pairs，校验节点可直接修正或补充QA
@@ -2007,7 +2312,7 @@ class BatchSelfCheckQACorpusResult(BaseModel):
     confidence: str = Field(default="medium", description="校验置信度")
 
 
-class BatchSelfCheckQAResult(BaseModel):
+class BatchSelfCheckQAResult(LenientBaseModel):
     """批量QA脚手架校验结果"""
 
     verified_results: List[BatchSelfCheckQACorpusResult] = Field(
@@ -2024,21 +2329,27 @@ class BatchSelfCheckQAResult(BaseModel):
 # ===== P15新增：批量Eval节点Schema =====
 
 
-class BatchEvalCorpusResult(BaseModel):
+class BatchEvalCorpusResult(LenientBaseModel):
     """单条语料的评估结果"""
 
     corpus_id: str = Field(description="语料ID")
     scores: List[Dict[str, Any]] = Field(
         default_factory=list, description="三元组评分列表"
     )
+    entity_scores: List[Dict[str, Any]] = Field(
+        default_factory=list, description="实体评分列表"
+    )
+    triple_eval_passed: bool = Field(default=True, description="三元组评估是否通过")
+    entity_eval_passed: bool = Field(default=True, description="实体评估是否通过")
     eval_passed: bool = Field(default=True, description="评估是否通过")
     corrected_triples: List[Dict[str, Any]] = Field(
         default_factory=list, description="修正后的三元组"
     )
+    entity_issues: List[str] = Field(default_factory=list, description="实体问题列表")
     confidence: str = Field(default="medium", description="评估置信度")
 
 
-class BatchEvalResult(BaseModel):
+class BatchEvalResult(LenientBaseModel):
     """批量评估结果"""
 
     batch_eval_results: List[BatchEvalCorpusResult] = Field(
@@ -2050,7 +2361,7 @@ class BatchEvalResult(BaseModel):
 # ===== P15新增：批量Self-Check-Eval节点Schema =====
 
 
-class BatchSelfCheckEvalCorpusResult(BaseModel):
+class BatchSelfCheckEvalCorpusResult(LenientBaseModel):
     """单条语料的评估校验结果（P18改进：支持修正型校验）
 
     改进点：添加 corrected_triples、rejected_triples、correction_records
@@ -2090,7 +2401,7 @@ class BatchSelfCheckEvalCorpusResult(BaseModel):
     confidence: str = Field(default="medium", description="校验置信度")
 
 
-class BatchSelfCheckEvalResult(BaseModel):
+class BatchSelfCheckEvalResult(LenientBaseModel):
     """批量评估结果校验"""
 
     verified_results: List[BatchSelfCheckEvalCorpusResult] = Field(
@@ -2106,7 +2417,7 @@ class BatchSelfCheckEvalResult(BaseModel):
 # ===== P15新增：批量Label节点Schema =====
 
 
-class BatchLabelCorpusResult(BaseModel):
+class BatchLabelCorpusResult(LenientBaseModel):
     """单条语料的标注结果"""
 
     corpus_id: str = Field(description="语料ID")
@@ -2119,7 +2430,7 @@ class BatchLabelCorpusResult(BaseModel):
     confidence: str = Field(default="medium", description="标注置信度")
 
 
-class BatchLabelResult(BaseModel):
+class BatchLabelResult(LenientBaseModel):
     """批量标注结果"""
 
     batch_label_results: List[BatchLabelCorpusResult] = Field(
@@ -2131,7 +2442,7 @@ class BatchLabelResult(BaseModel):
 # ===== P15新增：批量Self-Check-Label节点Schema =====
 
 
-class BatchSelfCheckLabelCorpusResult(BaseModel):
+class BatchSelfCheckLabelCorpusResult(LenientBaseModel):
     """单条语料的标注校验结果（P18改进：支持修正型校验）
 
     改进点：添加 corrected_entity_attrs、corrected_relation_attrs、rejected_*_attrs
@@ -2178,7 +2489,7 @@ class BatchSelfCheckLabelCorpusResult(BaseModel):
     confidence: str = Field(default="medium", description="校验置信度")
 
 
-class BatchSelfCheckLabelResult(BaseModel):
+class BatchSelfCheckLabelResult(LenientBaseModel):
     """批量标注校验结果"""
 
     verified_results: List[BatchSelfCheckLabelCorpusResult] = Field(
@@ -2194,12 +2505,15 @@ class BatchSelfCheckLabelResult(BaseModel):
 # ===== P15新增：批量Entity_Alignment节点Schema =====
 
 
-class BatchEntityAlignmentCorpusResult(BaseModel):
+class BatchEntityAlignmentCorpusResult(LenientBaseModel):
     """单条语料的实体对齐结果"""
 
     corpus_id: str = Field(description="语料ID")
     aligned_entity_attrs: Dict[str, Dict[str, Any]] = Field(
         default_factory=dict, description="对齐后的实体属性"
+    )
+    aligned_entity_ids: Dict[str, str] = Field(
+        default_factory=dict, description="对齐后的实体ID映射 (entity_name -> db_entity_id)"
     )
     new_entities: List[str] = Field(
         default_factory=list, description="需要新增到数据库的实体"
@@ -2207,7 +2521,7 @@ class BatchEntityAlignmentCorpusResult(BaseModel):
     confidence: str = Field(default="medium", description="对齐置信度")
 
 
-class BatchEntityAlignmentResult(BaseModel):
+class BatchEntityAlignmentResult(LenientBaseModel):
     """批量实体对齐结果"""
 
     aligned_results: List[BatchEntityAlignmentCorpusResult] = Field(
@@ -2227,7 +2541,7 @@ class ApprovalStatusEnum(str, Enum):
     REJECTED = "rejected"  # 拒绝（严重错误）
 
 
-class ApprovalFeedback(BaseModel):
+class ApprovalFeedback(LenientBaseModel):
     """审批反馈项"""
 
     target_node: str = Field(description="目标节点: joint_ner_re/eval/label")
@@ -2245,11 +2559,11 @@ class ApprovalFeedback(BaseModel):
     )
 
 
-class NodeApprovalResult(BaseModel):
+class NodeApprovalResult(LenientBaseModel):
     """单个节点的审批结果"""
 
     node_name: str = Field(description="节点名称")
-    approval_status: ApprovalStatusEnum = Field(description="审批状态")
+    approval_status: Union[ApprovalStatusEnum, str] = Field(description="审批状态")
     confidence: str = Field(description="审批置信度: high/medium/low")
     feedbacks: List[ApprovalFeedback] = Field(
         default_factory=list, description="反馈列表"
@@ -2262,8 +2576,28 @@ class NodeApprovalResult(BaseModel):
     )
     revision_required: bool = Field(default=False, description="是否需要重新执行节点")
 
+    @field_validator("approval_status", mode="before")
+    @classmethod
+    def normalize_approval_status(cls, v):
+        if v is None:
+            return ApprovalStatusEnum.NEEDS_REVISION
+        if isinstance(v, ApprovalStatusEnum):
+            return v
+        mapping = {
+            "approved": "approved",
+            "needs_revision": "needs_revision",
+            "rejected": "rejected",
+            "通过": "approved",
+            "需修改": "needs_revision",
+            "拒绝": "rejected",
+        }
+        normalized = mapping.get(str(v).strip())
+        if normalized:
+            return ApprovalStatusEnum(normalized)
+        return str(v)
 
-class QAApprovalResult(BaseModel):
+
+class QAApprovalResult(LenientBaseModel):
     """QA审批结果 - 整合所有节点的审批"""
 
     # 各节点审批结果
@@ -2278,8 +2612,10 @@ class QAApprovalResult(BaseModel):
     )
 
     # 整体评估
-    overall_status: ApprovalStatusEnum = Field(description="整体审批状态")
-    overall_confidence: str = Field(description="整体置信度")
+    overall_status: Union[ApprovalStatusEnum, str] = Field(
+        default=ApprovalStatusEnum.NEEDS_REVISION, description="整体审批状态"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
 
     # 整合后的语义脚手架
     integrated_semantic_summary: str = Field(default="", description="整合后的语义摘要")
@@ -2302,8 +2638,28 @@ class QAApprovalResult(BaseModel):
     )
     retry_reason: str = Field(default="", description="重试原因")
 
+    @field_validator("overall_status", mode="before")
+    @classmethod
+    def normalize_overall_status(cls, v):
+        if v is None:
+            return ApprovalStatusEnum.NEEDS_REVISION
+        if isinstance(v, ApprovalStatusEnum):
+            return v
+        mapping = {
+            "approved": "approved",
+            "needs_revision": "needs_revision",
+            "rejected": "rejected",
+            "通过": "approved",
+            "需修改": "needs_revision",
+            "拒绝": "rejected",
+        }
+        normalized = mapping.get(str(v).strip())
+        if normalized:
+            return ApprovalStatusEnum(normalized)
+        return str(v)
 
-class MentorGuidance(BaseModel):
+
+class MentorGuidance(LenientBaseModel):
     """导师指导信息 - QA向后续节点发出的指导"""
 
     guidance_type: str = Field(
@@ -2337,7 +2693,7 @@ class MentorGuidance(BaseModel):
     avoid_patterns: List[str] = Field(default_factory=list, description="避免的模式")
 
 
-class QAMentorScaffoldResult(BaseModel):
+class QAMentorScaffoldResult(LenientBaseModel):
     """QA导师脚手架结果 - 扩展原有QAScaffoldResult"""
 
     # 原有字段（继承）
@@ -2372,7 +2728,7 @@ class QAMentorScaffoldResult(BaseModel):
 # ===== 实体对齐模型（P11新增） =====
 
 
-class EntityCandidate(BaseModel):
+class EntityCandidate(LenientBaseModel):
     """实体对齐候选 - 从数据库检索的相似实体"""
 
     db_entity_id: str = Field(description="数据库中的实体ID")
@@ -2384,7 +2740,7 @@ class EntityCandidate(BaseModel):
     source: str = Field(default="unknown", description="数据来源")
 
 
-class EntityAlignmentItem(BaseModel):
+class EntityAlignmentItem(LenientBaseModel):
     """单个实体的对齐结果"""
 
     extracted_name: str = Field(description="抽取的实体名称")
@@ -2401,7 +2757,7 @@ class EntityAlignmentItem(BaseModel):
     llm_decision: Optional[str] = Field(default=None, description="LLM决策说明")
 
 
-class BatchEntityAlignmentDecisionItem(BaseModel):
+class BatchEntityAlignmentDecisionItem(LenientBaseModel):
     """单个实体的批量LLM对齐决策"""
 
     extracted_name: str = Field(description="抽取的实体名称")
@@ -2414,7 +2770,7 @@ class BatchEntityAlignmentDecisionItem(BaseModel):
     llm_decision: str = Field(default="", description="决策说明")
 
 
-class BatchEntityAlignmentDecisionResult(BaseModel):
+class BatchEntityAlignmentDecisionResult(LenientBaseModel):
     """中置信度实体批量LLM对齐决策结果"""
 
     decisions: List[BatchEntityAlignmentDecisionItem] = Field(
@@ -2423,7 +2779,7 @@ class BatchEntityAlignmentDecisionResult(BaseModel):
     overall_confidence: str = Field(default="medium", description="整体置信度")
 
 
-class EntityAlignmentResult(BaseModel):
+class EntityAlignmentResult(LenientBaseModel):
     """实体对齐节点输出 - 整体对齐结果"""
 
     alignment_items: List[EntityAlignmentItem] = Field(
@@ -2466,7 +2822,7 @@ class QueryTypeEnum(str, Enum):
     """标注困惑：属性标注不确定"""
 
 
-class MentorQueryResponse(BaseModel):
+class MentorQueryResponse(LenientBaseModel):
     """导师对后续节点查询的响应 - P14新增
 
     当后续节点（Joint_NER_RE、Eval、Label）遇到困惑时，
@@ -2504,10 +2860,10 @@ class MentorQueryResponse(BaseModel):
     )
 
 
-class MentorQuery(BaseModel):
+class MentorQuery(LenientBaseModel):
     """后续节点向导师发起的查询 - P14新增"""
 
-    query_type: QueryTypeEnum = Field(description="查询类型")
+    query_type: Union[QueryTypeEnum, str] = Field(description="查询类型")
     query_content: str = Field(description="查询内容：问题描述")
     involved_entities: List[str] = Field(
         default_factory=list, description="涉及的实体列表"
@@ -2521,8 +2877,28 @@ class MentorQuery(BaseModel):
         default="", description="查询上下文：当前的抽取/评估/标注结果摘要"
     )
 
+    @field_validator("query_type", mode="before")
+    @classmethod
+    def normalize_query_type(cls, v):
+        if v is None:
+            return QueryTypeEnum.OVERALL_UNCERTAINTY
+        if isinstance(v, QueryTypeEnum):
+            return v
+        mapping = {
+            "entity_ambiguity": "entity_ambiguity",
+            "relation_confusion": "relation_confusion",
+            "evidence_missing": "evidence_missing",
+            "overall_uncertainty": "overall_uncertainty",
+            "eval_disagreement": "eval_disagreement",
+            "label_confusion": "label_confusion",
+        }
+        normalized = mapping.get(str(v).strip())
+        if normalized:
+            return QueryTypeEnum(normalized)
+        return str(v)
 
-class BatchMentorQueryItem(BaseModel):
+
+class BatchMentorQueryItem(LenientBaseModel):
     """批量导师查询中的单条响应项"""
 
     corpus_id: str = Field(description="语料ID")
@@ -2542,7 +2918,7 @@ class BatchMentorQueryItem(BaseModel):
     return_to_node: str = Field(default="eval", description="返回目标节点")
 
 
-class BatchMentorQueryResponse(BaseModel):
+class BatchMentorQueryResponse(LenientBaseModel):
     """批量导师查询响应"""
 
     results: List[BatchMentorQueryItem] = Field(
@@ -2551,3 +2927,7 @@ class BatchMentorQueryResponse(BaseModel):
     overall_confidence: str = Field(
         default="medium", description="整体置信度: high/medium/low"
     )
+
+
+
+

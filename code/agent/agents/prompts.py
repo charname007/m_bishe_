@@ -2214,14 +2214,14 @@ BATCH_SELF_CHECK_QA_PROMPT = ChatPromptTemplate.from_messages(
 
 # ===== P15新增：批量Eval提示词 =====
 
-BATCH_EVAL_SYSTEM = """你是一位"批量三元组评估专家"。
-你需要客观评估每条语料的关系抽取质量，重点审查地理关系方向、证据充分性和关系类型合法性。"""
+BATCH_EVAL_SYSTEM = """你是一位"批量知识抽取评估专家"。
+你需要客观评估每条语料的实体识别与关系三元组质量，重点审查实体有效性、关系方向、证据充分性和类型合法性。"""
 
 BATCH_EVAL_USER = """## 评估任务
 
-请评估以下批量三元组。
+请对以下批量结果进行双重评估：实体 + 三元组。
 
-### 评分标准（每条语料）
+### A. 三元组评分标准（每条语料）
 1. `SEM`（语义合理性，1-5）
 - 关系类型是否恰当；
 - 地理关系方向是否正确（位于/包含尤需严格）。
@@ -2231,15 +2231,28 @@ BATCH_EVAL_USER = """## 评估任务
 3. `CON`（整体置信，1-5）
 - 实体边界、关系、属性是否一致稳定。
 
+### B. 实体评分标准（每个实体）
+请对每个实体给出 `sem/fac/con`（1-5）并给出 `passed`：
+- `sem`: 实体类型与语义是否匹配；
+- `fac`: 是否能在原文找到依据；
+- `con`: 与同语料其他实体/三元组是否一致。
+
+同时输出 `entity_issues`（仅列问题摘要）：
+- 缺失关键实体；
+- 非地理噪声实体；
+- 类型明显错误；
+- 命名不一致/歧义。
+
 ### 通过阈值
-- 平均分 >= 3.5：通过
-- 平均分 < 3.5：建议修正
+- `triple_eval_passed`: 三元组平均分 >= 3.5 且无严重事实问题；
+- `entity_eval_passed`: 实体评分整体通过且无严重实体问题；
+- `eval_passed`: 必须同时满足 `triple_eval_passed` 和 `entity_eval_passed`。
 
 ---
 
-## 待评估三元组
+## 待评估实体与三元组
 
-{batch_triples}
+{batch_entities_triples}
 
 ## 原始文本
 
@@ -2250,7 +2263,16 @@ BATCH_EVAL_USER = """## 评估任务
 ## 输出要求（严格JSON）
 
 请输出：
-1. `batch_eval_results`：每条包含 `corpus_id`, `scores`, `eval_passed`, `corrected_triples`, `confidence`
+1. `batch_eval_results`：每条包含
+   - `corpus_id`
+   - `scores`（三元组评分）
+   - `entity_scores`（实体评分）
+   - `triple_eval_passed`
+   - `entity_eval_passed`
+   - `eval_passed`
+   - `corrected_triples`
+   - `entity_issues`
+   - `confidence`
 2. `overall_confidence`"""
 
 BATCH_EVAL_PROMPT = ChatPromptTemplate.from_messages(
@@ -2603,6 +2625,47 @@ def format_batch_triples_for_eval(batch_extraction_results: Dict) -> str:
             lines.append(line)
         else:
             lines.append(f"- [{corpus_id}] 无三元组")
+    return "\n".join(lines)
+
+
+def format_batch_entities_triples_for_eval(batch_extraction_results: Dict) -> str:
+    """格式化批量实体+三元组用于评估（实体与关系联合评估）。"""
+    if not batch_extraction_results:
+        return "(无实体与三元组)"
+
+    lines = []
+    for corpus_id, data in batch_extraction_results.items():
+        entities = data.get("entities", {}) or {}
+        triples = data.get("triples", []) or []
+        confidence = data.get("confidence", "medium")
+
+        entity_parts = []
+        if isinstance(entities, dict):
+            for entity_type, names in entities.items():
+                if names:
+                    entity_parts.append(f"{entity_type}: {', '.join(str(n) for n in names)}")
+        entity_str = "; ".join(entity_parts) if entity_parts else "(无实体)"
+
+        if triples:
+            triple_str = ", ".join(
+                [
+                    f"<{t.get('head', '')}, {t.get('relation', '')}, {t.get('tail', '')}>"
+                    for t in triples
+                ]
+            )
+        else:
+            triple_str = "(无三元组)"
+
+        line = (
+            f"- [{corpus_id}] 置信度:{confidence}\n"
+            f"  实体: {entity_str}\n"
+            f"  三元组: {triple_str}"
+        )
+        mentor_note = str(data.get("mentor_note", "") or "").strip()
+        if mentor_note:
+            line += f"\n  导师提示: {mentor_note}"
+        lines.append(line)
+
     return "\n".join(lines)
 
 

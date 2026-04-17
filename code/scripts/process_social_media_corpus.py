@@ -324,10 +324,11 @@ def log_corpus_node_details(batch_id: str, worker_id: str, corpus_state: Dict[st
 
 def init_clients():
     """初始化数据库客户端。"""
+    # 与 workflow finalizer 保持一致：默认写入 kg 数据库
     pg_client = PostgresClient(
         host=os.getenv("PG_HOST", "localhost"),
         port=int(os.getenv("PG_PORT", 5432)),
-        database=os.getenv("PG_DATABASE", "postgres"),
+        database=os.getenv("PG_DATABASE", "kg"),
         user=os.getenv("PG_USER", "postgres"),
         password=os.getenv("PG_PASSWORD", ""),
     )
@@ -366,11 +367,12 @@ def init_workflow():
     config.enable_entity_alignment = True
     config.enable_batch_llm = True
     config.enable_qa_mentor = True
-    # 批处理优先：禁止退化为单条处理，阶段失败后直接跳过
+    # 批处理优先：禁止退化为单条处理，节点/阶段失败后直接跳过
     config.batch_llm_fallback = False
     config.batch_skip_on_repeated_failure = True
-    config.batch_stage_retry_attempts = 1
-    config.batch_qa_scaffold_retry_attempts = 1
+    # 0 表示仅执行 1 次，不进行重试
+    config.batch_stage_retry_attempts = 0
+    config.batch_qa_scaffold_retry_attempts = 0
 
     workflow = build_distributed_workflow(llm, config, qa_llm=qa_llm)
     return workflow, config
@@ -426,7 +428,7 @@ async def process_batch(
 
         if finalizer_error:
             logger.error(f"批次 {batch_id} Finalizer 失败: {finalizer_error}")
-            pg_client.update_batch_status_with_error(batch_id, "error", finalizer_error)
+            pg_client.update_batch_status_with_error(batch_id, "failed", finalizer_error)
             # P15修复：Finalizer失败时也需要更新语料状态为error
             for corpus_id in corpus_ids:
                 pg_client.mark_corpus_error(DEFAULT_TABLE, corpus_id, finalizer_error, batch_id)
@@ -454,7 +456,7 @@ async def process_batch(
 
     except Exception as error:
         logger.error(f"批次 {batch_id} 处理失败: {error}")
-        pg_client.update_batch_status_with_error(batch_id, "error", str(error))
+        pg_client.update_batch_status_with_error(batch_id, "failed", str(error))
         return {"success": False, "error": str(error)}
 
 

@@ -2,6 +2,7 @@
 LangGraph工作流定义 - 使用StateGraph构建知识图谱抽取工作流
 P1改进：添加 RetryPolicy 支持自动重试
 """
+
 import asyncio
 import os
 import re
@@ -17,12 +18,22 @@ from langgraph.types import RetryPolicy
 
 from loguru import logger
 
-from .state import CorpusState, KGState, StepEnum, PhaseEnum, DEFAULT_MAX_RETRIES, DEFAULT_ENTITY_DICT
-from .state import create_default_corpus_state, create_default_kg_state  # P15新增：状态工厂函数
+from .state import (
+    CorpusState,
+    KGState,
+    StepEnum,
+    PhaseEnum,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_ENTITY_DICT,
+)
+from .state import (
+    create_default_corpus_state,
+    create_default_kg_state,
+)  # P15新增：状态工厂函数
 from .nodes import (
-    create_filter_node,          # P5新增：Filter 筛选节点
-    create_normalize_node,       # P6新增：Normalize 归一化节点
-    create_qa_scaffold_node,     # P8新增：QA Scaffold 脚手架节点
+    create_filter_node,  # P5新增：Filter 筛选节点
+    create_normalize_node,  # P6新增：Normalize 归一化节点
+    create_qa_scaffold_node,  # P8新增：QA Scaffold 脚手架节点
     create_ner_node,
     create_re_node,
     create_eval_1_node,
@@ -31,8 +42,8 @@ from .nodes import (
     create_label_node,
     create_coordinator_node,
     create_aggregator_node,
-    create_self_check_ner_node,   # Self-Check-NER 节点
-    create_self_check_re_node,    # Self-Check-RE 节点
+    create_self_check_ner_node,  # Self-Check-NER 节点
+    create_self_check_re_node,  # Self-Check-RE 节点
     # P9新增：联合抽取和所有Self-Check节点
     create_joint_ner_re_node,
     create_self_check_joint_node,
@@ -67,39 +78,39 @@ from .config import ExtractionConfig, DEFAULT_CONFIG
 # 检测用户文本中可能存在的提示注入攻击模式
 # 使用合并后的正则表达式优化性能（单次扫描代替多次）
 COMBINED_PROMPT_INJECTION_PATTERN = re.compile(
-    r'(?:'
+    r"(?:"
     # 直接指令注入
-    r'ignore\s+previous\s+instructions|'
-    r'ignore\s+all\s+previous|'
-    r'forget\s+previous|'
-    r'disregard\s+all|'
+    r"ignore\s+previous\s+instructions|"
+    r"ignore\s+all\s+previous|"
+    r"forget\s+previous|"
+    r"disregard\s+all|"
     # 系统提示篡改
-    r'system\s*:\s*|'
-    r'\[SYSTEM\]|'
-    r'<<SYSTEM>>|'
-    r'###\s*SYSTEM|'
+    r"system\s*:\s*|"
+    r"\[SYSTEM\]|"
+    r"<<SYSTEM>>|"
+    r"###\s*SYSTEM|"
     # 角色扮演注入
-    r'act\s+as\s+|'
-    r'pretend\s+to\s+be|'
-    r'you\s+are\s+now|'
-    r'switch\s+to\s+mode|'
+    r"act\s+as\s+|"
+    r"pretend\s+to\s+be|"
+    r"you\s+are\s+now|"
+    r"switch\s+to\s+mode|"
     # 特殊标记注入
-    r'\[INST\]|'
-    r'<<INST>>|'
-    r'<\||'
-    r'\|>|'
-    r'###\s*INSTRUCTION|'
+    r"\[INST\]|"
+    r"<<INST>>|"
+    r"<\||"
+    r"\|>|"
+    r"###\s*INSTRUCTION|"
     # 输出控制注入
-    r'output\s+only|'
-    r'respond\s+with|'
-    r'print\s+|'
-    r'display\s+|'
+    r"output\s+only|"
+    r"respond\s+with|"
+    r"print\s+|"
+    r"display\s+|"
     # 思维链干扰
-    r'thinking\s*:|'
-    r'reasoning\s*:|'
-    r'internal\s+thoughts'
-    r')',
-    re.IGNORECASE
+    r"thinking\s*:|"
+    r"reasoning\s*:|"
+    r"internal\s+thoughts"
+    r")",
+    re.IGNORECASE,
 )
 
 MAX_INJECTION_CHECK_LENGTH = 10000  # 只检查前10000字符，避免性能问题
@@ -147,10 +158,12 @@ def _sanitize_for_llm(text: str, strict_mode: bool = False) -> str:
             raise ValueError(f"提示注入检测失败: {injection_detected}")
         else:
             # 警告模式：记录日志但继续处理
-            logger.warning(f"[安全警告] {injection_detected}, 文本将继续处理但需人工复核")
+            logger.warning(
+                f"[安全警告] {injection_detected}, 文本将继续处理但需人工复核"
+            )
 
     # Unicode归一化（防止Unicode混淆攻击）
-    text = unicodedata.normalize('NFKC', text)
+    text = unicodedata.normalize("NFKC", text)
 
     return text
 
@@ -181,11 +194,11 @@ def _validate_corpus_text(text: str, config: ExtractionConfig = DEFAULT_CONFIG) 
 
     if len(text) > config.max_text_length:
         logger.warning(f"语料文本过长（{len(text)} 字符），将被截断")
-        text = text[:config.max_text_length]
+        text = text[: config.max_text_length]
 
     # 移除危险字符（防止注入攻击）
     # 保留中文、英文、数字、标点符号
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
 
     # P15新增：提示注入检测和Unicode归一化
     text = _sanitize_for_llm(text, strict_mode=False)
@@ -267,6 +280,7 @@ def _get_database_config() -> Dict[str, Any]:
 
 # ===== 条件路由函数（模块级，便于测试） =====
 
+
 def route_after_filter(state: CorpusState) -> str:
     """
     Filter 后路由（P5新增）
@@ -325,7 +339,9 @@ def route_after_filter_to_joint(state: CorpusState) -> str:
     confidence = filter_result.get("confidence", "medium")
 
     if is_valid:
-        logger.info(f"[Filter-Route-Joint] 文本有效，继续到联合抽取，置信度: {confidence}")
+        logger.info(
+            f"[Filter-Route-Joint] 文本有效，继续到联合抽取，置信度: {confidence}"
+        )
         return "joint_ner_re"
     else:
         skip_reason = filter_result.get("skip_reason", "未指定原因")
@@ -383,7 +399,9 @@ def route_after_normalize(state: CorpusState) -> str:
     if state.get("error") and not normalize_result:
         logger.warning(f"[Normalize-Route] 归一化失败但有错误，使用原文继续")
     else:
-        logger.info(f"[Normalize-Route] 归一化完成，置信度: {confidence}, 有改动: {has_changes}")
+        logger.info(
+            f"[Normalize-Route] 归一化完成，置信度: {confidence}, 有改动: {has_changes}"
+        )
 
     return "ner"
 
@@ -604,14 +622,20 @@ def route_after_self_check_re(state: CorpusState) -> str:
         logger.info(f"[Self-Check-RE-Route] 触发 RE 重抽: {retry_reason}")
 
     # Self-Check-RE 明确建议重抽 NER（实体问题导致三元组问题）
-    elif re_result.get("retry_suggested", False) and re_result.get("retry_target") == "ner":
+    elif (
+        re_result.get("retry_suggested", False)
+        and re_result.get("retry_target") == "ner"
+    ):
         need_retry = True
         retry_target = "ner"
         retry_reason = re_result.get("retry_reason", "Self-Check 建议")
         logger.info(f"[Self-Check-RE-Route] Self-Check 建议回退到 NER: {retry_reason}")
 
     # Self-Check-RE 明确建议重抽 RE
-    elif re_result.get("retry_suggested", False) and re_result.get("retry_target") == "re":
+    elif (
+        re_result.get("retry_suggested", False)
+        and re_result.get("retry_target") == "re"
+    ):
         need_retry = True
         retry_target = "re"
         retry_reason = re_result.get("retry_reason", "Self-Check 建议")
@@ -631,7 +655,12 @@ route_after_self_check = route_after_self_check_re
 
 # ===== P9新增：联合抽取路由函数 =====
 
-def create_config_init_node(enable_normalize: bool, enable_qa_scaffold: bool, enable_entity_alignment: bool = False):
+
+def create_config_init_node(
+    enable_normalize: bool,
+    enable_qa_scaffold: bool,
+    enable_entity_alignment: bool = False,
+):
     """创建配置初始化节点（P9新增，P15修复）
 
     在流程开始时设置配置标记字段，供路由函数判断后续节点是否启用。
@@ -644,9 +673,12 @@ def create_config_init_node(enable_normalize: bool, enable_qa_scaffold: bool, en
     Returns:
         配置初始化节点函数
     """
+
     async def config_init_node(state: CorpusState) -> Dict:
         """设置配置标记字段"""
-        logger.info(f"[Config-Init] 设置配置标记: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}")
+        logger.info(
+            f"[Config-Init] 设置配置标记: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}"
+        )
         return {
             "_config_enable_normalize": enable_normalize,
             "_config_enable_qa_scaffold": enable_qa_scaffold,
@@ -683,7 +715,9 @@ def route_after_self_check_joint(state: CorpusState) -> str:
 
     # 达到最大重试次数，强制通过
     if retry_count >= max_retries:
-        logger.warning(f"[Self-Check-Joint-Route] 达到最大重试 {retry_count}/{max_retries}")
+        logger.warning(
+            f"[Self-Check-Joint-Route] 达到最大重试 {retry_count}/{max_retries}"
+        )
         return "eval"
 
     # Reflexion建议重试且置信度低
@@ -710,7 +744,9 @@ def route_after_self_check_qa(state: CorpusState) -> str:
 
     # 达到最大重试次数，强制通过
     if retry_count >= max_retries:
-        logger.warning(f"[Self-Check-QA-Route] 达到最大重试 {retry_count}/{max_retries}")
+        logger.warning(
+            f"[Self-Check-QA-Route] 达到最大重试 {retry_count}/{max_retries}"
+        )
         return "joint_ner_re"
 
     if retry_suggested:
@@ -832,7 +868,9 @@ def route_after_self_check_filter(state: CorpusState) -> str:
 
     # 达到最大重试次数，强制通过
     if retry_count >= max_retries:
-        logger.warning(f"[Self-Check-Filter-Route] 达到最大重试 {retry_count}/{max_retries}")
+        logger.warning(
+            f"[Self-Check-Filter-Route] 达到最大重试 {retry_count}/{max_retries}"
+        )
         if not verified_is_valid:
             return END
         # 根据配置决定下一个节点
@@ -896,7 +934,9 @@ def route_after_self_check_normalize(state: CorpusState) -> str:
 
     # 达到最大重试次数，强制通过
     if retry_count >= max_retries:
-        logger.warning(f"[Self-Check-Normalize-Route] 达到最大重试 {retry_count}/{max_retries}")
+        logger.warning(
+            f"[Self-Check-Normalize-Route] 达到最大重试 {retry_count}/{max_retries}"
+        )
         if enable_qa_scaffold:
             return "qa_scaffold"
         else:
@@ -917,6 +957,7 @@ def route_after_self_check_normalize(state: CorpusState) -> str:
 
 # ===== 单条语料工作流 =====
 
+
 # P1改进：定义 LLM 调用节点的 RetryPolicy
 def _should_retry_llm(error: Exception) -> bool:
     """判断是否应该重试 LLM 调用"""
@@ -932,12 +973,12 @@ def _should_retry_llm(error: Exception) -> bool:
 
 
 LLM_RETRY_POLICY = RetryPolicy(
-    initial_interval=1.0,      # 初始等待 1 秒
-    backoff_factor=2.0,        # 每次翻倍
-    max_interval=30.0,         # 最大等待 30 秒
-    max_attempts=3,            # 最多重试 3 次
-    jitter=True,               # 添加随机抖动防止雪崩
-    retry_on=_should_retry_llm
+    initial_interval=1.0,  # 初始等待 1 秒
+    backoff_factor=2.0,  # 每次翻倍
+    max_interval=30.0,  # 最大等待 30 秒
+    max_attempts=3,  # 最多重试 3 次
+    jitter=True,  # 添加随机抖动防止雪崩
+    retry_on=_should_retry_llm,
 )
 
 
@@ -953,7 +994,9 @@ def route_start_preprocessing(state: CorpusState) -> str:
         "filter" / "normalize" / "qa_scaffold" - 需要预处理
     """
     if state.get("_preprocessing_completed"):
-        logger.info(f"[Start-Route] 语料 {state.get('corpus_id')} 预处理已完成，跳到联合抽取")
+        logger.info(
+            f"[Start-Route] 语料 {state.get('corpus_id')} 预处理已完成，跳到联合抽取"
+        )
         return "joint_ner_re"
     # 默认走预处理流程
     return "filter"
@@ -1027,7 +1070,7 @@ def build_corpus_workflow(
         config = DEFAULT_CONFIG
 
     # P13新增：从配置中获取提示词版本（如果未显式指定）
-    if prompt_version == "v2" and hasattr(config, 'prompt_version'):
+    if prompt_version == "v2" and hasattr(config, "prompt_version"):
         prompt_version = config.prompt_version
 
     # P13新增：根据提示词版本选择节点创建函数
@@ -1063,28 +1106,46 @@ def build_corpus_workflow(
     # P9新增：联合抽取模式
     if use_joint_extraction:
         # P13改进：使用版本化节点
-        builder.add_node("joint_ner_re", joint_ner_re_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node(
+            "joint_ner_re", joint_ner_re_node, retry_policy=LLM_RETRY_POLICY
+        )
 
         # 二次检查节点（如果启用）
         if enable_full_self_check:
             self_check_qa_node = create_self_check_qa_node(llm)
             # P13改进：使用版本化Self-Check-Joint节点
-            builder.add_node("self_check_qa", self_check_qa_node, retry_policy=LLM_RETRY_POLICY)
-            builder.add_node("self_check_joint", self_check_joint_node, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "self_check_qa", self_check_qa_node, retry_policy=LLM_RETRY_POLICY
+            )
+            builder.add_node(
+                "self_check_joint", self_check_joint_node, retry_policy=LLM_RETRY_POLICY
+            )
 
             self_check_eval_node = create_self_check_eval_node(llm)
             self_check_label_node = create_self_check_label_node(llm)
-            builder.add_node("self_check_eval", self_check_eval_node, retry_policy=LLM_RETRY_POLICY)
-            builder.add_node("self_check_label", self_check_label_node, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "self_check_eval", self_check_eval_node, retry_policy=LLM_RETRY_POLICY
+            )
+            builder.add_node(
+                "self_check_label", self_check_label_node, retry_policy=LLM_RETRY_POLICY
+            )
 
         # P9新增：Filter/Normalize二次检查节点（可选）
         if enable_self_check_filter:
             self_check_filter_node = create_self_check_filter_node(llm)
-            builder.add_node("self_check_filter", self_check_filter_node, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "self_check_filter",
+                self_check_filter_node,
+                retry_policy=LLM_RETRY_POLICY,
+            )
 
         if enable_self_check_normalize:
             self_check_normalize_node = create_self_check_normalize_node(llm)
-            builder.add_node("self_check_normalize", self_check_normalize_node, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "self_check_normalize",
+                self_check_normalize_node,
+                retry_policy=LLM_RETRY_POLICY,
+            )
 
         # 评估和标注节点
         eval_node = create_eval_simplified_node(llm)
@@ -1100,13 +1161,19 @@ def build_corpus_workflow(
         need_config_init = enable_self_check_filter or enable_self_check_normalize
         if need_config_init:
             # P15修复：传入 enable_entity_alignment 参数
-            config_init_node = create_config_init_node(enable_normalize, enable_qa_scaffold, enable_entity_alignment)
+            config_init_node = create_config_init_node(
+                enable_normalize, enable_qa_scaffold, enable_entity_alignment
+            )
             builder.add_node("config_init", config_init_node)
-            logger.info(f"[Workflow] 添加配置初始化节点: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}")
+            logger.info(
+                f"[Workflow] 添加配置初始化节点: normalize={enable_normalize}, qa_scaffold={enable_qa_scaffold}, entity_alignment={enable_entity_alignment}"
+            )
 
         if enable_filter and enable_normalize:
             # P13改进：使用版本化Filter节点
-            builder.add_node("filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY
+            )
             normalize_node = create_normalize_node(llm)
             builder.add_node("normalize", normalize_node, retry_policy=LLM_RETRY_POLICY)
 
@@ -1118,7 +1185,11 @@ def build_corpus_workflow(
                 builder.add_edge("filter", "self_check_filter")
 
                 # 动态构建映射，只包含实际存在的节点
-                self_check_filter_targets = {"filter": "filter", "normalize": "normalize", END: END}
+                self_check_filter_targets = {
+                    "filter": "filter",
+                    "normalize": "normalize",
+                    END: END,
+                }
                 if enable_qa_scaffold:
                     self_check_filter_targets["qa_scaffold"] = "qa_scaffold"
                 else:
@@ -1127,7 +1198,7 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_filter",
                     route_after_self_check_filter,
-                    self_check_filter_targets
+                    self_check_filter_targets,
                 )
             else:
                 if need_config_init:
@@ -1136,14 +1207,14 @@ def build_corpus_workflow(
                     builder.add_conditional_edges(
                         "config_init",
                         route_start_preprocessing,
-                        {"filter": "filter", "joint_ner_re": "joint_ner_re"}
+                        {"filter": "filter", "joint_ner_re": "joint_ner_re"},
                     )
                 else:
                     # P19改进：START 使用条件路由判断是否跳过预处理
                     builder.add_conditional_edges(
                         START,
                         route_start_preprocessing,
-                        {"filter": "filter", "joint_ner_re": "joint_ner_re"}
+                        {"filter": "filter", "joint_ner_re": "joint_ner_re"},
                     )
                 builder.add_conditional_edges("filter", route_after_filter_to_normalize)
 
@@ -1161,7 +1232,7 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_normalize",
                     route_after_self_check_normalize,
-                    self_check_normalize_targets
+                    self_check_normalize_targets,
                 )
             else:
                 if enable_qa_scaffold:
@@ -1171,7 +1242,9 @@ def build_corpus_workflow(
 
             if enable_qa_scaffold:
                 qa_scaffold_node = create_qa_scaffold_node(llm)
-                builder.add_node("qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY)
+                builder.add_node(
+                    "qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY
+                )
 
                 if enable_full_self_check:
                     # QA_Scaffold → Self-Check-QA → Joint_NER_RE
@@ -1179,18 +1252,24 @@ def build_corpus_workflow(
                     builder.add_conditional_edges(
                         "self_check_qa",
                         route_after_self_check_qa,
-                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"}
+                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"},
                     )
                 else:
-                    builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold_for_joint)
-                logger.info(f"[Workflow] 联合抽取: Filter + Normalize + QA Scaffold + 二次检查")
+                    builder.add_conditional_edges(
+                        "qa_scaffold", route_after_qa_scaffold_for_joint
+                    )
+                logger.info(
+                    f"[Workflow] 联合抽取: Filter + Normalize + QA Scaffold + 二次检查"
+                )
             else:
                 # 无QA Scaffold，直接到联合抽取
                 logger.info(f"[Workflow] 联合抽取: Filter + Normalize")
 
         elif enable_filter:
             # P13改进：使用版本化Filter节点
-            builder.add_node("filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "filter", filter_node_versioned, retry_policy=LLM_RETRY_POLICY
+            )
 
             if enable_self_check_filter:
                 # 需要配置初始化节点来设置标记字段（normalize=False, qa_scaffold由配置决定）
@@ -1208,29 +1287,35 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_filter",
                     route_after_self_check_filter,
-                    self_check_filter_targets
+                    self_check_filter_targets,
                 )
             else:
                 builder.add_edge(START, "filter")
 
                 if enable_qa_scaffold:
-                    builder.add_conditional_edges("filter", route_after_filter_to_qa_scaffold)
+                    builder.add_conditional_edges(
+                        "filter", route_after_filter_to_qa_scaffold
+                    )
                 else:
                     builder.add_conditional_edges("filter", route_after_filter_to_joint)
 
             if enable_qa_scaffold:
                 qa_scaffold_node = create_qa_scaffold_node(llm)
-                builder.add_node("qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY)
+                builder.add_node(
+                    "qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY
+                )
 
                 if enable_full_self_check:
                     builder.add_edge("qa_scaffold", "self_check_qa")
                     builder.add_conditional_edges(
                         "self_check_qa",
                         route_after_self_check_qa,
-                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"}
+                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"},
                     )
                 else:
-                    builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold_for_joint)
+                    builder.add_conditional_edges(
+                        "qa_scaffold", route_after_qa_scaffold_for_joint
+                    )
 
             logger.info(f"[Workflow] 联合抽取: Filter")
 
@@ -1254,7 +1339,7 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_normalize",
                     route_after_self_check_normalize,
-                    self_check_normalize_targets
+                    self_check_normalize_targets,
                 )
             else:
                 builder.add_edge(START, "normalize")
@@ -1266,23 +1351,29 @@ def build_corpus_workflow(
 
             if enable_qa_scaffold:
                 qa_scaffold_node = create_qa_scaffold_node(llm)
-                builder.add_node("qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY)
+                builder.add_node(
+                    "qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY
+                )
 
                 if enable_full_self_check:
                     builder.add_edge("qa_scaffold", "self_check_qa")
                     builder.add_conditional_edges(
                         "self_check_qa",
                         route_after_self_check_qa,
-                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"}
+                        {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"},
                     )
                 else:
-                    builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold_for_joint)
+                    builder.add_conditional_edges(
+                        "qa_scaffold", route_after_qa_scaffold_for_joint
+                    )
 
             logger.info(f"[Workflow] 联合抽取: Normalize")
 
         elif enable_qa_scaffold:
             qa_scaffold_node = create_qa_scaffold_node(llm)
-            builder.add_node("qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY)
+            builder.add_node(
+                "qa_scaffold", qa_scaffold_node, retry_policy=LLM_RETRY_POLICY
+            )
             builder.add_edge(START, "qa_scaffold")
 
             if enable_full_self_check:
@@ -1290,10 +1381,12 @@ def build_corpus_workflow(
                 builder.add_conditional_edges(
                     "self_check_qa",
                     route_after_self_check_qa,
-                    {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"}
+                    {"qa_scaffold": "qa_scaffold", "joint_ner_re": "joint_ner_re"},
                 )
             else:
-                builder.add_conditional_edges("qa_scaffold", route_after_qa_scaffold_for_joint)
+                builder.add_conditional_edges(
+                    "qa_scaffold", route_after_qa_scaffold_for_joint
+                )
 
             logger.info(f"[Workflow] 联合抽取: QA Scaffold")
 
@@ -1308,18 +1401,18 @@ def build_corpus_workflow(
             builder.add_conditional_edges(
                 "joint_ner_re",
                 route_after_joint_extraction,
-                {"self_check_joint": "self_check_joint", "eval": "eval"}
+                {"self_check_joint": "self_check_joint", "eval": "eval"},
             )
             builder.add_conditional_edges(
                 "self_check_joint",
                 route_after_self_check_joint,
-                {"joint_ner_re": "joint_ner_re", "eval": "eval"}
+                {"joint_ner_re": "joint_ner_re", "eval": "eval"},
             )
             builder.add_edge("eval", "self_check_eval")
             builder.add_conditional_edges(
                 "self_check_eval",
                 route_after_self_check_eval,
-                {"eval": "eval", "label": "label"}
+                {"eval": "eval", "label": "label"},
             )
             builder.add_edge("label", "self_check_label")
 
@@ -1331,15 +1424,21 @@ def build_corpus_workflow(
                     "self_check_label",
                     route_after_self_check_label,
                     # P15修复：添加 END 键，确保路由函数返回 END 时能正确映射
-                    {"label": "label", "entity_alignment": "entity_alignment", END: END}
+                    {
+                        "label": "label",
+                        "entity_alignment": "entity_alignment",
+                        END: END,
+                    },
                 )
                 builder.add_edge("entity_alignment", END)
-                logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查 + 实体对齐启用")
+                logger.info(
+                    f"[Workflow] 联合抽取 + Reflexion + 全二次检查 + 实体对齐启用"
+                )
             else:
                 builder.add_conditional_edges(
                     "self_check_label",
                     route_after_self_check_label,
-                    {"label": "label", END: END}
+                    {"label": "label", END: END},
                 )
                 logger.info(f"[Workflow] 联合抽取 + Reflexion + 全二次检查启用")
         else:
@@ -1440,8 +1539,12 @@ def build_corpus_workflow(
         self_check_re_node = create_self_check_re_node(llm)
         eval_node = create_eval_simplified_node(llm)
 
-        builder.add_node("self_check_ner", self_check_ner_node, retry_policy=LLM_RETRY_POLICY)
-        builder.add_node("self_check_re", self_check_re_node, retry_policy=LLM_RETRY_POLICY)
+        builder.add_node(
+            "self_check_ner", self_check_ner_node, retry_policy=LLM_RETRY_POLICY
+        )
+        builder.add_node(
+            "self_check_re", self_check_re_node, retry_policy=LLM_RETRY_POLICY
+        )
         builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
 
         # NER 失败时直接 END，成功时进入 Self-Check-NER
@@ -1452,10 +1555,10 @@ def build_corpus_workflow(
             "self_check_ner",
             route_after_self_check_ner,
             {
-                "ner": "ner",     # 回退到 NER 重抽
-                "re": "re",       # 通过，继续到 RE
-                END: END,         # 错误时结束
-            }
+                "ner": "ner",  # 回退到 NER 重抽
+                "re": "re",  # 通过，继续到 RE
+                END: END,  # 错误时结束
+            },
         )
 
         # RE → Self-Check-RE
@@ -1466,11 +1569,11 @@ def build_corpus_workflow(
             "self_check_re",
             route_after_self_check_re,
             {
-                "ner": "ner",     # 回退到 NER（实体问题导致）
-                "re": "re",       # 回退到 RE（三元组问题）
-                "eval": "eval",   # 通过，继续到 Eval
-                END: END,         # 错误时结束
-            }
+                "ner": "ner",  # 回退到 NER（实体问题导致）
+                "re": "re",  # 回退到 RE（三元组问题）
+                "eval": "eval",  # 通过，继续到 Eval
+                END: END,  # 错误时结束
+            },
         )
 
         # Eval → Label → END
@@ -1480,7 +1583,9 @@ def build_corpus_workflow(
         if enable_qa_scaffold:
             logger.info(f"[Workflow] 启用 QA Scaffold + Self-Check + 反思循环模式")
         else:
-            logger.info(f"[Workflow] 启用 Self-Check + 反思循环模式，最大重试次数: {max_retries}")
+            logger.info(
+                f"[Workflow] 启用 Self-Check + 反思循环模式，最大重试次数: {max_retries}"
+            )
 
     # P2改进：根据配置选择评估模式（无 Self-Check）
     elif use_simplified_eval:
@@ -1512,6 +1617,7 @@ def build_corpus_workflow(
 
 # ===== 分布式工作流 =====
 
+
 def build_distributed_workflow(
     llm: Any,
     config: Optional[ExtractionConfig] = None,
@@ -1534,7 +1640,9 @@ def build_distributed_workflow(
     qa_llm = qa_llm or llm
 
     # 创建节点函数
-    coordinator_node = create_coordinator_node(config.corpus_per_worker, config.max_workers)
+    coordinator_node = create_coordinator_node(
+        config.corpus_per_worker, config.max_workers
+    )
     aggregator_node = create_aggregator_node(config.similarity_threshold)
 
     # P0改进：预编译单条语料 workflow，避免在 workers_node 中重复编译
@@ -1611,7 +1719,9 @@ def build_distributed_workflow(
         enable_qa_mentor = config.enable_qa_mentor
 
         if enable_qa_mentor and enable_batch_llm:
-            logger.info("[Workers] QA导师 + batch_llm 并行模式: batch主处理, fallback走导师流程")
+            logger.info(
+                "[Workers] QA导师 + batch_llm 并行模式: batch主处理, fallback走导师流程"
+            )
 
         if enable_batch_llm:
             logger.info(f"[Workers] 批量LLM模式: 每次处理 {batch_llm_size} 条语料")
@@ -1641,7 +1751,8 @@ def build_distributed_workflow(
                     raw_text=raw_text,
                     max_retries=config.self_check_max_retries,
                     enable_normalize=config.enable_normalize and not skip_preprocessing,
-                    enable_qa_scaffold=config.enable_qa_scaffold and not skip_preprocessing,
+                    enable_qa_scaffold=config.enable_qa_scaffold
+                    and not skip_preprocessing,
                     enable_entity_alignment=config.enable_entity_alignment,
                     max_revision_cycles=config.max_revision_cycles,
                 )
@@ -1649,14 +1760,24 @@ def build_distributed_workflow(
                 # P19新增：如果 corpus 包含预处理结果，直接注入到 initial_state
                 if skip_preprocessing or corpus.get("normalized_text"):
                     # 注入预处理结果
-                    initial_state["normalized_text"] = corpus.get("normalized_text", raw_text)
+                    initial_state["normalized_text"] = corpus.get(
+                        "normalized_text", raw_text
+                    )
                     initial_state["qa_entity_hints"] = corpus.get("entity_hints", [])
-                    initial_state["qa_relation_hints"] = corpus.get("relation_hints", [])
-                    initial_state["qa_context_dependencies"] = corpus.get("context_dependencies", [])
-                    initial_state["semantic_summary"] = corpus.get("semantic_summary", "")
+                    initial_state["qa_relation_hints"] = corpus.get(
+                        "relation_hints", []
+                    )
+                    initial_state["qa_context_dependencies"] = corpus.get(
+                        "context_dependencies", []
+                    )
+                    initial_state["semantic_summary"] = corpus.get(
+                        "semantic_summary", ""
+                    )
                     # 标记预处理已完成
                     initial_state["_preprocessing_completed"] = True
-                    logger.info(f"[Fallback] 语料 {corpus_id} 使用预处理结果，跳过 Filter/Normalize/QA_Scaffold")
+                    logger.info(
+                        f"[Fallback] 语料 {corpus_id} 使用预处理结果，跳过 Filter/Normalize/QA_Scaffold"
+                    )
 
                 if mentor_query and query_source_node:
                     initial_state["mentor_query"] = mentor_query
@@ -1680,7 +1801,9 @@ def build_distributed_workflow(
                             "thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"
                         }
                     }
-                    result = await selected_mentor_workflow.ainvoke(initial_state, thread_config)  # type: ignore
+                    result = await selected_mentor_workflow.ainvoke(
+                        initial_state, thread_config
+                    )  # type: ignore
                 else:
                     thread_config = {
                         "configurable": {
@@ -1753,11 +1876,19 @@ def build_distributed_workflow(
 
             try:
                 # P15新增：批量预处理（Filter → Normalize → QA_Scaffold）
-                if config.enable_filter or config.enable_normalize or config.enable_qa_scaffold:
-                    logger.info(f"[Batch_Preprocessing] 开始批量预处理 {len(corpus_list)} 条语料")
+                if (
+                    config.enable_filter
+                    or config.enable_normalize
+                    or config.enable_qa_scaffold
+                ):
+                    logger.info(
+                        f"[Batch_Preprocessing] 开始批量预处理 {len(corpus_list)} 条语料"
+                    )
 
                     preprocessing_result = await process_batch_preprocessing(
-                        llm, corpus_list, config,
+                        llm,
+                        corpus_list,
+                        config,
                         enable_filter=config.enable_filter,
                         enable_normalize=config.enable_normalize,
                         enable_qa_scaffold=config.enable_qa_scaffold,
@@ -1770,14 +1901,16 @@ def build_distributed_workflow(
 
                     # 被跳过的语料，返回空结果
                     for corpus in skipped_corpus:
-                        skipped_results.append({
-                            "corpus_id": corpus.get("id"),
-                            "entities": DEFAULT_ENTITY_DICT.copy(),
-                            "triples": [],
-                            "eval_passed": False,
-                            "skip_reason": corpus.get("skip_reason", "被筛选跳过"),
-                            "batch_processed": True,
-                        })
+                        skipped_results.append(
+                            {
+                                "corpus_id": corpus.get("id"),
+                                "entities": DEFAULT_ENTITY_DICT.copy(),
+                                "triples": [],
+                                "eval_passed": False,
+                                "skip_reason": corpus.get("skip_reason", "被筛选跳过"),
+                                "batch_processed": True,
+                            }
+                        )
 
                     # 失败回退语料去重（按 corpus_id）
                     dedup_fallback_corpus = []
@@ -1813,9 +1946,13 @@ def build_distributed_workflow(
                                 }
                             )
                     elif batch_llm_fallback and fallback_corpus:
-                        logger.info(f"[Batch_Preprocessing] Fallback处理 {len(fallback_corpus)} 条预处理失败的语料")
+                        logger.info(
+                            f"[Batch_Preprocessing] Fallback处理 {len(fallback_corpus)} 条预处理失败的语料"
+                        )
                         for corpus in fallback_corpus:
-                            single_result = await run_single_with_optional_mentor(corpus)
+                            single_result = await run_single_with_optional_mentor(
+                                corpus
+                            )
                             fallback_results.append(single_result)
 
                     # 如果预处理后无语料，直接返回
@@ -1828,12 +1965,16 @@ def build_distributed_workflow(
                 # P21新增：创建批量实体对齐节点（如果启用）
                 batch_entity_alignment_node = None
                 if getattr(config, "enable_entity_alignment", False):
-                    batch_entity_alignment_node = create_batch_entity_alignment_node(llm)
+                    batch_entity_alignment_node = create_batch_entity_alignment_node(
+                        llm
+                    )
                     logger.info("[Batch] 实体对齐节点已创建")
 
                 # 使用批量处理（联合抽取）
                 batch_result = await process_corpus_batch_with_llm(
-                    llm, corpus_list, config, 
+                    llm,
+                    corpus_list,
+                    config,
                     batch_entity_alignment_node=batch_entity_alignment_node,
                     qa_llm=qa_llm,
                 )
@@ -1841,11 +1982,17 @@ def build_distributed_workflow(
                 results = []
 
                 # 转换批量结果为单条结果格式（P17改进：使用批处理返回的eval和label结果）
+                corpus_text_map = {
+                    str(corpus.get("id")): corpus.get("text", "") for corpus in corpus_list
+                }
                 for corpus_id, data in batch_result["batch_results"].items():
                     # 构建兼容的结果格式
                     result = {
                         "corpus_id": corpus_id,
-                        "entities": data.get("entities", DEFAULT_ENTITY_DICT.copy()),  # v3.4修复：使用6种实体类型
+                        "raw_text": corpus_text_map.get(str(corpus_id), ""),
+                        "entities": data.get(
+                            "entities", DEFAULT_ENTITY_DICT.copy()
+                        ),  # v3.4修复：使用6种实体类型
                         "triples": data.get("triples", []),
                         "corrected_triples": data.get("triples", []),
                         # P17改进：使用批处理返回的 eval_passed（而非硬编码 True）
@@ -1853,7 +2000,9 @@ def build_distributed_workflow(
                         # P17改进：使用批处理返回的 entity_attrs 和 relation_attrs
                         "entity_attrs": data.get("entity_attrs", {}),
                         "relation_attrs": data.get("relation_attrs", {}),
-                        "entity_alignment_result": data.get("entity_alignment_result", {}),
+                        "entity_alignment_result": data.get(
+                            "entity_alignment_result", {}
+                        ),
                         "aligned_entities": data.get("aligned_entities", []),
                         "new_entities": data.get("new_entities", []),
                         "eval_scores": data.get("eval_scores", []),
@@ -1868,7 +2017,10 @@ def build_distributed_workflow(
                 #      都能主动回问导师（通过升级为导师单条流实现）。
                 # 批内导师交互已在 process_corpus_batch_with_llm 内完成
 
-                if batch_skip_on_repeated_failure and batch_result["needs_single_processing"]:
+                if (
+                    batch_skip_on_repeated_failure
+                    and batch_result["needs_single_processing"]
+                ):
                     fallback_corpus = batch_result["fallback_corpus_list"]
                     logger.warning(
                         f"[Batch] 按策略跳过 {len(fallback_corpus)} 条批处理失败语料"
@@ -1899,7 +2051,9 @@ def build_distributed_workflow(
 
                 # 漏项保护：确保本批输入语料都有输出结果
                 result_ids = {str(r.get("corpus_id")) for r in results}
-                missing_corpus = [c for c in corpus_list if str(c.get("id")) not in result_ids]
+                missing_corpus = [
+                    c for c in corpus_list if str(c.get("id")) not in result_ids
+                ]
                 if missing_corpus:
                     logger.warning(
                         f"[Batch] 检测到 {len(missing_corpus)} 条语料无结果，"
@@ -1977,13 +2131,15 @@ def build_distributed_workflow(
                 # P10改进：批量处理模式
                 # 将语料分成多个batch_llm_size的批次
                 for i in range(0, len(corpus_list), batch_llm_size):
-                    batch_corpus = corpus_list[i:i + batch_llm_size]
+                    batch_corpus = corpus_list[i : i + batch_llm_size]
 
                     async with semaphore:  # 获取"许可证"
                         batch_results = await process_corpus_batch(batch_corpus)
                         results.extend(batch_results)
 
-                        logger.debug(f"[{worker_id}] Batch {i//batch_llm_size + 1}: {len(batch_results)} 条结果")
+                        logger.debug(
+                            f"[{worker_id}] Batch {i // batch_llm_size + 1}: {len(batch_results)} 条结果"
+                        )
             else:
                 # 原有模式：单条并行处理
                 async def process_corpus_with_limit(corpus: Dict) -> Dict:
@@ -2005,7 +2161,9 @@ def build_distributed_workflow(
                     success_results.append(result)
 
             processing_time = time.time() - start_time
-            logger.info(f"[{worker_id}] 完成: {len(success_results)}/{len(corpus_list)} 条语料, 耗时 {processing_time:.2f}s")
+            logger.info(
+                f"[{worker_id}] 完成: {len(success_results)}/{len(corpus_list)} 条语料, 耗时 {processing_time:.2f}s"
+            )
 
             return {
                 "worker_id": worker_id,
@@ -2035,7 +2193,9 @@ def build_distributed_workflow(
                 final_worker_results.append(result)
 
         total_processing_time = time.time() - start_time
-        logger.info(f"[Workers] 全部完成: {len(final_worker_results)} 个Worker成功, {len(failed_workers)} 个失败, 总耗时 {total_processing_time:.2f}s")
+        logger.info(
+            f"[Workers] 全部完成: {len(final_worker_results)} 个Worker成功, {len(failed_workers)} 个失败, 总耗时 {total_processing_time:.2f}s"
+        )
 
         return {
             "worker_results": final_worker_results,
@@ -2078,19 +2238,23 @@ def build_distributed_workflow(
             with Neo4jClient(
                 db_config["neo4j_uri"],
                 db_config["neo4j_user"],
-                db_config["neo4j_password"]
+                db_config["neo4j_password"],
             ) as neo4j:
                 # 创建索引
                 neo4j.create_indexes()
 
                 # 批量合并实体
                 if state["aggregated_entities"]:
-                    entity_stats = neo4j.batch_merge_entities(state["aggregated_entities"])
+                    entity_stats = neo4j.batch_merge_entities(
+                        state["aggregated_entities"]
+                    )
                     neo4j_stats["merged_entities"] = entity_stats.get("merged", 0)
 
                 # 批量合并关系
                 if state["aggregated_triples"]:
-                    relation_stats = neo4j.batch_merge_relations(state["aggregated_triples"])
+                    relation_stats = neo4j.batch_merge_relations(
+                        state["aggregated_triples"]
+                    )
                     neo4j_stats["merged_relations"] = relation_stats.get("merged", 0)
 
             # 写入 PostgreSQL
@@ -2099,25 +2263,35 @@ def build_distributed_workflow(
                 db_config["pg_port"],
                 db_config["pg_database"],
                 db_config["pg_user"],
-                db_config["pg_password"]
+                db_config["pg_password"],
             ) as pg:
                 # 创建表结构
                 pg.create_tables()
 
                 # 插入批次记录
-                pg.insert_batch(state["batch_id"], state["total_count"], state["worker_count"])
+                pg.insert_batch(
+                    state["batch_id"], state["total_count"], state["worker_count"]
+                )
 
                 # 记录 Neo4j 同步状态
-                pg.update_neo4j_sync_status(state["batch_id"], neo4j_stats["merged_entities"] > 0 or neo4j_stats["merged_relations"] > 0)
+                pg.update_neo4j_sync_status(
+                    state["batch_id"],
+                    neo4j_stats["merged_entities"] > 0
+                    or neo4j_stats["merged_relations"] > 0,
+                )
 
                 # 插入实体
                 if state["aggregated_entities"]:
-                    entity_count = pg.insert_entities(state["batch_id"], state["aggregated_entities"])
+                    entity_count = pg.insert_entities(
+                        state["batch_id"], state["aggregated_entities"]
+                    )
                     postgres_stats["entities"] = entity_count
 
                 # 插入三元组
                 if state["aggregated_triples"]:
-                    triple_count = pg.insert_triples(state["batch_id"], state["aggregated_triples"])
+                    triple_count = pg.insert_triples(
+                        state["batch_id"], state["aggregated_triples"]
+                    )
                     postgres_stats["triples"] = triple_count
 
                 # 插入语料来源（保留证据链）- 过滤掉失败语料
@@ -2125,16 +2299,22 @@ def build_distributed_workflow(
                 for worker_result in state["worker_results"]:
                     for corpus_state in worker_result.get("results", []):
                         # 只收集成功处理的语料（无error且有raw_text）
-                        if not corpus_state.get("error") and corpus_state.get("raw_text"):
+                        if not corpus_state.get("error") and corpus_state.get(
+                            "raw_text"
+                        ):
                             all_corpus_states.append(corpus_state)
                 if all_corpus_states:
-                    corpus_count = pg.insert_corpus_sources(state["batch_id"], all_corpus_states)
+                    corpus_count = pg.insert_corpus_sources(
+                        state["batch_id"], all_corpus_states
+                    )
                     postgres_stats["corpus_sources"] = corpus_count
 
                 # 更新批次状态为成功
                 pg.update_batch_status(state["batch_id"], "completed")
 
-            logger.info(f"[Finalizer] 数据库写入成功 - Neo4j: {neo4j_stats}, PostgreSQL: {postgres_stats}")
+            logger.info(
+                f"[Finalizer] 数据库写入成功 - Neo4j: {neo4j_stats}, PostgreSQL: {postgres_stats}"
+            )
 
         except Exception as e:
             error_message = str(e)
@@ -2147,14 +2327,20 @@ def build_distributed_workflow(
                     db_config["pg_port"],
                     db_config["pg_database"],
                     db_config["pg_user"],
-                    db_config["pg_password"]
+                    db_config["pg_password"],
                 ) as pg:
-                    pg.update_batch_status_with_error(state["batch_id"], "failed", error_message)
+                    pg.update_batch_status_with_error(
+                        state["batch_id"], "failed", error_message
+                    )
                     # 检查 Neo4j 是否已同步但 PostgreSQL 失败（需要补偿）
                     batch_status = pg.get_batch_status(state["batch_id"])
                     if batch_status and batch_status.get("neo4j_sync"):
-                        logger.warning(f"[Finalizer] Neo4j已同步但PostgreSQL失败，需要人工检查数据一致性")
-                    logger.info(f"[Finalizer] 批次状态已更新为 failed，错误: {error_message[:100]}")
+                        logger.warning(
+                            f"[Finalizer] Neo4j已同步但PostgreSQL失败，需要人工检查数据一致性"
+                        )
+                    logger.info(
+                        f"[Finalizer] 批次状态已更新为 failed，错误: {error_message[:100]}"
+                    )
             except Exception as inner_e:
                 logger.error(f"[Finalizer] 无法更新批次失败状态: {inner_e}")
 
@@ -2188,7 +2374,10 @@ def build_distributed_workflow(
 
 # ===== 便捷函数 =====
 
-async def process_corpus(llm: Any, corpus: Dict, config: Optional[ExtractionConfig] = None) -> CorpusState:
+
+async def process_corpus(
+    llm: Any, corpus: Dict, config: Optional[ExtractionConfig] = None
+) -> CorpusState:
     """
     处理单条语料的便捷函数
 
@@ -2205,7 +2394,7 @@ async def process_corpus(llm: Any, corpus: Dict, config: Optional[ExtractionConf
         use_simplified_eval=config.use_simplified_eval,
         enable_self_check=config.enable_self_check,
         enable_filter=config.enable_filter,
-        max_retries=config.self_check_max_retries
+        max_retries=config.self_check_max_retries,
     )
 
     corpus_id = _validate_corpus_id(corpus.get("id"))
@@ -2219,7 +2408,9 @@ async def process_corpus(llm: Any, corpus: Dict, config: Optional[ExtractionConf
     )
 
     # 使用唯一 thread_id 避免状态串扰
-    thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+    thread_config = {
+        "configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}
+    }
     result = await workflow.ainvoke(initial_state, thread_config)
     return cast(CorpusState, result)
 
@@ -2228,7 +2419,7 @@ async def process_corpus_streaming(
     llm: Any,
     corpus: Dict,
     callback: Optional[Any] = None,
-    config: Optional[ExtractionConfig] = None
+    config: Optional[ExtractionConfig] = None,
 ):
     """
     P3改进：流式处理单条语料，支持实时进度回调
@@ -2249,7 +2440,7 @@ async def process_corpus_streaming(
         use_simplified_eval=config.use_simplified_eval,
         enable_self_check=config.enable_self_check,
         enable_filter=config.enable_filter,
-        max_retries=config.self_check_max_retries
+        max_retries=config.self_check_max_retries,
     )
 
     corpus_id = _validate_corpus_id(corpus.get("id"))
@@ -2262,10 +2453,14 @@ async def process_corpus_streaming(
         max_retries=config.self_check_max_retries,
     )
 
-    thread_config = {"configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+    thread_config = {
+        "configurable": {"thread_id": f"corpus_{corpus_id}_{uuid.uuid4().hex[:8]}"}
+    }
 
     # 使用 stream_mode="custom" 获取 StreamWriter 写入的自定义事件
-    async for event_data in workflow.astream(initial_state, thread_config, stream_mode="custom"):
+    async for event_data in workflow.astream(
+        initial_state, thread_config, stream_mode="custom"
+    ):
         # 调用回调函数
         if callback:
             try:
@@ -2281,7 +2476,7 @@ async def process_corpus_streaming(
         "step": "final",
         "corpus_id": corpus_id,
         "status": "completed",
-        "result": final_state.values
+        "result": final_state.values,
     }
 
 
@@ -2289,7 +2484,7 @@ async def process_batch_streaming(
     llm: Any,
     corpus_list: List[Dict],
     callback: Optional[Any] = None,
-    config: Optional[ExtractionConfig] = None
+    config: Optional[ExtractionConfig] = None,
 ):
     """
     P3改进：流式批量处理语料
@@ -2311,23 +2506,17 @@ async def process_batch_streaming(
             "status": "processing",
             "current_index": i,
             "total_count": len(corpus_list),
-            "corpus_id": corpus.get("id", f"unknown_{i}")
+            "corpus_id": corpus.get("id", f"unknown_{i}"),
         }
 
         async for event in process_corpus_streaming(llm, corpus, callback, config):
             yield event
 
-    yield {
-        "step": "batch",
-        "status": "completed",
-        "total_count": len(corpus_list)
-    }
+    yield {"step": "batch", "status": "completed", "total_count": len(corpus_list)}
 
 
 async def process_batch(
-    llm: Any,
-    corpus_list: List[Dict],
-    config: Optional[ExtractionConfig] = None
+    llm: Any, corpus_list: List[Dict], config: Optional[ExtractionConfig] = None
 ) -> KGState:
     """
     批量处理语料的便捷函数
@@ -2370,6 +2559,7 @@ async def process_batch(
 
 # ===== P7新增：分批次处理入口 =====
 
+
 async def process_corpus_in_batches(
     llm: Any,
     config: Optional[ExtractionConfig] = None,
@@ -2379,7 +2569,7 @@ async def process_corpus_in_batches(
     text_column: str = "desc_cleaned",
     id_column: str = "note_id",
     where_clause: Optional[str] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> Dict:
     """
     分批次从数据库读取语料并处理
@@ -2415,7 +2605,7 @@ async def process_corpus_in_batches(
         "total_entities": 0,
         "total_triples": 0,
         "batches": [],
-        "errors": []
+        "errors": [],
     }
 
     offset = 0
@@ -2427,10 +2617,12 @@ async def process_corpus_in_batches(
         db_config["pg_port"],
         db_config["pg_database"],
         db_config["pg_user"],
-        db_config["pg_password"]
+        db_config["pg_password"],
     ) as pg:
         # 获取总数
-        total_count = pg.count_corpus_for_extraction(table_name, text_column, where_clause)
+        total_count = pg.count_corpus_for_extraction(
+            table_name, text_column, where_clause
+        )
         if total_limit:
             total_count = min(total_count, total_limit)
 
@@ -2440,7 +2632,9 @@ async def process_corpus_in_batches(
             batch_num += 1
             current_batch_size = min(batch_size, total_count - offset)
 
-            logger.info(f"[批次 {batch_num}] 读取语料 offset={offset}, limit={current_batch_size}")
+            logger.info(
+                f"[批次 {batch_num}] 读取语料 offset={offset}, limit={current_batch_size}"
+            )
 
             # 读取一批语料
             corpus_list = pg.fetch_corpus_for_extraction(
@@ -2449,7 +2643,7 @@ async def process_corpus_in_batches(
                 id_column=id_column,
                 limit=current_batch_size,
                 offset=offset,
-                where_clause=where_clause
+                where_clause=where_clause,
             )
 
             if not corpus_list:
@@ -2472,12 +2666,14 @@ async def process_corpus_in_batches(
                 stats["total_processed"] += len(corpus_list)
                 stats["total_entities"] += batch_entities
                 stats["total_triples"] += batch_triples
-                stats["batches"].append({
-                    "batch_num": batch_num,
-                    "corpus_count": len(corpus_list),
-                    "entities": batch_entities,
-                    "triples": batch_triples
-                })
+                stats["batches"].append(
+                    {
+                        "batch_num": batch_num,
+                        "corpus_count": len(corpus_list),
+                        "entities": batch_entities,
+                        "triples": batch_triples,
+                    }
+                )
 
                 logger.info(
                     f"[批次 {batch_num}] 完成: {len(corpus_list)} 条语料, "
@@ -2505,6 +2701,7 @@ async def process_corpus_in_batches(
 
 
 # ===== P10新增：QA导师工作流 =====
+
 
 def route_after_qa_mentor(state: CorpusState) -> str:
     """QA导师后路由"""
@@ -2538,7 +2735,9 @@ def route_after_qa_approval(state: CorpusState) -> str:
 
     # 达到最大修改轮次，强制结束
     if revision_cycle_count >= max_revision_cycles:
-        logger.warning(f"[QA_Approval-Route] 达到最大修改轮次 {revision_cycle_count}/{max_revision_cycles}")
+        logger.warning(
+            f"[QA_Approval-Route] 达到最大修改轮次 {revision_cycle_count}/{max_revision_cycles}"
+        )
         return END
 
     # 审批通过，结束
@@ -2574,6 +2773,7 @@ def route_after_revision_joint(state: CorpusState) -> str:
 
 # ===== P14新增：双向交流路由函数 =====
 
+
 def route_joint_to_mentor_or_eval(state: CorpusState) -> str:
     """Joint_NER_RE 后路由 - 可向导师求助
 
@@ -2590,7 +2790,9 @@ def route_joint_to_mentor_or_eval(state: CorpusState) -> str:
 
     # 需要导师帮助且未超过最大查询次数
     if needs_mentor_help and query_count < max_queries:
-        logger.info(f"[Joint-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        logger.info(
+            f"[Joint-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})"
+        )
         return "qa_mentor"
 
     # 正常继续到 Eval
@@ -2640,7 +2842,9 @@ def route_label_to_mentor_or_approval(state: CorpusState) -> str:
 
     # 需要导师帮助且未超过最大查询次数
     if needs_mentor_help and query_count < max_queries:
-        logger.info(f"[Label-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})")
+        logger.info(
+            f"[Label-Route] 需要导师帮助，回退到 QA_Mentor (查询次数: {query_count}/{max_queries})"
+        )
         return "qa_mentor"
 
     # 正常继续到 QA_Approval
@@ -2702,8 +2906,12 @@ def build_qa_mentor_workflow(
     # P14改进：创建节点时传入 enable_query 参数
     qa_mentor_node = create_qa_mentor_node(qa_llm, config)
     qa_approval_node = create_qa_approval_node(qa_llm, config)
-    joint_ner_re_node = create_joint_ner_re_node(worker_llm, enable_query=enable_bidirectional_query)
-    eval_node = create_eval_simplified_node(worker_llm, enable_query=enable_bidirectional_query)
+    joint_ner_re_node = create_joint_ner_re_node(
+        worker_llm, enable_query=enable_bidirectional_query
+    )
+    eval_node = create_eval_simplified_node(
+        worker_llm, enable_query=enable_bidirectional_query
+    )
     label_node = create_label_node(worker_llm, enable_query=enable_bidirectional_query)
     revision_joint_node = create_revision_joint_node(worker_llm)
 
@@ -2713,7 +2921,9 @@ def build_qa_mentor_workflow(
     builder.add_node("eval", eval_node, retry_policy=LLM_RETRY_POLICY)
     builder.add_node("label", label_node, retry_policy=LLM_RETRY_POLICY)
     builder.add_node("qa_approval", qa_approval_node, retry_policy=LLM_RETRY_POLICY)
-    builder.add_node("revision_joint", revision_joint_node, retry_policy=LLM_RETRY_POLICY)
+    builder.add_node(
+        "revision_joint", revision_joint_node, retry_policy=LLM_RETRY_POLICY
+    )
 
     # 前置节点（可选）- 支持同时启用Filter和Normalize
     if config.enable_filter:
@@ -2748,7 +2958,7 @@ def build_qa_mentor_workflow(
             "eval": "eval",
             "label": "label",
             END: END,
-        }
+        },
     )
 
     # P14改进：联合抽取 → 导师帮助或评估（双向交流）
@@ -2758,8 +2968,8 @@ def build_qa_mentor_workflow(
             route_joint_to_mentor_or_eval,
             {
                 "qa_mentor": "qa_mentor",  # 需要帮助时回退到导师
-                "eval": "eval",            # 正常继续
-            }
+                "eval": "eval",  # 正常继续
+            },
         )
     else:
         builder.add_edge("joint_ner_re", "eval")
@@ -2773,7 +2983,7 @@ def build_qa_mentor_workflow(
                 "qa_mentor": "qa_mentor",  # 需要帮助时回导师
                 "joint_ner_re": "joint_ner_re",  # eval不通过回抽取
                 "label": "label",  # 正常进入标注
-            }
+            },
         )
     else:
         builder.add_edge("eval", "label")
@@ -2784,9 +2994,9 @@ def build_qa_mentor_workflow(
             "label",
             route_label_to_mentor_or_approval,
             {
-                "qa_mentor": "qa_mentor",      # 需要帮助时回退到导师
+                "qa_mentor": "qa_mentor",  # 需要帮助时回退到导师
                 "qa_approval": "qa_approval",  # 正常继续
-            }
+            },
         )
     else:
         builder.add_edge("label", "qa_approval")
@@ -2800,14 +3010,12 @@ def build_qa_mentor_workflow(
             "eval": "eval",
             "label": "label",
             END: END,
-        }
+        },
     )
 
     # 修改联合抽取 → 评估
     builder.add_conditional_edges(
-        "revision_joint",
-        route_after_revision_joint,
-        {"eval": "eval"}
+        "revision_joint", route_after_revision_joint, {"eval": "eval"}
     )
 
     if enable_bidirectional_query:
@@ -2819,10 +3027,7 @@ def build_qa_mentor_workflow(
 
 
 async def process_corpus_with_qa_mentor(
-    qa_llm: Any,
-    worker_llm: Any,
-    corpus: Dict,
-    config: ExtractionConfig
+    qa_llm: Any, worker_llm: Any, corpus: Dict, config: ExtractionConfig
 ) -> CorpusState:
     """
     使用QA导师模式处理单条语料
@@ -2851,6 +3056,8 @@ async def process_corpus_with_qa_mentor(
         max_revision_cycles=config.max_revision_cycles,
     )
 
-    thread_config = {"configurable": {"thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"}}
+    thread_config = {
+        "configurable": {"thread_id": f"qa_mentor_{corpus_id}_{uuid.uuid4().hex[:8]}"}
+    }
     result = await workflow.ainvoke(initial_state, thread_config)
     return cast(CorpusState, result)
