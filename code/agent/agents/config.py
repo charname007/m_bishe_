@@ -48,6 +48,15 @@ class ExtractionConfig:
     batch_llm_fallback: bool = True
     """批量处理失败时是否自动退化为单条处理"""
 
+    batch_qa_scaffold_retry_attempts: int = 1
+    """Batch_QA_Scaffold 失败后的批量重试次数（重试耗尽后再fallback到单条）"""
+
+    batch_stage_retry_attempts: int = 1
+    """批量阶段统一重试次数（适用于batch节点编排层，重试耗尽后按策略fallback或skip）"""
+
+    batch_skip_on_repeated_failure: bool = False
+    """批量阶段反复失败时是否直接跳过（True: skip，不做单条fallback）"""
+
     # ===== 文本验证配置 =====
     max_text_length: int = 10000
     """最大文本长度（超出会被截断）"""
@@ -271,6 +280,13 @@ class ExtractionConfig:
             batch_llm_size=get_int("BATCH_LLM_SIZE", 5),
             enable_batch_llm=get_bool("ENABLE_BATCH_LLM", True),
             batch_llm_fallback=get_bool("BATCH_LLM_FALLBACK", True),
+            batch_qa_scaffold_retry_attempts=get_int(
+                "BATCH_QA_SCAFFOLD_RETRY_ATTEMPTS", 1
+            ),
+            batch_stage_retry_attempts=get_int("BATCH_STAGE_RETRY_ATTEMPTS", 1),
+            batch_skip_on_repeated_failure=get_bool(
+                "BATCH_SKIP_ON_REPEATED_FAILURE", False
+            ),
             # P10新增：QA导师模式参数
             enable_qa_mentor=get_bool("ENABLE_QA_MENTOR", False),
             qa_approval_enabled=get_bool("QA_APPROVAL_ENABLED", False),
@@ -331,6 +347,15 @@ class ExtractionConfig:
             batch_llm_size=config_dict.get("batch_llm_size", 5),
             enable_batch_llm=config_dict.get("enable_batch_llm", True),
             batch_llm_fallback=config_dict.get("batch_llm_fallback", True),
+            batch_qa_scaffold_retry_attempts=config_dict.get(
+                "batch_qa_scaffold_retry_attempts", 1
+            ),
+            batch_stage_retry_attempts=config_dict.get(
+                "batch_stage_retry_attempts", 1
+            ),
+            batch_skip_on_repeated_failure=config_dict.get(
+                "batch_skip_on_repeated_failure", False
+            ),
             # P10新增：QA导师模式参数
             enable_qa_mentor=config_dict.get("enable_qa_mentor", False),
             qa_approval_enabled=config_dict.get("qa_approval_enabled", False),
@@ -390,6 +415,9 @@ class ExtractionConfig:
             "batch_llm_size": self.batch_llm_size,
             "enable_batch_llm": self.enable_batch_llm,
             "batch_llm_fallback": self.batch_llm_fallback,
+            "batch_qa_scaffold_retry_attempts": self.batch_qa_scaffold_retry_attempts,
+            "batch_stage_retry_attempts": self.batch_stage_retry_attempts,
+            "batch_skip_on_repeated_failure": self.batch_skip_on_repeated_failure,
             # P10新增：QA导师模式参数
             "enable_qa_mentor": self.enable_qa_mentor,
             "qa_approval_enabled": self.qa_approval_enabled,

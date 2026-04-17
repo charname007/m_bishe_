@@ -3347,6 +3347,50 @@ ENTITY_ALIGNMENT_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+BATCH_ENTITY_ALIGNMENT_DECISION_SYSTEM = """你是一位"地理实体对齐专家"，负责批量判断中置信度实体是否应与候选实体对齐。
+你的任务是：
+1. 对每个实体在候选中选择最佳匹配索引（或-1）
+2. 给出 alignment_status：aligned/new_entity/skip
+3. 给出简短决策原因
+
+注意：
+- 必须覆盖输入中的每个 extracted_name
+- 只能使用给定候选，不要臆造候选
+- 对不确定案例保持保守（new_entity）"""
+
+
+BATCH_ENTITY_ALIGNMENT_DECISION_USER = """## 批量中置信度实体对齐任务
+
+请对以下实体逐条做对齐判断（每条都要返回）：
+
+### 原始文本上下文
+{raw_text}
+
+### 实体候选列表（JSON）
+{items_json}
+
+---
+
+## 输出要求（严格JSON）
+
+请输出：
+1. decisions: 列表，每项包含
+   - extracted_name
+   - best_match_index（0-based，无法匹配填-1）
+   - alignment_status（aligned/new_entity/skip）
+   - llm_decision（简短原因）
+2. overall_confidence
+"""
+
+
+BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", BATCH_ENTITY_ALIGNMENT_DECISION_SYSTEM),
+        ("human", BATCH_ENTITY_ALIGNMENT_DECISION_USER),
+    ]
+)
+
+
 def format_alignment_candidates(candidates: List[Dict]) -> str:
     """格式化实体对齐候选列表，包含数据来源标识"""
     if not candidates:

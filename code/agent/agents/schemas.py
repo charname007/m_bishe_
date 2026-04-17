@@ -2401,6 +2401,28 @@ class EntityAlignmentItem(BaseModel):
     llm_decision: Optional[str] = Field(default=None, description="LLM决策说明")
 
 
+class BatchEntityAlignmentDecisionItem(BaseModel):
+    """单个实体的批量LLM对齐决策"""
+
+    extracted_name: str = Field(description="抽取的实体名称")
+    best_match_index: int = Field(
+        default=-1, description="最佳匹配候选索引（0-based，无匹配为-1）"
+    )
+    alignment_status: str = Field(
+        default="new_entity", description="对齐状态: aligned/new_entity/skip"
+    )
+    llm_decision: str = Field(default="", description="决策说明")
+
+
+class BatchEntityAlignmentDecisionResult(BaseModel):
+    """中置信度实体批量LLM对齐决策结果"""
+
+    decisions: List[BatchEntityAlignmentDecisionItem] = Field(
+        default_factory=list, description="逐实体决策列表"
+    )
+    overall_confidence: str = Field(default="medium", description="整体置信度")
+
+
 class EntityAlignmentResult(BaseModel):
     """实体对齐节点输出 - 整体对齐结果"""
 

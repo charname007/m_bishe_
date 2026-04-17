@@ -574,6 +574,155 @@ class TestEntityAlignmentMultiSource:
         assert "武汉大学" in result
         assert "群光广场" in result
 
+    @pytest.mark.anyio
+    async def test_entity_alignment_medium_confidence_uses_single_batch_llm_call(self):
+        """中置信度实体应使用一次批量LLM调用（N->1）"""
+        from agent.agents.nodes import create_entity_alignment_node
+        from agent.agents.config import ExtractionConfig
+        import sys
+        import types
+
+        class DummyModel:
+            def encode(self, texts, show_progress_bar=False, convert_to_numpy=True):
+                import numpy as np
+
+                if isinstance(texts, str):
+                    texts = [texts]
+                # 按实体名返回不同向量，配合DB向量使top相似度稳定在0.8（中置信度）
+                vectors = []
+                for t in texts:
+                    t = str(t)
+                    if "武大" in t:
+                        vectors.append([1.0, 0.0])
+                    elif "华科" in t:
+                        vectors.append([0.0, 1.0])
+                    else:
+                        vectors.append([0.7, 0.7])
+                return np.array(vectors, dtype=float)
+
+        class DummyCursor:
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, query, params=None):
+                q = " ".join(str(query).split())
+                if "SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'" in q:
+                    self._rows = [(100,)]
+                elif "FROM geo_entity_names" in q and "WHERE embedding IS NOT NULL" in q:
+                    self._rows = [
+                        # 对 query=[1,0] 相似度约0.8；对 query=[0,1] 相似度约0.6
+                        ("poi_1", "武汉大学", "POI", 114.36, 30.54, "[0.8, 0.6]"),
+                        # 对 query=[0,1] 相似度约0.8；对 query=[1,0] 相似度约0.6
+                        ("poi_2", "华中科技大学", "POI", 114.42, 30.52, "[0.6, 0.8]"),
+                    ]
+                elif "FROM amap_poi_wgs84" in q and "WHERE embedding IS NOT NULL" in q:
+                    self._rows = [
+                        (1, "amap_A", "武汉大学珞珈山校区", "POI", 114.37, 30.55, "武汉市武昌区", "[0.58, 0.42]"),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchone(self):
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self):
+                return list(self._rows)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+        class DummyConn:
+            closed = 0
+
+            def set_client_encoding(self, _enc):
+                pass
+
+            def cursor(self):
+                return DummyCursor()
+
+            def close(self):
+                self.closed = 1
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+        class DummyResponse:
+            def __init__(self, content):
+                self.content = content
+
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(
+            return_value=DummyResponse(
+                """
+                {
+                  "decisions": [
+                    {
+                      "extracted_name": "武大",
+                      "best_match_index": 0,
+                      "alignment_status": "aligned",
+                      "llm_decision": "简称与候选0匹配"
+                    },
+                    {
+                      "extracted_name": "华科",
+                      "best_match_index": 0,
+                      "alignment_status": "aligned",
+                      "llm_decision": "简称与候选0匹配"
+                    }
+                  ],
+                  "overall_confidence": "medium"
+                }
+                """
+            )
+        )
+
+        config = ExtractionConfig(
+            enable_entity_alignment=True,
+            alignment_similarity_threshold=0.75,
+            alignment_high_confidence_threshold=0.90,
+            alignment_top_k=5,
+            alignment_use_llm_decision=True,
+        )
+
+        state: CorpusState = {
+            "corpus_id": "corpus_001",
+            "raw_text": "武大和华科都在武汉。",
+            "entities": {"POI": ["武大", "华科"]},
+            "joint_extraction_result": {
+                "entities": [
+                    {"name": "武大", "type": "POI"},
+                    {"name": "华科", "type": "POI"},
+                ]
+            },
+            "triples": [],
+            "eval_scores": [],
+            "eval_passed": False,
+            "corrected_triples": [],
+            "entity_attrs": {},
+            "relation_attrs": {},
+            "current_step": StepEnum.DONE,
+            "error": None,
+        }
+
+        fake_st_module = types.ModuleType("sentence_transformers")
+        fake_st_module.SentenceTransformer = lambda _model_name: DummyModel()
+
+        with patch("kg.postgres_client.psycopg2.connect", return_value=DummyConn()), patch.dict(
+            sys.modules, {"sentence_transformers": fake_st_module}
+        ):
+            node = create_entity_alignment_node(mock_llm, config)
+            result = await node(state, lambda _e: None)
+
+        # 核心断言：两个中置信度实体，LLM只调用一次
+        assert mock_llm.ainvoke.call_count == 1
+        alignment_result = result.get("entity_alignment_result", {})
+        assert len(alignment_result.get("alignment_items", [])) == 2
+
 
 class TestSelfCheckJointResultV2:
     """测试P12新增的四维度评分模型"""

@@ -441,6 +441,7 @@ from .prompts import (
     BATCH_MENTOR_QUERY_PROMPT,
     # P11新增：实体对齐提示词和格式化函数
     ENTITY_ALIGNMENT_PROMPT,
+    BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT,
     format_alignment_candidates,
     format_alignment_result_for_output,
     # P12新增：四维度评分格式化函数
@@ -3954,6 +3955,7 @@ def create_batch_self_check_node(llm: Any):
                 "correction_count": 0,
                 "retry_suggested": False,
                 "fallback_to_single": False,
+                "error": str(e),
             }
 
     return batch_self_check_node
@@ -4135,6 +4137,7 @@ def create_batch_self_check_qa_node(llm: Any):
                 "overall_confidence": "low",
                 "correction_count": 0,
                 "retry_suggested": False,
+                "error": str(e),
             }
 
     return batch_self_check_qa_node
@@ -4315,6 +4318,7 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
             return {
                 "batch_eval_results": fallback_results,
                 "overall_confidence": "low",
+                "error": str(e),
             }
 
     return batch_eval_node
@@ -4513,6 +4517,7 @@ def create_batch_self_check_eval_node(llm: Any):
                 "overall_confidence": "low",
                 "correction_count": 0,
                 "retry_suggested": False,
+                "error": str(e),
             }
 
     return batch_self_check_eval_node
@@ -4718,6 +4723,7 @@ def create_batch_label_node(llm: Any):
             return {
                 "batch_label_results": fallback_results,
                 "overall_confidence": "low",
+                "error": str(e),
             }
 
     return batch_label_node
@@ -4873,6 +4879,7 @@ def create_batch_self_check_label_node(llm: Any):
                 "overall_confidence": "low",
                 "correction_count": 0,
                 "retry_suggested": False,
+                "error": str(e),
             }
 
     return batch_self_check_label_node
@@ -4883,10 +4890,136 @@ def create_batch_self_check_label_node(llm: Any):
 
 def create_batch_entity_alignment_node(llm: Any):
     """创建批量实体对齐节点"""
-    from .schemas import BatchEntityAlignmentResult
-    from .prompts import BATCH_ENTITY_ALIGNMENT_PROMPT
+    from .schemas import (
+        BatchEntityAlignmentDecisionResult,
+    )
+    from .prompts import BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT
 
-    parser = PydanticOutputParser(pydantic_object=BatchEntityAlignmentResult)
+    batch_alignment_parser = PydanticOutputParser(
+        pydantic_object=BatchEntityAlignmentDecisionResult
+    )
+
+    _embedding_model_cache = None
+    _db_cache = None
+
+    def _get_embedding_model():
+        """懒加载embedding模型，避免重复初始化"""
+        nonlocal _embedding_model_cache
+        if _embedding_model_cache is None:
+            from sentence_transformers import SentenceTransformer
+            from settings import settings
+
+            config = settings.get_extraction_config()
+            model_name = config.alignment_embedding_model
+            logger.info(f"[Batch_Entity_Alignment] 加载embedding模型: {model_name}")
+            _embedding_model_cache = SentenceTransformer(model_name)
+        return _embedding_model_cache
+
+    def _load_db_embeddings(pg_client):
+        """预加载数据库实体embedding到内存缓存"""
+        import numpy as np
+
+        with pg_client.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entity_id, name, type, longitude, latitude, embedding
+                FROM geo_entity_names
+                WHERE embedding IS NOT NULL
+            """
+            )
+            geo_rows = cur.fetchall()
+
+        geo_entities = []
+        geo_embeddings = []
+        for row in geo_rows:
+            entity_id, name, type_, lon, lat, emb_str = row
+            if not emb_str:
+                continue
+            if isinstance(emb_str, str):
+                emb_list = json.loads(emb_str)
+            else:
+                emb_list = emb_str
+            geo_entities.append(
+                {
+                    "entity_id": entity_id,
+                    "name": name,
+                    "type": type_ or "",
+                    "longitude": lon,
+                    "latitude": lat,
+                    "source": "geo_entity_names",
+                }
+            )
+            geo_embeddings.append(emb_list)
+
+        with pg_client.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, entity_id, name, type, longitude, latitude, address, embedding
+                FROM amap_poi_wgs84
+                WHERE embedding IS NOT NULL
+            """
+            )
+            amap_rows = cur.fetchall()
+
+        amap_entities = []
+        amap_embeddings = []
+        for row in amap_rows:
+            amap_id, original_id, name, type_, lon, lat, address, emb_str = row
+            if not emb_str:
+                continue
+            if isinstance(emb_str, str):
+                emb_list = json.loads(emb_str)
+            else:
+                emb_list = emb_str
+            amap_entities.append(
+                {
+                    "id": amap_id,
+                    "original_id": original_id,
+                    "name": name,
+                    "type": type_ or "",
+                    "longitude": lon,
+                    "latitude": lat,
+                    "address": address,
+                    "source": "amap_poi_wgs84",
+                }
+            )
+            amap_embeddings.append(emb_list)
+
+        geo_embeddings_np = np.array(geo_embeddings) if geo_embeddings else np.array([])
+        amap_embeddings_np = np.array(amap_embeddings) if amap_embeddings else np.array([])
+        logger.info(
+            f"[Batch_Entity_Alignment] 预加载embedding: geo={len(geo_entities)}, amap={len(amap_entities)}"
+        )
+        return geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np
+
+    def _batch_similarity_search(query_embeddings_np, db_embeddings_np, db_entities, top_k):
+        """内存批量cosine similarity检索"""
+        import numpy as np
+
+        if len(db_embeddings_np) == 0 or len(query_embeddings_np) == 0:
+            return [[] for _ in range(len(query_embeddings_np))]
+
+        query_norms = np.linalg.norm(query_embeddings_np, axis=1, keepdims=True)
+        db_norms = np.linalg.norm(db_embeddings_np, axis=1, keepdims=True)
+        query_normalized = query_embeddings_np / (query_norms + 1e-10)
+        db_normalized = db_embeddings_np / (db_norms + 1e-10)
+        similarity_matrix = np.dot(query_normalized, db_normalized.T)
+
+        candidates_per_query = []
+        for i in range(len(query_embeddings_np)):
+            similarities = similarity_matrix[i]
+            if len(similarities) >= top_k:
+                top_indices = np.argsort(similarities)[-top_k:][::-1]
+            else:
+                top_indices = np.argsort(similarities)[::-1]
+
+            candidates = []
+            for idx in top_indices:
+                candidate = db_entities[idx].copy()
+                candidate["similarity"] = float(similarities[idx])
+                candidates.append(candidate)
+            candidates_per_query.append(candidates)
+        return candidates_per_query
 
     async def batch_entity_alignment_node(
         batch_label_results: Dict,
@@ -4910,35 +5043,277 @@ def create_batch_entity_alignment_node(llm: Any):
             return {"aligned_results": {}, "overall_confidence": "medium"}
 
         try:
-            # 格式化输入
-            entities_str = ""
+            from settings import settings
+            from kg.postgres_client import PostgresClient
+
+            config = settings.get_extraction_config()
+
+            # 收集全batch实体（去重），并建立 corpus -> entity 映射
+            corpus_entity_attrs = {}
+            all_entity_names = []
+            seen_entity_names = set()
             for corpus_id, data in batch_label_results.items():
-                entity_attrs = data.get("entity_attrs", {})
-                entities = list(entity_attrs.keys())[:5]
-                entities_str += f"- [{corpus_id}] 实体: {', '.join(entities)}\n"
+                attrs = data.get("entity_attrs", {}) or {}
+                corpus_entity_attrs[str(corpus_id)] = attrs
+                for name in attrs.keys():
+                    if name and name not in seen_entity_names:
+                        seen_entity_names.add(name)
+                        all_entity_names.append(name)
 
-            existing_str = (
-                ", ".join(existing_entities[:20]) if existing_entities else "(无)"
-            )
-
-            prompt_text = BATCH_ENTITY_ALIGNMENT_PROMPT.invoke(
-                {"batch_entities": entities_str, "existing_entities": existing_str}
-            )
-            full_prompt = f"{prompt_text.messages[1].content}\n\n{parser.get_format_instructions()}"
-
-            response = await llm.ainvoke(full_prompt)
-            result: BatchEntityAlignmentResult = safe_parse_json_with_quote_fix(
-                parser, response.content
-            )
-
-            # 转换为字典格式
-            aligned_dict = {}
-            for r in result.aligned_results:
-                aligned_dict[r.corpus_id] = {
-                    "aligned_entity_attrs": r.aligned_entity_attrs,
-                    "new_entities": r.new_entities,
-                    "confidence": r.confidence,
+            if not all_entity_names:
+                aligned_dict = {
+                    str(cid): {
+                        "aligned_entity_attrs": {},
+                        "new_entities": [],
+                        "confidence": "high",
+                    }
+                    for cid in batch_label_results.keys()
                 }
+                return {"aligned_results": aligned_dict, "overall_confidence": "high"}
+
+            # 载入数据库embedding缓存
+            pg_config = settings.get_postgres_config()
+            with PostgresClient(**pg_config) as pg_client:
+                nonlocal _db_cache
+                if _db_cache is None:
+                    _db_cache = _load_db_embeddings(pg_client)
+                geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = _db_cache
+
+            # 计算query embedding并检索候选
+            model = _get_embedding_model()
+            entity_embeddings = model.encode(
+                all_entity_names, show_progress_bar=False, convert_to_numpy=True
+            )
+
+            top_k = config.alignment_top_k
+            high_threshold = config.alignment_high_confidence_threshold
+            low_threshold = config.alignment_similarity_threshold
+            use_llm = config.alignment_use_llm_decision
+
+            geo_candidates_per_query = _batch_similarity_search(
+                entity_embeddings, geo_embeddings_np, geo_entities, top_k
+            )
+            amap_candidates_per_query = _batch_similarity_search(
+                entity_embeddings, amap_embeddings_np, amap_entities, top_k
+            )
+
+            # 每个实体全局决策（同名实体在不同corpus保持一致）
+            decision_by_entity = {}
+            medium_conf_items = []
+
+            for i, entity_name in enumerate(all_entity_names):
+                candidates = geo_candidates_per_query[i] + amap_candidates_per_query[i]
+                for c in candidates:
+                    if c.get("source") == "amap_poi_wgs84":
+                        amap_id = c.get("id")
+                        c["db_entity_id"] = (
+                            f"poi_{amap_id}" if amap_id is not None else c.get("entity_id", "")
+                        )
+                        c["db_original_id"] = c.get("original_id")
+                        c["db_name"] = c.get("name", "")
+                        c["db_type"] = c.get("type", "")
+                    else:
+                        c["db_entity_id"] = c.get("entity_id")
+                        c["db_name"] = c.get("name", "")
+                        c["db_type"] = c.get("type", "")
+
+                candidates.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
+                candidates = candidates[:top_k]
+
+                best = candidates[0] if candidates else None
+                best_sim = best.get("similarity", 0.0) if best else 0.0
+
+                if best and best_sim >= high_threshold:
+                    decision_by_entity[entity_name] = {
+                        "status": "aligned",
+                        "best_candidate": best,
+                        "confidence": "high",
+                        "reason": f"高置信度匹配({best_sim:.3f})",
+                    }
+                elif (not best) or best_sim < low_threshold:
+                    decision_by_entity[entity_name] = {
+                        "status": "new_entity",
+                        "best_candidate": None,
+                        "confidence": "medium",
+                        "reason": f"低置信度/无候选({best_sim:.3f})",
+                    }
+                elif use_llm and candidates:
+                    medium_conf_items.append(
+                        {
+                            "extracted_name": entity_name,
+                            "candidates": candidates,
+                        }
+                    )
+                else:
+                    decision_by_entity[entity_name] = {
+                        "status": "new_entity",
+                        "best_candidate": None,
+                        "confidence": "medium",
+                        "reason": f"中置信度但未启用LLM({best_sim:.3f})",
+                    }
+
+            # 中置信度实体一次LLM决策（N -> 1）
+            if medium_conf_items:
+                try:
+                    items_for_prompt = []
+                    for item in medium_conf_items:
+                        cands = []
+                        for c in item["candidates"]:
+                            cands.append(
+                                {
+                                    "db_name": c.get("db_name", ""),
+                                    "db_type": c.get("db_type", ""),
+                                    "similarity": c.get("similarity", 0.0),
+                                    "longitude": c.get("longitude"),
+                                    "latitude": c.get("latitude"),
+                                    "source": c.get("source", ""),
+                                    "db_entity_id": c.get("db_entity_id", ""),
+                                    "db_original_id": c.get("db_original_id", ""),
+                                }
+                            )
+                        items_for_prompt.append(
+                            {
+                                "extracted_name": item["extracted_name"],
+                                "extracted_type": "",
+                                "candidates": cands,
+                            }
+                        )
+
+                    prompt_text = BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT.invoke(
+                        {
+                            "raw_text": json.dumps(corpus_texts, ensure_ascii=False),
+                            "items_json": json.dumps(items_for_prompt, ensure_ascii=False),
+                        }
+                    )
+                    full_prompt = (
+                        f"{prompt_text.messages[1].content}\n\n"
+                        f"{batch_alignment_parser.get_format_instructions()}"
+                    )
+                    response = await llm.ainvoke(full_prompt)
+                    parsed_result: BatchEntityAlignmentDecisionResult = (
+                        safe_parse_json_with_quote_fix(
+                            batch_alignment_parser, response.content
+                        )
+                    )
+
+                    decision_map = {
+                        d.extracted_name: d for d in (parsed_result.decisions or [])
+                    }
+                    valid_statuses = {"aligned", "new_entity", "skip"}
+
+                    for item in medium_conf_items:
+                        entity_name = item["extracted_name"]
+                        candidates = item["candidates"]
+                        d = decision_map.get(entity_name)
+                        if not d:
+                            decision_by_entity[entity_name] = {
+                                "status": "new_entity",
+                                "best_candidate": None,
+                                "confidence": "low",
+                                "reason": "LLM未返回该实体决策",
+                            }
+                            continue
+
+                        status = (
+                            d.alignment_status
+                            if d.alignment_status in valid_statuses
+                            else "new_entity"
+                        )
+                        idx = int(d.best_match_index or -1)
+                        if status == "aligned" and 0 <= idx < len(candidates):
+                            decision_by_entity[entity_name] = {
+                                "status": "aligned",
+                                "best_candidate": candidates[idx],
+                                "confidence": "medium",
+                                "reason": d.llm_decision or "LLM中置信度对齐",
+                            }
+                        else:
+                            decision_by_entity[entity_name] = {
+                                "status": "new_entity" if status != "skip" else "skip",
+                                "best_candidate": None,
+                                "confidence": "medium",
+                                "reason": d.llm_decision or "LLM判定非对齐",
+                            }
+
+                    logger.info(
+                        f"[Batch_Entity_Alignment] 中置信度实体批量LLM判断完成: "
+                        f"{len(medium_conf_items)} 个实体，调用 1 次"
+                    )
+                except Exception as llm_err:
+                    logger.warning(
+                        f"[Batch_Entity_Alignment] 中置信度实体LLM判断失败: {llm_err}，降级为新实体"
+                    )
+                    for item in medium_conf_items:
+                        entity_name = item["extracted_name"]
+                        decision_by_entity[entity_name] = {
+                            "status": "new_entity",
+                            "best_candidate": None,
+                            "confidence": "low",
+                            "reason": "LLM异常降级",
+                        }
+
+            # 组装每条语料的输出
+            aligned_dict = {}
+            alignment_detail_logs = []
+            conf_weight = {"high": 2, "medium": 1, "low": 0}
+            overall_sum = 0
+            overall_cnt = 0
+
+            for corpus_id, entity_attrs in corpus_entity_attrs.items():
+                aligned_entity_attrs = {}
+                new_entities = []
+                status_counter = {"aligned": 0, "new_entity": 0, "skip": 0}
+
+                for entity_name, attrs in entity_attrs.items():
+                    d = decision_by_entity.get(entity_name, {})
+                    status = d.get("status", "new_entity")
+                    status_counter[status] = status_counter.get(status, 0) + 1
+                    if status == "aligned":
+                        aligned_entity_attrs[entity_name] = attrs
+                    elif status == "new_entity":
+                        new_entities.append(entity_name)
+
+                    c = d.get("confidence", "medium")
+                    overall_sum += conf_weight.get(str(c), 1)
+                    overall_cnt += 1
+
+                if overall_cnt == 0:
+                    corpus_conf = "high"
+                else:
+                    ratio = overall_sum / max(overall_cnt * 2, 1)
+                    corpus_conf = "high" if ratio >= 0.7 else "medium" if ratio >= 0.4 else "low"
+
+                aligned_dict[corpus_id] = {
+                    "aligned_entity_attrs": aligned_entity_attrs,
+                    "new_entities": new_entities,
+                    "confidence": corpus_conf,
+                }
+
+                alignment_detail_logs.append(
+                    {
+                        "corpus_id": corpus_id,
+                        "aligned_entity_count": len(aligned_entity_attrs),
+                        "new_entity_count": len(new_entities),
+                        "status_breakdown": status_counter,
+                        "confidence": corpus_conf,
+                        "aligned_samples": list(aligned_entity_attrs.keys())[:5],
+                        "new_samples": new_entities[:5],
+                    }
+                )
+
+            for item in alignment_detail_logs:
+                logger.info(
+                    f"[Batch_Entity_Alignment][Corpus {item['corpus_id']}] "
+                    f"{json.dumps(item, ensure_ascii=False)}"
+                )
+
+            if overall_cnt == 0:
+                overall_confidence = "high"
+            else:
+                ratio = overall_sum / max(overall_cnt * 2, 1)
+                overall_confidence = (
+                    "high" if ratio >= 0.7 else "medium" if ratio >= 0.4 else "low"
+                )
 
             logger.info(f"[Batch_Entity_Alignment] 完成: {len(aligned_dict)} 条")
 
@@ -4952,7 +5327,7 @@ def create_batch_entity_alignment_node(llm: Any):
 
             return {
                 "aligned_results": aligned_dict,
-                "overall_confidence": result.overall_confidence,
+                "overall_confidence": overall_confidence,
             }
 
         except Exception as e:
@@ -4967,6 +5342,7 @@ def create_batch_entity_alignment_node(llm: Any):
                     for cid in batch_label_results
                 },
                 "overall_confidence": "low",
+                "error": str(e),
             }
 
     return batch_entity_alignment_node
@@ -4985,6 +5361,8 @@ async def process_corpus_batch_with_llm(
     batch_label_node: Any = None,  # P17����
     batch_self_check_eval_node: Any = None,  # P17����
     batch_self_check_label_node: Any = None,  # P17����
+    
+    batch_entity_alignment_node: Any = None,  # P21 added
     qa_llm: Any = None,
 ) -> Dict:
     """
@@ -5021,6 +5399,12 @@ async def process_corpus_batch_with_llm(
     batch_llm_size = config.batch_llm_size
     enable_batch_llm = config.enable_batch_llm
     batch_llm_fallback = config.batch_llm_fallback
+    batch_stage_retry_attempts = max(
+        int(getattr(config, "batch_stage_retry_attempts", 1) or 0), 0
+    )
+    batch_skip_on_repeated_failure = bool(
+        getattr(config, "batch_skip_on_repeated_failure", False)
+    )
     eval_threshold = config.eval_threshold
     enable_qa_mentor = config.enable_qa_mentor
     mentor_query_min_confidence = str(
@@ -5086,6 +5470,32 @@ async def process_corpus_batch_with_llm(
     def dummy_writer(event):
         return None
 
+    def _dict_id_set(data: Any) -> set:
+        if not isinstance(data, dict):
+            return set()
+        return {str(k) for k in data.keys()}
+
+    def _list_corpus_id_set(items: Any) -> set:
+        if not isinstance(items, list):
+            return set()
+        ids = set()
+        for item in items:
+            if isinstance(item, dict) and item.get("corpus_id") is not None:
+                ids.add(str(item.get("corpus_id")))
+        return ids
+
+    def _has_missing_coverage(stage_name: str, expected_ids: set, actual_ids: set) -> bool:
+        if not expected_ids:
+            return False
+        missing_ids = sorted(expected_ids - actual_ids)
+        if missing_ids:
+            logger.warning(
+                f"[{stage_name}] 结果覆盖不完整: expected={len(expected_ids)}, "
+                f"actual={len(actual_ids)}, missing={missing_ids[:5]}"
+            )
+            return True
+        return False
+
     def _flatten_entities(entities: Dict) -> List[Dict]:
         entity_list = []
         for entity_type, names in entities.items():
@@ -5133,6 +5543,37 @@ async def process_corpus_batch_with_llm(
             base_state["semantic_summary"] = corpus.get("semantic_summary", "")
 
         return base_state
+
+    async def _run_batch_stage_with_retry(
+        stage_name: str,
+        runner,
+        is_failed,
+    ):
+        """统一批量阶段重试包装器。"""
+        last_result = None
+        for attempt in range(batch_stage_retry_attempts + 1):
+            last_result = await runner()
+            failed = bool(is_failed(last_result))
+            if not failed:
+                if attempt > 0:
+                    logger.info(
+                        f"[{stage_name}] 批量重试成功: 第{attempt + 1}次尝试"
+                    )
+                return last_result
+
+            err_msg = ""
+            if isinstance(last_result, dict):
+                err_msg = str(last_result.get("error", "unknown"))
+            if attempt < batch_stage_retry_attempts:
+                logger.warning(
+                    f"[{stage_name}] 批量失败，准备重试 "
+                    f"{attempt + 1}/{batch_stage_retry_attempts}: {err_msg}"
+                )
+            else:
+                logger.error(
+                    f"[{stage_name}] 批量重试耗尽({batch_stage_retry_attempts + 1}次): {err_msg}"
+                )
+        return last_result
 
     async def _mentor_batch_answer_queries(
         source_node: str,
@@ -5267,7 +5708,26 @@ async def process_corpus_batch_with_llm(
     all_batch_results = {}
     all_cross_corpus_aliases = []
     fallback_corpus_list = []
+    fallback_corpus_ids = set()
     corpus_texts = {corpus["id"]: corpus.get("text", "") for corpus in corpus_list}
+
+    def _mark_corpus_skipped(corpus_id: Any, error_msg: str, skip_reason: str):
+        existing = all_batch_results.get(corpus_id, {})
+        all_batch_results[corpus_id] = {
+            "entities": existing.get("entities", DEFAULT_ENTITY_DICT.copy()),
+            "triples": existing.get("triples", []),
+            "eval_passed": existing.get("eval_passed", False),
+            "eval_scores": existing.get("eval_scores", []),
+            "entity_attrs": existing.get("entity_attrs", {}),
+            "relation_attrs": existing.get("relation_attrs", {}),
+            "confidence": existing.get("confidence", "error"),
+            "error": error_msg,
+            "skip_reason": skip_reason,
+        }
+
+    def _mark_many_skipped(corpus_ids: List[Any], error_msg: str, skip_reason: str):
+        for cid in corpus_ids:
+            _mark_corpus_skipped(cid, error_msg, skip_reason)
 
     for i in range(0, len(corpus_list), batch_llm_size):
         batch_corpus = corpus_list[i : i + batch_llm_size]
@@ -5275,13 +5735,51 @@ async def process_corpus_batch_with_llm(
         batch_corpus_map = {str(c.get("id")): c for c in batch_corpus}
 
         logger.info(f"[Batch {batch_num}] 处理 {len(batch_corpus)} 条语料")
+        expected_batch_ids = {str(c.get("id")) for c in batch_corpus}
 
-        extraction_result = await batch_joint_node(batch_corpus, dummy_writer)
+        extraction_result = await _run_batch_stage_with_retry(
+            f"Batch {batch_num}/Batch_Joint",
+            lambda: batch_joint_node(batch_corpus, dummy_writer),
+            lambda r: (not isinstance(r, dict))
+            or r.get("needs_fallback", False)
+            or _has_missing_coverage(
+                f"Batch {batch_num}/Batch_Joint",
+                expected_batch_ids,
+                _dict_id_set(r.get("batch_results", {})),
+            ),
+        )
+
+        extraction_result = extraction_result or {
+            "batch_results": {},
+            "cross_corpus_aliases": [],
+            "needs_fallback": True,
+            "fallback_reason": "Batch_Joint 未返回结果",
+        }
 
         if extraction_result.get("needs_fallback"):
-            if batch_llm_fallback:
+            if batch_skip_on_repeated_failure:
+                fallback_reason = extraction_result.get(
+                    "fallback_reason", "批处理抽取失败（重试耗尽）"
+                )
+                logger.warning(
+                    f"[Batch {batch_num}] 抽取重试失败，直接跳过本批 {len(batch_corpus)} 条语料"
+                )
+                for corpus in batch_corpus:
+                    cid = corpus.get("id")
+                    all_batch_results[cid] = {
+                        "entities": DEFAULT_ENTITY_DICT.copy(),
+                        "triples": [],
+                        "confidence": "error",
+                        "error": fallback_reason,
+                        "skip_reason": "batch_joint_failed_after_retries",
+                    }
+            elif batch_llm_fallback:
                 logger.warning(f"[Batch {batch_num}] 抽取失败，加入 fallback 单条处理")
-                fallback_corpus_list.extend(batch_corpus)
+                for corpus in batch_corpus:
+                    cid = str(corpus.get("id"))
+                    if cid not in fallback_corpus_ids:
+                        fallback_corpus_ids.add(cid)
+                        fallback_corpus_list.append(corpus)
             else:
                 for corpus in batch_corpus:
                     all_batch_results[corpus["id"]] = {
@@ -5298,23 +5796,72 @@ async def process_corpus_batch_with_llm(
         cross_corpus_aliases = extraction_result["cross_corpus_aliases"]
 
         if config.enable_self_check or config.enable_full_self_check:
-            check_result = await batch_self_check_node(
-                batch_results, cross_corpus_aliases, dummy_writer
+            check_result = await _run_batch_stage_with_retry(
+                f"Batch {batch_num}/Batch_Self_Check",
+                lambda: batch_self_check_node(
+                    batch_results, cross_corpus_aliases, dummy_writer
+                ),
+                lambda r: (not isinstance(r, dict))
+                or bool(r.get("error"))
+                or (not r.get("verified_results") and bool(batch_results))
+                or _has_missing_coverage(
+                    f"Batch {batch_num}/Batch_Self_Check",
+                    _dict_id_set(batch_results),
+                    _list_corpus_id_set(r.get("verified_results", []))
+                    | _list_corpus_id_set(r.get("rejected_results", [])),
+                ),
             )
+            check_result = check_result or {
+                "verified_results": [],
+                "rejected_results": [],
+                "verified_aliases": [],
+                "error": "Batch_Self_Check 未返回有效结果",
+            }
+            if batch_skip_on_repeated_failure and check_result.get("error"):
+                err = str(check_result.get("error"))
+                _mark_many_skipped(
+                    list(batch_results.keys()), err, "batch_self_check_failed_after_retries"
+                )
+                logger.warning(
+                    f"[Batch {batch_num}] Batch_Self_Check 反复失败，按策略直接跳过本批"
+                )
+                continue
             verified_results = check_result["verified_results"]
 
             # P18修复：rejected_results 中的语料都需要 fallback，不受 fallback_to_single 条件限制
             # fallback_to_single 只是 LLM 对整体质量的建议，不是 rejected 语料处理的条件
-            if batch_llm_fallback:
+            if not batch_skip_on_repeated_failure and batch_llm_fallback:
                 for r in check_result["rejected_results"]:
                     corpus_id = r.get("corpus_id")
                     for corpus in batch_corpus:
                         if corpus["id"] == corpus_id:
-                            fallback_corpus_list.append(corpus)
+                            cid = str(corpus.get("id"))
+                            if cid not in fallback_corpus_ids:
+                                fallback_corpus_ids.add(cid)
+                                fallback_corpus_list.append(corpus)
                             logger.warning(
                                 f"[Batch_Self_Check] 语料 {corpus_id} 自检拒绝，加入 fallback"
                             )
                             break
+            elif batch_skip_on_repeated_failure:
+                for r in check_result["rejected_results"]:
+                    corpus_id = r.get("corpus_id")
+                    if corpus_id is None:
+                        continue
+                    all_batch_results[corpus_id] = {
+                        "entities": DEFAULT_ENTITY_DICT.copy(),
+                        "triples": [],
+                        "eval_passed": False,
+                        "eval_scores": [],
+                        "entity_attrs": {},
+                        "relation_attrs": {},
+                        "confidence": "error",
+                        "error": "batch_self_check_rejected",
+                        "skip_reason": "batch_self_check_rejected",
+                    }
+                    logger.warning(
+                        f"[Batch_Self_Check] 语料 {corpus_id} 自检拒绝，按策略直接跳过"
+                    )
 
             all_cross_corpus_aliases.extend(check_result["verified_aliases"])
         else:
@@ -5432,23 +5979,95 @@ async def process_corpus_batch_with_llm(
                 for r in verified_results
             }
 
-            eval_result = await batch_eval_node(eval_input, corpus_texts, dummy_writer)
+            eval_result = await _run_batch_stage_with_retry(
+                f"Batch {batch_num}/Batch_Eval",
+                lambda: batch_eval_node(eval_input, corpus_texts, dummy_writer),
+                lambda r: (not isinstance(r, dict))
+                or bool(r.get("error"))
+                or (not r.get("batch_eval_results") and bool(eval_input))
+                or _has_missing_coverage(
+                    f"Batch {batch_num}/Batch_Eval",
+                    _dict_id_set(eval_input),
+                    _dict_id_set(r.get("batch_eval_results", {})),
+                ),
+            )
+            eval_result = eval_result or {"batch_eval_results": {}, "error": "Batch_Eval 未返回有效结果"}
+            if batch_skip_on_repeated_failure and eval_result.get("error"):
+                err = str(eval_result.get("error"))
+                _mark_many_skipped(
+                    list(eval_input.keys()), err, "batch_eval_failed_after_retries"
+                )
+                logger.warning(
+                    f"[Batch {batch_num}] Batch_Eval 反复失败，按策略直接跳过本批"
+                )
+                continue
 
             if config.enable_full_self_check:
-                eval_check_result = await batch_self_check_eval_node(
-                    eval_result["batch_eval_results"], corpus_texts, dummy_writer
+                eval_check_result = await _run_batch_stage_with_retry(
+                    f"Batch {batch_num}/Batch_Self_Check_Eval",
+                    lambda: batch_self_check_eval_node(
+                        eval_result["batch_eval_results"], corpus_texts, dummy_writer
+                    ),
+                    lambda r: (not isinstance(r, dict))
+                    or bool(r.get("error"))
+                    or (
+                        not r.get("verified_results")
+                        and bool(eval_result.get("batch_eval_results"))
+                    )
+                    or _has_missing_coverage(
+                        f"Batch {batch_num}/Batch_Self_Check_Eval",
+                        _dict_id_set(eval_result.get("batch_eval_results", {})),
+                        _list_corpus_id_set(r.get("verified_results", []))
+                        | _list_corpus_id_set(r.get("rejected_results", [])),
+                    ),
                 )
+                eval_check_result = eval_check_result or {
+                    "verified_results": [],
+                    "rejected_results": [],
+                    "error": "Batch_Self_Check_Eval 未返回有效结果",
+                }
+                if batch_skip_on_repeated_failure and eval_check_result.get("error"):
+                    err = str(eval_check_result.get("error"))
+                    _mark_many_skipped(
+                        list(eval_result.get("batch_eval_results", {}).keys()),
+                        err,
+                        "batch_self_check_eval_failed_after_retries",
+                    )
+                    logger.warning(
+                        f"[Batch {batch_num}] Batch_Self_Check_Eval 反复失败，按策略直接跳过本批"
+                    )
+                    continue
 
                 for r in eval_check_result["rejected_results"]:
                     corpus_id = r.get("corpus_id")
-                    if batch_llm_fallback:
+                    if not batch_skip_on_repeated_failure and batch_llm_fallback:
                         for corpus in batch_corpus:
                             if corpus["id"] == corpus_id:
-                                fallback_corpus_list.append(corpus)
+                                cid = str(corpus.get("id"))
+                                if cid not in fallback_corpus_ids:
+                                    fallback_corpus_ids.add(cid)
+                                    fallback_corpus_list.append(corpus)
                                 logger.warning(
                                     f"[Batch_Self_Check_Eval] 语料 {corpus_id} 自检拒绝，加入 fallback"
                                 )
                                 break
+                    elif batch_skip_on_repeated_failure:
+                        all_batch_results[corpus_id] = {
+                            "entities": verified_results_dict.get(corpus_id, {}).get(
+                                "entities", DEFAULT_ENTITY_DICT.copy()
+                            ),
+                            "triples": [],
+                            "eval_passed": False,
+                            "eval_scores": [],
+                            "entity_attrs": {},
+                            "relation_attrs": {},
+                            "confidence": "error",
+                            "error": "batch_self_check_eval_rejected",
+                            "skip_reason": "batch_self_check_eval_rejected",
+                        }
+                        logger.warning(
+                            f"[Batch_Self_Check_Eval] 语料 {corpus_id} 自检拒绝，按策略直接跳过"
+                        )
 
                 verified_eval_results = {}
                 for r in eval_check_result["verified_results"]:
@@ -5553,6 +6172,24 @@ async def process_corpus_batch_with_llm(
             for corpus_id, eval_data in updated_eval_results.items():
                 triples = eval_data.get("corrected_triples", [])
                 eval_passed = eval_data.get("eval_passed", False)
+
+                if not eval_passed and batch_skip_on_repeated_failure:
+                    all_batch_results[corpus_id] = {
+                        "entities": verified_results_dict.get(corpus_id, {}).get(
+                            "entities", DEFAULT_ENTITY_DICT.copy()
+                        ),
+                        "triples": triples,
+                        "eval_passed": False,
+                        "eval_scores": eval_data.get("scores", []),
+                        "confidence": eval_data.get("confidence", "medium"),
+                        "reextract_needed": False,
+                        "error": "batch_eval_not_passed_after_retries",
+                        "skip_reason": "batch_eval_not_passed",
+                    }
+                    logger.warning(
+                        f"[Batch_Eval] 语料 {corpus_id} 未通过评估，按策略直接跳过"
+                    )
+                    continue
 
                 if not eval_passed and batch_llm_fallback:
                     source_corpus = batch_corpus_map.get(str(corpus_id))
@@ -5686,25 +6323,104 @@ async def process_corpus_batch_with_llm(
                 }
 
             if label_input:
-                label_result = await batch_label_node(
-                    label_input, corpus_texts, dummy_writer
+                label_result = await _run_batch_stage_with_retry(
+                    f"Batch {batch_num}/Batch_Label",
+                    lambda: batch_label_node(label_input, corpus_texts, dummy_writer),
+                    lambda r: (not isinstance(r, dict))
+                    or bool(r.get("error"))
+                    or (not r.get("batch_label_results") and bool(label_input))
+                    or _has_missing_coverage(
+                        f"Batch {batch_num}/Batch_Label",
+                        _dict_id_set(label_input),
+                        _dict_id_set(r.get("batch_label_results", {})),
+                    ),
                 )
+                label_result = label_result or {
+                    "batch_label_results": {},
+                    "error": "Batch_Label 未返回有效结果",
+                }
+                if batch_skip_on_repeated_failure and label_result.get("error"):
+                    err = str(label_result.get("error"))
+                    _mark_many_skipped(
+                        list(label_input.keys()), err, "batch_label_failed_after_retries"
+                    )
+                    logger.warning(
+                        f"[Batch {batch_num}] Batch_Label 反复失败，按策略直接跳过本批"
+                    )
+                    continue
 
                 if config.enable_full_self_check:
-                    label_check_result = await batch_self_check_label_node(
-                        label_result["batch_label_results"], corpus_texts, dummy_writer
+                    label_check_result = await _run_batch_stage_with_retry(
+                        f"Batch {batch_num}/Batch_Self_Check_Label",
+                        lambda: batch_self_check_label_node(
+                            label_result["batch_label_results"], corpus_texts, dummy_writer
+                        ),
+                        lambda r: (not isinstance(r, dict))
+                        or bool(r.get("error"))
+                        or (
+                            not r.get("verified_results")
+                            and bool(label_result.get("batch_label_results"))
+                        )
+                        or _has_missing_coverage(
+                            f"Batch {batch_num}/Batch_Self_Check_Label",
+                            _dict_id_set(label_result.get("batch_label_results", {})),
+                            _list_corpus_id_set(r.get("verified_results", []))
+                            | _list_corpus_id_set(r.get("rejected_results", [])),
+                        ),
                     )
+                    label_check_result = label_check_result or {
+                        "verified_results": [],
+                        "rejected_results": [],
+                        "error": "Batch_Self_Check_Label 未返回有效结果",
+                    }
+                    if batch_skip_on_repeated_failure and label_check_result.get("error"):
+                        err = str(label_check_result.get("error"))
+                        _mark_many_skipped(
+                            list(label_result.get("batch_label_results", {}).keys()),
+                            err,
+                            "batch_self_check_label_failed_after_retries",
+                        )
+                        logger.warning(
+                            f"[Batch {batch_num}] Batch_Self_Check_Label 反复失败，按策略直接跳过本批"
+                        )
+                        continue
 
                     for r in label_check_result["rejected_results"]:
                         corpus_id = r.get("corpus_id")
-                        if batch_llm_fallback:
+                        if not batch_skip_on_repeated_failure and batch_llm_fallback:
                             for corpus in batch_corpus:
                                 if corpus["id"] == corpus_id:
-                                    fallback_corpus_list.append(corpus)
+                                    cid = str(corpus.get("id"))
+                                    if cid not in fallback_corpus_ids:
+                                        fallback_corpus_ids.add(cid)
+                                        fallback_corpus_list.append(corpus)
                                     logger.warning(
                                         f"[Batch_Self_Check_Label] 语料 {corpus_id} 自检拒绝，加入 fallback"
                                     )
                                     break
+                        elif batch_skip_on_repeated_failure:
+                            all_batch_results[corpus_id] = {
+                                "entities": all_batch_results.get(corpus_id, {}).get(
+                                    "entities", DEFAULT_ENTITY_DICT.copy()
+                                ),
+                                "triples": all_batch_results.get(corpus_id, {}).get(
+                                    "triples", []
+                                ),
+                                "eval_passed": all_batch_results.get(corpus_id, {}).get(
+                                    "eval_passed", False
+                                ),
+                                "eval_scores": all_batch_results.get(corpus_id, {}).get(
+                                    "eval_scores", []
+                                ),
+                                "entity_attrs": {},
+                                "relation_attrs": {},
+                                "confidence": "error",
+                                "error": "batch_self_check_label_rejected",
+                                "skip_reason": "batch_self_check_label_rejected",
+                            }
+                            logger.warning(
+                                f"[Batch_Self_Check_Label] 语料 {corpus_id} 自检拒绝，按策略直接跳过"
+                            )
 
                     verified_label_results = {
                         r["corpus_id"]: {
@@ -5823,36 +6539,107 @@ async def process_corpus_batch_with_llm(
                 # 获取数据库已有实体（用于对齐匹配）
                 existing_entities = []
                 try:
+                    from settings import settings
                     from kg.postgres_client import PostgresClient
-                    pg_client = PostgresClient()
-                    # 从 geo_entity_names 表获取已有实体名称
-                    result = pg_client.client.execute("SELECT name FROM geo_entity_names LIMIT 1000")
-                    existing_entities = [row[0] for row in result.fetchall()]
-                    pg_client.close()
+                    pg_config = settings.get_postgres_config()
+                    with PostgresClient(**pg_config) as pg_client:
+                        # 从 geo_entity_names 表获取已有实体名称
+                        with pg_client.conn.cursor() as cur:
+                            cur.execute("SELECT name FROM geo_entity_names LIMIT 1000")
+                            existing_entities = [row[0] for row in cur.fetchall()]
                     logger.debug(f"[Batch_Entity_Alignment] 获取到 {len(existing_entities)} 个已有实体")
                 except Exception as e:
                     logger.warning(f"[Batch_Entity_Alignment] 获取已有实体失败: {e}, 使用空列表")
                     existing_entities = []
 
                 # 调用实体对齐节点
-                alignment_result = await batch_entity_alignment_node(
-                    updated_label_results, corpus_texts, existing_entities, dummy_writer
+                alignment_result = await _run_batch_stage_with_retry(
+                    f"Batch {batch_num}/Batch_Entity_Alignment",
+                    lambda: batch_entity_alignment_node(
+                        updated_label_results,
+                        corpus_texts,
+                        existing_entities,
+                        dummy_writer,
+                    ),
+                    lambda r: (not isinstance(r, dict))
+                    or bool(r.get("error"))
+                    or (not r.get("aligned_results") and bool(updated_label_results))
+                    or _has_missing_coverage(
+                        f"Batch {batch_num}/Batch_Entity_Alignment",
+                        _dict_id_set(updated_label_results),
+                        _dict_id_set(r.get("aligned_results", {})),
+                    ),
                 )
+                alignment_result = alignment_result or {
+                    "aligned_results": {},
+                    "error": "Batch_Entity_Alignment 未返回有效结果",
+                }
+                if batch_skip_on_repeated_failure and alignment_result.get("error"):
+                    err = str(alignment_result.get("error"))
+                    _mark_many_skipped(
+                        list(updated_label_results.keys()),
+                        err,
+                        "batch_entity_alignment_failed_after_retries",
+                    )
+                    logger.warning(
+                        f"[Batch {batch_num}] Batch_Entity_Alignment 反复失败，按策略直接跳过本批"
+                    )
+                    continue
 
                 # 更新结果
                 aligned_results = alignment_result.get("aligned_results", {})
                 for corpus_id, aligned_data in aligned_results.items():
-                    if corpus_id in all_batch_results:
+                    target_corpus_id = (
+                        corpus_id
+                        if corpus_id in all_batch_results
+                        else str(corpus_id)
+                    )
+                    if target_corpus_id in all_batch_results:
                         # 合并对齐后的实体属性
-                        aligned_attrs = aligned_data.get("aligned_entity_attrs", {})
+                        aligned_attrs = aligned_data.get("aligned_entity_attrs", {}) or {}
+                        new_entities = aligned_data.get("new_entities", []) or []
+                        aligned_entity_names = list(aligned_attrs.keys())
+
                         if aligned_attrs:
-                            original_attrs = all_batch_results[corpus_id].get("entity_attrs", {})
+                            original_attrs = all_batch_results[target_corpus_id].get(
+                                "entity_attrs", {}
+                            )
                             # 对齐属性覆盖原始属性
-                            all_batch_results[corpus_id]["entity_attrs"] = {
+                            all_batch_results[target_corpus_id]["entity_attrs"] = {
                                 **original_attrs,
                                 **aligned_attrs,
                             }
-                            all_batch_results[corpus_id]["aligned_entities"] = aligned_data.get("new_entities", [])
+
+                        total_entities = len(aligned_entity_names) + len(new_entities)
+                        alignment_rate = (
+                            len(aligned_entity_names) / total_entities
+                            if total_entities > 0
+                            else 0.0
+                        )
+
+                        all_batch_results[target_corpus_id]["aligned_entities"] = (
+                            aligned_entity_names
+                        )
+                        all_batch_results[target_corpus_id]["new_entities"] = new_entities
+                        all_batch_results[target_corpus_id]["entity_alignment_result"] = {
+                            "alignment_items": [],
+                            "aligned_entities": aligned_entity_names,
+                            "aligned_entity_attrs": aligned_attrs,
+                            "new_entities": new_entities,
+                            "created_entities": [],
+                            "created_count": 0,
+                            "skipped_entities": [],
+                            "overall_alignment_rate": alignment_rate,
+                            "alignment_confidence": aligned_data.get(
+                                "confidence", "medium"
+                            ),
+                        }
+                        logger.info(
+                            f"[Batch_Entity_Alignment][Corpus {target_corpus_id}] "
+                            f"aligned={len(aligned_entity_names)}, "
+                            f"new={len(new_entities)}, "
+                            f"confidence={aligned_data.get('confidence', 'medium')}"
+                        )
 
                 logger.info(f"[Batch_Entity_Alignment] 完成: {len(aligned_results)} 条语料")
 
@@ -6482,9 +7269,17 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
     - geo_entity_names（~1000条）：预加载全部embedding (~3MB)，内存批量计算
     - amap_poi_wgs84（~37000条）：利用pgvector HNSW索引批量查询，避免加载全部到内存
     """
-    from .schemas import EntityAlignmentResult, EntityAlignmentItem, EntityCandidate
+    from .schemas import (
+        EntityAlignmentResult,
+        EntityAlignmentItem,
+        EntityCandidate,
+        BatchEntityAlignmentDecisionResult,
+    )
 
     parser = PydanticOutputParser(pydantic_object=EntityAlignmentItem)
+    batch_alignment_parser = PydanticOutputParser(
+        pydantic_object=BatchEntityAlignmentDecisionResult
+    )
 
     # ===== 函数级缓存（P12性能优化） =====
     # 嵌入模型缓存（避免重复加载）
@@ -6849,68 +7644,66 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             from kg.postgres_client import PostgresClient
 
             pg_config = settings.get_postgres_config()
-            pg_client = PostgresClient(**pg_config)
+            with PostgresClient(**pg_config) as pg_client:
+                # 获取geo_poi_count并缓存（用于计算amap在neo4j的entity_id）
+                nonlocal _amap_id_base_cache, _db_cache
+                if _amap_id_base_cache is None:
+                    with pg_client.conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'"
+                        )
+                        geo_poi_count = cur.fetchone()[0]
+                        _amap_id_base_cache = geo_poi_count
+                        logger.info(
+                            f"[Entity_Alignment] geo_entity_names poi数量: {geo_poi_count}, amap neo4j ID起始: poi_{_amap_id_base_cache + 1}"
+                        )
+                amap_entity_id_base = _amap_id_base_cache
 
-            # 获取geo_poi_count并缓存（用于计算amap在neo4j的entity_id）
-            nonlocal _amap_id_base_cache, _db_cache
-            if _amap_id_base_cache is None:
-                with pg_client.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT COUNT(*) FROM geo_entity_names WHERE type = 'poi'"
-                    )
-                    geo_poi_count = cur.fetchone()[0]
-                    _amap_id_base_cache = geo_poi_count
-                    logger.info(
-                        f"[Entity_Alignment] geo_entity_names poi数量: {geo_poi_count}, amap neo4j ID起始: poi_{_amap_id_base_cache + 1}"
-                    )
-            amap_entity_id_base = _amap_id_base_cache
+                # 预加载数据库embedding（首次调用时加载，后续使用缓存）
+                if _db_cache is None:
+                    _db_cache = _load_db_embeddings(pg_client)
+                geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = (
+                    _db_cache
+                )
 
-            # 预加载数据库embedding（首次调用时加载，后续使用缓存）
-            if _db_cache is None:
-                _db_cache = _load_db_embeddings(pg_client)
-            geo_entities, amap_entities, geo_embeddings_np, amap_embeddings_np = (
-                _db_cache
-            )
+                # 获取抽取的实体（从joint_extraction_result或entities）
+                joint_result = state.get("joint_extraction_result", {})
+                entities_dict = state.get("entities", {})
 
-            # 获取抽取的实体（从joint_extraction_result或entities）
-            joint_result = state.get("joint_extraction_result", {})
-            entities_dict = state.get("entities", {})
-
-            # 提取实体名称列表
-            entity_names = []
-            entity_types = {}
-            if joint_result and "entities" in joint_result:
-                # 从联合抽取结果获取
-                for e in joint_result["entities"]:
-                    name = e.get("name", "")
-                    type_ = e.get("type", "")
-                    if name and name not in entity_names:
-                        entity_names.append(name)
-                        entity_types[name] = type_
-            else:
-                # 从传统entities字典获取
-                for type_, names in entities_dict.items():
-                    for name in names:
+                # 提取实体名称列表
+                entity_names = []
+                entity_types = {}
+                if joint_result and "entities" in joint_result:
+                    # 从联合抽取结果获取
+                    for e in joint_result["entities"]:
+                        name = e.get("name", "")
+                        type_ = e.get("type", "")
                         if name and name not in entity_names:
                             entity_names.append(name)
                             entity_types[name] = type_
+                else:
+                    # 从传统entities字典获取
+                    for type_, names in entities_dict.items():
+                        for name in names:
+                            if name and name not in entity_names:
+                                entity_names.append(name)
+                                entity_types[name] = type_
 
-            if not entity_names:
-                logger.info(f"[Entity_Alignment] 无实体需要对齐")
-                pg_client.close()
-                return {
-                    "entity_alignment_result": {
-                        "alignment_items": [],
-                        "aligned_entities": [],
-                        "new_entities": [],
-                        "skipped_entities": [],
-                        "overall_alignment_rate": 0.0,
-                        "alignment_confidence": "high",
-                    },
-                    "aligned_entity_ids": {},
-                    "new_entity_names": [],
-                    "current_step": StepEnum.DONE,
-                }
+                if not entity_names:
+                    logger.info(f"[Entity_Alignment] 无实体需要对齐")
+                    return {
+                        "entity_alignment_result": {
+                            "alignment_items": [],
+                            "aligned_entities": [],
+                            "new_entities": [],
+                            "skipped_entities": [],
+                            "overall_alignment_rate": 0.0,
+                            "alignment_confidence": "high",
+                        },
+                        "aligned_entity_ids": {},
+                        "new_entity_names": [],
+                        "current_step": StepEnum.DONE,
+                    }
 
             # 加载嵌入模型
             model = _get_embedding_model()
@@ -6939,6 +7732,30 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
             new_entities = []
             skipped_entities = []
             aligned_ids = {}
+            medium_conf_items = []
+
+            def _mark_aligned(
+                entity_name: str, alignment_item_ref: Dict, candidate_ref: Dict
+            ):
+                alignment_item_ref["alignment_status"] = "aligned"
+                alignment_item_ref["best_match"] = candidate_ref
+                aligned_entities.append(
+                    {
+                        "name": entity_name,
+                        "db_id": candidate_ref["db_entity_id"],
+                        "db_name": candidate_ref["name"],
+                        "similarity": candidate_ref["similarity"],
+                        "source": candidate_ref["source"],
+                    }
+                )
+                aligned_ids[entity_name] = candidate_ref["db_entity_id"]
+
+            def _mark_new_entity(
+                entity_name: str, alignment_item_ref: Dict, reason: str
+            ):
+                alignment_item_ref["alignment_status"] = "new_entity"
+                alignment_item_ref["llm_decision"] = reason
+                new_entities.append(entity_name)
 
             # 处理每个实体的候选结果
             for i, name in enumerate(entity_names):
@@ -6981,22 +7798,10 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                 # 高置信度：直接匹配
                 if best_similarity >= high_threshold:
-                    alignment_item["alignment_status"] = "aligned"
-                    alignment_item["best_match"] = best_candidate
                     alignment_item["llm_decision"] = (
                         f"高置信度匹配({best_similarity:.3f}>=0.90)，直接确认"
                     )
-
-                    aligned_entities.append(
-                        {
-                            "name": name,
-                            "db_id": best_candidate["db_entity_id"],
-                            "db_name": best_candidate["name"],
-                            "similarity": best_similarity,
-                            "source": best_candidate["source"],
-                        }
-                    )
-                    aligned_ids[name] = best_candidate["db_entity_id"]
+                    _mark_aligned(name, alignment_item, best_candidate)
 
                     logger.debug(
                         f"[Entity_Alignment] {name} -> {best_candidate['name']} (高置信度, 来源: {best_candidate['source']})"
@@ -7004,124 +7809,132 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
 
                 # 低置信度：直接跳过（新实体）
                 elif best_similarity < low_threshold:
-                    alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = (
-                        f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体"
+                    _mark_new_entity(
+                        name,
+                        alignment_item,
+                        f"相似度过低({best_similarity:.3f}<0.75)，判定为新实体",
                     )
-
-                    new_entities.append(name)
 
                     logger.debug(f"[Entity_Alignment] {name} -> 新实体 (低置信度)")
 
-                # 中置信度：交给LLM判断
+                # 中置信度：收集后批量交给LLM判断（N次 -> 1次）
                 elif use_llm and candidates:
-                    # 格式化候选信息（包含来源标识）
-                    # 需要将name字段改为db_name以兼容format_alignment_candidates
-                    candidates_for_format = []
-                    for c in candidates:
-                        c_formatted = c.copy()
-                        c_formatted["db_name"] = c_formatted.get("name", "")
-                        c_formatted["db_type"] = c_formatted.get("type", "")
-                        candidates_for_format.append(c_formatted)
-
-                    candidates_text = format_alignment_candidates(candidates_for_format)
-
-                    # 调用LLM判断
-                    prompt_text = ENTITY_ALIGNMENT_PROMPT.invoke(
+                    alignment_item["llm_decision"] = "待批量LLM判断"
+                    medium_conf_items.append(
                         {
                             "extracted_name": name,
+                            "alignment_item": alignment_item,
+                            "candidates": candidates,
                             "extracted_type": entity_types.get(name, ""),
-                            "raw_text": state.get("raw_text", ""),
-                            "candidates": candidates_text,
                         }
                     )
 
-                    try:
-                        response = await llm.ainvoke(prompt_text.messages[1].content)
+                else:
+                    # 不使用LLM判断，默认为新实体
+                    _mark_new_entity(
+                        name,
+                        alignment_item,
+                        f"中置信度({best_similarity:.3f})，未启用LLM判断",
+                    )
 
-                        # 解析LLM输出
-                        import re
+                alignment_items.append(alignment_item)
 
-                        status_match = re.search(
-                            r'alignment_status[=:]\s*"?(\w+)"?',
-                            response.content,
-                            re.IGNORECASE,
+            # 中置信度实体批量LLM对齐（N次 -> 1次）
+            if medium_conf_items:
+                try:
+                    batch_items = []
+                    for item in medium_conf_items:
+                        candidates_for_format = []
+                        for c in item["candidates"]:
+                            c_formatted = c.copy()
+                            c_formatted["db_name"] = c_formatted.get("name", "")
+                            c_formatted["db_type"] = c_formatted.get("type", "")
+                            candidates_for_format.append(c_formatted)
+
+                        batch_items.append(
+                            {
+                                "extracted_name": item["extracted_name"],
+                                "extracted_type": item["extracted_type"],
+                                "candidates": candidates_for_format,
+                            }
                         )
-                        index_match = re.search(
-                            r"best_match_index[=:]\s*(\d+)",
-                            response.content,
-                            re.IGNORECASE,
-                        )
-                        decision_match = re.search(
-                            r'llm_decision[=:]\s*"([^"]+)"',
-                            response.content,
-                            re.IGNORECASE,
-                        )
+
+                    prompt_text = BATCH_ENTITY_ALIGNMENT_DECISION_PROMPT.invoke(
+                        {
+                            "raw_text": state.get("raw_text", ""),
+                            "items_json": json.dumps(batch_items, ensure_ascii=False),
+                        }
+                    )
+                    full_prompt = (
+                        f"{prompt_text.messages[1].content}\n\n"
+                        f"{batch_alignment_parser.get_format_instructions()}"
+                    )
+                    response = await llm.ainvoke(full_prompt)
+                    parsed_result: BatchEntityAlignmentDecisionResult = (
+                        safe_parse_json_with_quote_fix(batch_alignment_parser, response.content)
+                    )
+
+                    decision_map = {
+                        d.extracted_name: d
+                        for d in (parsed_result.decisions or [])
+                    }
+                    valid_statuses = {"aligned", "new_entity", "skip"}
+
+                    for item in medium_conf_items:
+                        entity_name = item["extracted_name"]
+                        alignment_item = item["alignment_item"]
+                        candidates = item["candidates"]
+                        decision = decision_map.get(entity_name)
+
+                        if not decision:
+                            _mark_new_entity(
+                                entity_name,
+                                alignment_item,
+                                "批量LLM未返回该实体决策，默认新实体",
+                            )
+                            continue
 
                         llm_status = (
-                            status_match.group(1) if status_match else "new_entity"
+                            decision.alignment_status
+                            if decision.alignment_status in valid_statuses
+                            else "new_entity"
                         )
-                        best_index = int(index_match.group(1)) if index_match else -1
-                        llm_decision = (
-                            decision_match.group(1) if decision_match else "LLM判断"
-                        )
-
-                        # 验证输出状态
-                        VALID_STATUSES = {"aligned", "new_entity", "skip"}
-                        if llm_status not in VALID_STATUSES:
-                            llm_status = "new_entity"
+                        best_index = int(decision.best_match_index or -1)
+                        llm_decision = decision.llm_decision or "批量LLM判断"
 
                         alignment_item["alignment_status"] = llm_status
                         alignment_item["llm_decision"] = llm_decision
 
-                        if (
-                            llm_status == "aligned"
-                            and best_index >= 0
-                            and best_index < len(candidates)
-                        ):
+                        if llm_status == "aligned" and 0 <= best_index < len(candidates):
                             best_match = candidates[best_index]
-                            alignment_item["best_match"] = best_match
-
-                            aligned_entities.append(
-                                {
-                                    "name": name,
-                                    "db_id": best_match["db_entity_id"],
-                                    "db_name": best_match["name"],
-                                    "similarity": best_match["similarity"],
-                                    "source": best_match["source"],
-                                }
-                            )
-                            aligned_ids[name] = best_match["db_entity_id"]
-
+                            _mark_aligned(entity_name, alignment_item, best_match)
                             logger.debug(
-                                f"[Entity_Alignment] {name} -> {best_match['name']} (LLM判断匹配, 来源: {best_match['source']})"
+                                f"[Entity_Alignment] {entity_name} -> {best_match['name']} (批量LLM匹配, 来源: {best_match['source']})"
                             )
                         else:
-                            new_entities.append(name)
+                            new_entities.append(entity_name)
+                            if llm_status == "skip":
+                                skipped_entities.append(entity_name)
+                                logger.debug(
+                                    f"[Entity_Alignment] {entity_name} -> 跳过 (批量LLM)"
+                                )
                             logger.debug(
-                                f"[Entity_Alignment] {name} -> 新实体 (LLM判断)"
+                                f"[Entity_Alignment] {entity_name} -> 新实体 (批量LLM)"
                             )
 
-                    except Exception as e:
-                        logger.warning(
-                            f"[Entity_Alignment] LLM判断失败: {e}, 默认为新实体"
-                        )
-                        alignment_item["alignment_status"] = "new_entity"
-                        alignment_item["llm_decision"] = f"LLM判断异常，默认为新实体"
-                        new_entities.append(name)
-
-                else:
-                    # 不使用LLM判断，默认为新实体
-                    alignment_item["alignment_status"] = "new_entity"
-                    alignment_item["llm_decision"] = (
-                        f"中置信度({best_similarity:.3f})，未启用LLM判断"
+                    logger.info(
+                        f"[Entity_Alignment] 中置信度批量LLM判断完成: {len(medium_conf_items)} 个实体，调用 1 次"
                     )
-                    new_entities.append(name)
-
-                alignment_items.append(alignment_item)
-
-            # 关闭数据库连接
-            pg_client.close()
+                except Exception as e:
+                    logger.warning(
+                        f"[Entity_Alignment] 中置信度批量LLM判断失败: {e}，全部降级为新实体"
+                    )
+                    for item in medium_conf_items:
+                        _mark_new_entity(
+                            item["extracted_name"],
+                            item["alignment_item"],
+                            "批量LLM判断异常，默认新实体",
+                        )
 
             # ===== 新实体创建逻辑（P12新增） =====
             # 将未对齐的新实体写入数据库和neo4j
@@ -7243,6 +8056,35 @@ def create_entity_alignment_node(llm: Any, config: ExtractionConfig):
                 f"[Entity_Alignment] 完成: {aligned_count}/{total_entities} 已对齐, "
                 f"{len(new_entities)} 新实体(创建{len(created_entity_ids)}个), 对齐率={alignment_rate:.1%}"
                 f"(geo:{geo_aligned}, amap:{amap_aligned})"
+            )
+
+            # 输出结构化对齐结果，便于在日志中直接查看每个实体的最终去向
+            alignment_log_items = []
+            for item in alignment_items:
+                best_match = item.get("best_match") or {}
+                best_similarity = best_match.get("similarity")
+                if best_similarity is not None:
+                    try:
+                        best_similarity = round(float(best_similarity), 4)
+                    except (TypeError, ValueError):
+                        best_similarity = str(best_similarity)
+
+                alignment_log_items.append(
+                    {
+                        "extracted_name": item.get("extracted_name", ""),
+                        "extracted_type": item.get("extracted_type", ""),
+                        "status": item.get("alignment_status", "pending"),
+                        "matched_name": best_match.get("name"),
+                        "matched_db_id": best_match.get("db_entity_id"),
+                        "similarity": best_similarity,
+                        "source": best_match.get("source"),
+                        "decision": item.get("llm_decision", ""),
+                    }
+                )
+
+            logger.info(
+                f"[Entity_Alignment] 对齐结果明细: "
+                f"{json.dumps(alignment_log_items, ensure_ascii=False, default=str)}"
             )
 
             writer(
@@ -8154,7 +8996,9 @@ async def process_batch_preprocessing(
         current_corpus = filter_result.get("processed_corpus", current_corpus)
         skipped_corpus = filter_result.get("skipped_corpus", [])
         if filter_result.get("error"):
-            fallback_corpus.extend(current_corpus)
+            fallback_corpus.extend(
+                [{**c, "error": filter_result.get("error")} for c in current_corpus]
+            )
             current_corpus = []
 
     if enable_normalize and current_corpus:
@@ -8165,12 +9009,41 @@ async def process_batch_preprocessing(
         )
         current_corpus = normalize_result.get("normalized_corpus", current_corpus)
         if normalize_result.get("error"):
-            fallback_corpus.extend(current_corpus)
+            fallback_corpus.extend(
+                [{**c, "error": normalize_result.get("error")} for c in current_corpus]
+            )
             current_corpus = []
 
     if enable_qa_scaffold and current_corpus:
         qa_node = create_batch_qa_scaffold_node(llm)
-        qa_result = await qa_node(current_corpus, dummy_writer)
+        qa_retry_attempts = max(
+            int(getattr(config, "batch_qa_scaffold_retry_attempts", 1) or 0), 0
+        )
+        qa_result = None
+        last_qa_error = None
+
+        for attempt in range(qa_retry_attempts + 1):
+            qa_result = await qa_node(current_corpus, dummy_writer)
+            if not qa_result.get("error"):
+                if attempt > 0:
+                    logger.info(
+                        f"[Batch_Preprocessing] Batch_QA_Scaffold 批量重试成功: 第{attempt + 1}次尝试"
+                    )
+                break
+
+            last_qa_error = qa_result.get("error")
+            if attempt < qa_retry_attempts:
+                logger.warning(
+                    f"[Batch_Preprocessing] Batch_QA_Scaffold 批量失败，准备重试 "
+                    f"{attempt + 1}/{qa_retry_attempts}: {last_qa_error}"
+                )
+            else:
+                logger.error(
+                    f"[Batch_Preprocessing] Batch_QA_Scaffold 批量重试耗尽({qa_retry_attempts + 1}次): "
+                    f"{last_qa_error}"
+                )
+
+        qa_result = qa_result or {"batch_results": {}, "qa_corpus": current_corpus}
         # P17修复：batch_results 是 {corpus_id: {qa_pairs, ...}} 格式，用于后续校验
         preprocessing_results["qa_scaffold"] = qa_result.get("batch_results", {})
         # batch_qa_scaffold_result 是原始Pydantic model_dump，用于日志/调试
@@ -8179,7 +9052,9 @@ async def process_batch_preprocessing(
         )
         current_corpus = qa_result.get("qa_corpus", current_corpus)
         if qa_result.get("error"):
-            fallback_corpus.extend(current_corpus)
+            fallback_corpus.extend(
+                [{**c, "error": qa_result.get("error")} for c in current_corpus]
+            )
             current_corpus = []
 
         # P17新增：QA_Scaffold 校验（仅在 enable_full_self_check 时）
@@ -8200,7 +9075,13 @@ async def process_batch_preprocessing(
                 if config.batch_llm_fallback:
                     for corpus in current_corpus:
                         if corpus["id"] == corpus_id:
-                            fallback_corpus.append(corpus)
+                            fallback_corpus.append(
+                                {
+                                    **corpus,
+                                    "error": r.get("reason")
+                                    or "batch_self_check_qa_rejected",
+                                }
+                            )
                             break
 
             # 只保留通过校验的语料

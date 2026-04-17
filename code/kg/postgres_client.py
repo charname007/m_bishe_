@@ -27,15 +27,38 @@ class PostgresClient:
 
     def connect(self):
         """建立连接"""
-        self.conn = psycopg2.connect(**self.conn_params)
-        # P15修复：设置客户端编码为UTF-8，避免中文编码问题
-        self.conn.set_client_encoding('UTF8')
+        try:
+            self.conn = psycopg2.connect(**self.conn_params)
+            # P15修复：设置客户端编码为UTF-8，避免中文编码问题
+            self.conn.set_client_encoding("UTF8")
+        except UnicodeDecodeError as e:
+            # 某些 Windows + PostgreSQL 组合下，服务端错误信息可能是 GBK/CP936，
+            # psycopg2 在解码时报 UnicodeDecodeError，导致真实错误被掩盖。
+            raw = getattr(e, "object", None)
+            if isinstance(raw, (bytes, bytearray)):
+                raw_bytes = bytes(raw)
+                decoded_message = None
+                for encoding in ("gbk", "cp936", "latin1"):
+                    try:
+                        decoded_message = raw_bytes.decode(encoding, errors="replace")
+                        break
+                    except Exception:
+                        continue
+                if decoded_message:
+                    raise RuntimeError(
+                        f"PostgreSQL连接失败（服务端消息）: {decoded_message.strip()}"
+                    ) from e
+            raise
 
     def close(self):
         """关闭连接"""
         if self.conn:
-            self.conn.close()
-            logger.info("PostgreSQL连接已关闭")
+            try:
+                if not self.conn.closed:
+                    self.conn.close()
+                    logger.info("PostgreSQL连接已关闭")
+            finally:
+                self.conn = None
 
     def __enter__(self):
         return self

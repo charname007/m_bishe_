@@ -14,10 +14,12 @@
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections import Counter
 from datetime import datetime
+from typing import Any, Dict
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -55,6 +57,269 @@ DEFAULT_ID_COLUMN = "note_id"
 DEFAULT_TIME_COLUMN = "publish_time"
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_MAX_TOTAL = 500
+DETAIL_LOG_SAMPLE_LIMIT = 5
+DETAIL_LOG_TEXT_PREVIEW = 120
+
+
+def _safe_preview(text: Any, limit: int = DETAIL_LOG_TEXT_PREVIEW) -> str:
+    """文本预览，避免日志过长。"""
+    if text is None:
+        return ""
+    value = str(text)
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}..."
+
+
+def _safe_count(value: Any) -> int:
+    """安全获取长度。"""
+    if value is None:
+        return 0
+    try:
+        return len(value)
+    except Exception:
+        return 0
+
+
+def _entity_type_counts(entities: Any) -> Dict[str, int]:
+    """统计实体类型数量。"""
+    if not isinstance(entities, dict):
+        return {}
+    counts = {}
+    for entity_type, names in entities.items():
+        if isinstance(names, list):
+            counts[str(entity_type)] = len(names)
+    return counts
+
+
+def _compact_eval_scores(eval_scores: Any) -> list:
+    """压缩评分信息，只保留关键信息并截断数量。"""
+    if not isinstance(eval_scores, list):
+        return []
+
+    compact = []
+    for score in eval_scores[:DETAIL_LOG_SAMPLE_LIMIT]:
+        if isinstance(score, dict):
+            compact.append(
+                {
+                    "dimension": score.get("dimension") or score.get("name"),
+                    "score": score.get("score"),
+                    "passed": score.get("passed"),
+                    "confidence": score.get("confidence"),
+                    "comment": _safe_preview(score.get("comment") or score.get("reason")),
+                }
+            )
+        else:
+            compact.append(_safe_preview(score))
+    return compact
+
+
+def _compact_alignment_items(alignment_items: Any) -> list:
+    """压缩实体对齐明细，避免日志过长。"""
+    if not isinstance(alignment_items, list):
+        return []
+
+    compact = []
+    for item in alignment_items[:DETAIL_LOG_SAMPLE_LIMIT]:
+        if not isinstance(item, dict):
+            compact.append(_safe_preview(item))
+            continue
+
+        best_match = item.get("best_match") or {}
+        similarity = best_match.get("similarity")
+        if similarity is not None:
+            try:
+                similarity = round(float(similarity), 4)
+            except Exception:
+                similarity = str(similarity)
+
+        compact.append(
+            {
+                "name": item.get("extracted_name"),
+                "status": item.get("alignment_status"),
+                "match_name": best_match.get("name"),
+                "db_id": best_match.get("db_entity_id"),
+                "similarity": similarity,
+                "source": best_match.get("source"),
+                "decision": _safe_preview(item.get("llm_decision")),
+            }
+        )
+    return compact
+
+
+def log_corpus_node_details(batch_id: str, worker_id: str, corpus_state: Dict[str, Any]):
+    """输出单条语料的各节点详细结果日志。"""
+    if not isinstance(corpus_state, dict):
+        return
+
+    corpus_id = str(corpus_state.get("corpus_id", "unknown"))
+    prefix = f"[Batch {batch_id}][{worker_id}][Corpus {corpus_id}]"
+
+    # Filter
+    filter_result = corpus_state.get("filter_result") or {}
+    if filter_result:
+        logger.info(
+            f"{prefix}[Filter] {json.dumps({
+                'is_valid': filter_result.get('is_valid'),
+                'skip_reason': filter_result.get('skip_reason'),
+                'confidence': filter_result.get('confidence'),
+                'reason': _safe_preview(filter_result.get('reason')),
+            }, ensure_ascii=False)}"
+        )
+
+    # Normalize
+    normalize_result = corpus_state.get("normalize_result") or {}
+    if normalize_result:
+        logger.info(
+            f"{prefix}[Normalize] {json.dumps({
+                'has_changes': normalize_result.get('has_changes'),
+                'confidence': normalize_result.get('confidence'),
+                'normalizations_count': _safe_count(normalize_result.get('normalizations')),
+                'normalized_preview': _safe_preview(corpus_state.get('normalized_text')),
+            }, ensure_ascii=False)}"
+        )
+
+    # QA Scaffold
+    qa_result = corpus_state.get("qa_scaffold_result") or {}
+    if qa_result:
+        logger.info(
+            f"{prefix}[QA_Scaffold] {json.dumps({
+                'qa_pairs': _safe_count(qa_result.get('qa_pairs')),
+                'entity_hints': _safe_count(qa_result.get('entity_hints') or corpus_state.get('qa_entity_hints')),
+                'relation_hints': _safe_count(qa_result.get('relation_hints') or corpus_state.get('qa_relation_hints')),
+                'context_dependencies': _safe_count(qa_result.get('context_dependencies') or corpus_state.get('qa_context_dependencies')),
+                'confidence': qa_result.get('overall_confidence') or qa_result.get('confidence'),
+            }, ensure_ascii=False)}"
+        )
+
+    # Joint Extraction
+    joint_result = corpus_state.get("joint_extraction_result") or {}
+    entities = corpus_state.get("entities") or joint_result.get("entities") or {}
+    triples = (
+        corpus_state.get("corrected_triples")
+        or corpus_state.get("triples")
+        or joint_result.get("triples")
+        or []
+    )
+    if entities or triples or joint_result:
+        entity_counts = _entity_type_counts(entities)
+        logger.info(
+            f"{prefix}[Joint_NER_RE] {json.dumps({
+                'entity_total': sum(entity_counts.values()),
+                'entity_types': entity_counts,
+                'triple_count': _safe_count(triples),
+                'confidence': joint_result.get('overall_confidence') or corpus_state.get('verification_confidence'),
+            }, ensure_ascii=False)}"
+        )
+
+    # Self-Check 节点
+    self_check_filter = corpus_state.get("self_check_filter_result") or {}
+    if self_check_filter:
+        logger.info(
+            f"{prefix}[Self_Check_Filter] {json.dumps({
+                'confidence': self_check_filter.get('overall_confidence') or self_check_filter.get('confidence'),
+                'retry_suggested': self_check_filter.get('retry_suggested'),
+                'issues': _safe_count(self_check_filter.get('issues')),
+            }, ensure_ascii=False)}"
+        )
+
+    self_check_normalize = corpus_state.get("self_check_normalize_result") or {}
+    if self_check_normalize:
+        logger.info(
+            f"{prefix}[Self_Check_Normalize] {json.dumps({
+                'confidence': self_check_normalize.get('overall_confidence') or self_check_normalize.get('confidence'),
+                'retry_suggested': self_check_normalize.get('retry_suggested'),
+                'issues': _safe_count(self_check_normalize.get('issues')),
+            }, ensure_ascii=False)}"
+        )
+
+    self_check_qa = corpus_state.get("self_check_qa_result") or {}
+    if self_check_qa:
+        logger.info(
+            f"{prefix}[Self_Check_QA] {json.dumps({
+                'confidence': self_check_qa.get('overall_confidence') or self_check_qa.get('confidence'),
+                'retry_suggested': self_check_qa.get('retry_suggested'),
+                'issues': _safe_count(self_check_qa.get('issues')),
+            }, ensure_ascii=False)}"
+        )
+
+    self_check_joint = corpus_state.get("self_check_joint_result") or {}
+    if self_check_joint:
+        logger.info(
+            f"{prefix}[Self_Check_Joint] {json.dumps({
+                'confidence': self_check_joint.get('overall_confidence') or self_check_joint.get('confidence'),
+                'retry_suggested': self_check_joint.get('retry_suggested'),
+                'improvement_actions': _safe_count(self_check_joint.get('improvement_actions')),
+                'reflection': _safe_preview(self_check_joint.get('reflection_text')),
+            }, ensure_ascii=False)}"
+        )
+
+    # Eval / Self-Check Eval
+    eval_scores = corpus_state.get("eval_scores") or []
+    if eval_scores or ("eval_passed" in corpus_state):
+        logger.info(
+            f"{prefix}[Eval] {json.dumps({
+                'eval_passed': corpus_state.get('eval_passed'),
+                'score_count': _safe_count(eval_scores),
+                'score_samples': _compact_eval_scores(eval_scores),
+            }, ensure_ascii=False)}"
+        )
+
+    self_check_eval = corpus_state.get("self_check_eval_result") or {}
+    if self_check_eval:
+        logger.info(
+            f"{prefix}[Self_Check_Eval] {json.dumps({
+                'confidence': self_check_eval.get('overall_confidence') or self_check_eval.get('confidence'),
+                'retry_suggested': self_check_eval.get('retry_suggested'),
+                'improvement_actions': _safe_count(self_check_eval.get('improvement_actions')),
+            }, ensure_ascii=False)}"
+        )
+
+    # Label / Self-Check Label
+    entity_attrs = corpus_state.get("entity_attrs") or {}
+    relation_attrs = corpus_state.get("relation_attrs") or {}
+    if entity_attrs or relation_attrs:
+        logger.info(
+            f"{prefix}[Label] {json.dumps({
+                'entity_attrs_count': _safe_count(entity_attrs),
+                'relation_attrs_count': _safe_count(relation_attrs),
+            }, ensure_ascii=False)}"
+        )
+
+    self_check_label = corpus_state.get("self_check_label_result") or {}
+    if self_check_label:
+        logger.info(
+            f"{prefix}[Self_Check_Label] {json.dumps({
+                'confidence': self_check_label.get('overall_confidence') or self_check_label.get('confidence'),
+                'retry_suggested': self_check_label.get('retry_suggested'),
+                'improvement_actions': _safe_count(self_check_label.get('improvement_actions')),
+            }, ensure_ascii=False)}"
+        )
+
+    # Entity Alignment
+    alignment_result = corpus_state.get("entity_alignment_result") or {}
+    if alignment_result:
+        logger.info(
+            f"{prefix}[Entity_Alignment] {json.dumps({
+                'aligned_count': _safe_count(alignment_result.get('aligned_entities')),
+                'new_count': _safe_count(alignment_result.get('new_entities')),
+                'created_count': alignment_result.get('created_count') or _safe_count(alignment_result.get('created_entities')),
+                'skipped_count': _safe_count(alignment_result.get('skipped_entities')),
+                'alignment_rate': alignment_result.get('overall_alignment_rate'),
+                'confidence': alignment_result.get('alignment_confidence'),
+                'samples': _compact_alignment_items(alignment_result.get('alignment_items')),
+            }, ensure_ascii=False)}"
+        )
+
+    # 总结
+    logger.info(
+        f"{prefix}[Summary] {json.dumps({
+            'current_step': corpus_state.get('current_step'),
+            'batch_processed': corpus_state.get('batch_processed'),
+            'skip_reason': corpus_state.get('skip_reason'),
+            'error': corpus_state.get('error'),
+        }, ensure_ascii=False)}"
+    )
 
 
 def init_clients():
@@ -101,6 +366,11 @@ def init_workflow():
     config.enable_entity_alignment = True
     config.enable_batch_llm = True
     config.enable_qa_mentor = True
+    # 批处理优先：禁止退化为单条处理，阶段失败后直接跳过
+    config.batch_llm_fallback = False
+    config.batch_skip_on_repeated_failure = True
+    config.batch_stage_retry_attempts = 1
+    config.batch_qa_scaffold_retry_attempts = 1
 
     workflow = build_distributed_workflow(llm, config, qa_llm=qa_llm)
     return workflow, config
@@ -164,10 +434,12 @@ async def process_batch(
 
         per_corpus_errors = {}
         for worker_result in worker_results:
+            worker_id = str(worker_result.get("worker_id", "worker_unknown"))
             for corpus_state in worker_result.get("results", []):
                 corpus_error = corpus_state.get("error")
                 if corpus_error:
                     per_corpus_errors[str(corpus_state.get("corpus_id"))] = str(corpus_error)
+                log_corpus_node_details(batch_id, worker_id, corpus_state)
 
         logger.info(
             f"批次 {batch_id}: 抽取完成 - {len(entities)} 实体, {len(triples)} 三元组"
@@ -199,7 +471,14 @@ async def main(max_total: int = DEFAULT_MAX_TOTAL, batch_size: int = DEFAULT_BAT
     try:
         pg_client, neo4j_client = init_clients()
         verify_runtime_dependencies(pg_client, neo4j_client)
-        workflow, _ = init_workflow()
+        workflow, config = init_workflow()
+        logger.info(
+            "Batch-Only策略: "
+            f"batch_llm_fallback={config.batch_llm_fallback}, "
+            f"batch_skip_on_repeated_failure={config.batch_skip_on_repeated_failure}, "
+            f"batch_stage_retry_attempts={config.batch_stage_retry_attempts}, "
+            f"batch_qa_scaffold_retry_attempts={config.batch_qa_scaffold_retry_attempts}"
+        )
 
         pg_client.ensure_corpus_status_columns(DEFAULT_TABLE)
 

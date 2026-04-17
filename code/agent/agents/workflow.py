@@ -1605,6 +1605,9 @@ def build_distributed_workflow(
         batch_llm_size = config.batch_llm_size
         enable_batch_llm = config.enable_batch_llm
         batch_llm_fallback = config.batch_llm_fallback
+        batch_skip_on_repeated_failure = bool(
+            getattr(config, "batch_skip_on_repeated_failure", False)
+        )
         enable_qa_mentor = config.enable_qa_mentor
 
         if enable_qa_mentor and enable_batch_llm:
@@ -1776,8 +1779,40 @@ def build_distributed_workflow(
                             "batch_processed": True,
                         })
 
+                    # 失败回退语料去重（按 corpus_id）
+                    dedup_fallback_corpus = []
+                    seen_fallback_ids = set()
+                    for corpus in fallback_corpus:
+                        cid = str(corpus.get("id"))
+                        if cid not in seen_fallback_ids:
+                            seen_fallback_ids.add(cid)
+                            dedup_fallback_corpus.append(corpus)
+                    fallback_corpus = dedup_fallback_corpus
+
                     # 需要fallback的语料（预处理失败）
-                    if batch_llm_fallback and fallback_corpus:
+                    if batch_skip_on_repeated_failure and fallback_corpus:
+                        logger.warning(
+                            f"[Batch_Preprocessing] 按策略跳过 {len(fallback_corpus)} 条预处理失败语料"
+                        )
+                        for corpus in fallback_corpus:
+                            skipped_results.append(
+                                {
+                                    "corpus_id": corpus.get("id"),
+                                    "entities": DEFAULT_ENTITY_DICT.copy(),
+                                    "triples": [],
+                                    "corrected_triples": [],
+                                    "eval_passed": False,
+                                    "entity_attrs": {},
+                                    "relation_attrs": {},
+                                    "eval_scores": [],
+                                    "verification_confidence": "error",
+                                    "batch_processed": True,
+                                    "error": corpus.get("error")
+                                    or "batch_preprocessing_failed_after_retries",
+                                    "skip_reason": "batch_preprocessing_failed_after_retries",
+                                }
+                            )
+                    elif batch_llm_fallback and fallback_corpus:
                         logger.info(f"[Batch_Preprocessing] Fallback处理 {len(fallback_corpus)} 条预处理失败的语料")
                         for corpus in fallback_corpus:
                             single_result = await run_single_with_optional_mentor(corpus)
@@ -1818,6 +1853,9 @@ def build_distributed_workflow(
                         # P17改进：使用批处理返回的 entity_attrs 和 relation_attrs
                         "entity_attrs": data.get("entity_attrs", {}),
                         "relation_attrs": data.get("relation_attrs", {}),
+                        "entity_alignment_result": data.get("entity_alignment_result", {}),
+                        "aligned_entities": data.get("aligned_entities", []),
+                        "new_entities": data.get("new_entities", []),
                         "eval_scores": data.get("eval_scores", []),
                         "verification_confidence": data.get("confidence", "medium"),
                         "batch_processed": True,  # 标记为批量处理
@@ -1830,7 +1868,29 @@ def build_distributed_workflow(
                 #      都能主动回问导师（通过升级为导师单条流实现）。
                 # 批内导师交互已在 process_corpus_batch_with_llm 内完成
 
-                if batch_llm_fallback and batch_result["needs_single_processing"]:
+                if batch_skip_on_repeated_failure and batch_result["needs_single_processing"]:
+                    fallback_corpus = batch_result["fallback_corpus_list"]
+                    logger.warning(
+                        f"[Batch] 按策略跳过 {len(fallback_corpus)} 条批处理失败语料"
+                    )
+                    for corpus in fallback_corpus:
+                        results.append(
+                            {
+                                "corpus_id": corpus.get("id"),
+                                "entities": DEFAULT_ENTITY_DICT.copy(),
+                                "triples": [],
+                                "corrected_triples": [],
+                                "eval_passed": False,
+                                "entity_attrs": {},
+                                "relation_attrs": {},
+                                "eval_scores": [],
+                                "verification_confidence": "error",
+                                "batch_processed": True,
+                                "error": "batch_failed_after_retries",
+                                "skip_reason": "batch_failed_after_retries",
+                            }
+                        )
+                elif batch_llm_fallback and batch_result["needs_single_processing"]:
                     fallback_corpus = batch_result["fallback_corpus_list"]
                     logger.info(f"[Batch] Fallback处理 {len(fallback_corpus)} 条语料")
                     for corpus in fallback_corpus:
@@ -1841,10 +1901,27 @@ def build_distributed_workflow(
                 result_ids = {str(r.get("corpus_id")) for r in results}
                 missing_corpus = [c for c in corpus_list if str(c.get("id")) not in result_ids]
                 if missing_corpus:
-                    logger.warning(f"[Batch] 检测到 {len(missing_corpus)} 条语料无结果，自动转单条补处理")
+                    logger.warning(
+                        f"[Batch] 检测到 {len(missing_corpus)} 条语料无结果，"
+                        "Batch-Only策略: 直接跳过，不进行单条补处理"
+                    )
                     for corpus in missing_corpus:
-                        single_result = await run_single_with_optional_mentor(corpus)
-                        results.append(single_result)
+                        results.append(
+                            {
+                                "corpus_id": corpus.get("id"),
+                                "entities": DEFAULT_ENTITY_DICT.copy(),
+                                "triples": [],
+                                "corrected_triples": [],
+                                "eval_passed": False,
+                                "entity_attrs": {},
+                                "relation_attrs": {},
+                                "eval_scores": [],
+                                "verification_confidence": "error",
+                                "batch_processed": True,
+                                "error": "batch_missing_result_after_retries",
+                                "skip_reason": "batch_missing_result_after_retries",
+                            }
+                        )
 
                 # 合并预处理跳过的结果
                 return skipped_results + fallback_results + results
@@ -1852,6 +1929,26 @@ def build_distributed_workflow(
             except Exception as e:
                 logger.error(f"批量处理失败: {e}")
 
+                # 如果按策略要求跳过，直接返回跳过结果
+                if batch_skip_on_repeated_failure:
+                    logger.warning("[Batch] 批量处理异常，按策略直接跳过当前批次")
+                    return [
+                        {
+                            "corpus_id": corpus.get("id", "unknown"),
+                            "entities": DEFAULT_ENTITY_DICT.copy(),
+                            "triples": [],
+                            "corrected_triples": [],
+                            "eval_passed": False,
+                            "entity_attrs": {},
+                            "relation_attrs": {},
+                            "eval_scores": [],
+                            "verification_confidence": "error",
+                            "batch_processed": True,
+                            "error": str(e),
+                            "skip_reason": "batch_exception_after_retries",
+                        }
+                        for corpus in corpus_list
+                    ]
                 # 如果启用fallback，退化为单条处理
                 if batch_llm_fallback:
                     logger.warning(f"[Batch] 退化为单条处理")
