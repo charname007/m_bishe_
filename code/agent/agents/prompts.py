@@ -1794,55 +1794,56 @@ def format_normalizations_for_check(normalizations: list) -> str:
 
 BATCH_FILTER_SYSTEM = """你是一位"批量地理语义筛选专家"。
 你的目标是：为后续"地理实体-语义关系抽取"阶段筛选高价值语料。
-你必须用统一标准同时判断多条文本，优先识别是否存在可落地的地理实体与关系线索。"""
+请使用 CARE 技法执行：Context（任务背景）+ Ask（明确目标）+ Rules（硬约束）+ Examples（判定样例思维）。"""
 
-BATCH_FILTER_USER = """## 任务描述
-请同时判断以下语料（共 {batch_size} 条）是否值得进入后续地理抽取。
+BATCH_FILTER_USER = """## Context
+你正在执行批处理预筛选。目标是尽量减少误筛（漏掉有地理价值文本），同时过滤明显无效语料。
 
----
-
-## 判定原则（先关系、后细节）
-
-满足以下任一条件，通常判定 `is_valid=true`：
-1. 出现可识别地理实体（道路/POI/建筑物/街区）；
-2. 出现地理关系线索（位于/包含/相对方位/附近/对面/沿着等）；
-3. 出现场所功能或事件信息，且能关联到具体地点。
-
-判定 `is_valid=false` 的典型情况：
-1. 纯情绪或日常碎片表达，无地点语义；
-2. 只有人物/人群叙述，无地理实体（如"男生/女生/闺蜜"）；
-3. 明确是武汉以外内容，且与武汉无关联；
-4. 广告口号、乱码、极短无语义文本。
-
----
-
-## 武汉地区判断
-
-- 若文本明确只涉及非武汉地区，设 `is_non_wuhan_region=true`，并给出 `region_hint`（如"北京"）。
-- 若出现武汉相关地点或无法确定地区，设 `is_non_wuhan_region=false`。
-
----
-
-## 语料列表
-
+## Ask
+请同时判断以下语料（共 {batch_size} 条）是否值得进入后续地理抽取：
 {corpus_list}
+
+---
+
+## Rules（硬约束）
+
+按以下顺序判定每条语料：
+1. 先判是否有地理线索：
+   - 地理实体：道路/POI/建筑物/街区
+   - 空间关系触发词：在/位于/附近/旁边/对面/沿着/经过/里面/交叉口等
+   - 功能或事件线索且可关联到地点
+2. 再判地域：
+   - 明确仅非武汉且无武汉关联 -> `is_non_wuhan_region=true`
+   - 出现武汉地点或无法确定地域 -> `is_non_wuhan_region=false`
+3. 最终判 `is_valid`：
+   - 有地理线索一般为 true（保守放行）
+   - 纯情绪、纯人群叙述、乱码、极短无语义、纯广告口号可为 false
+
+严禁误判规则：
+1. “人群词/时间词”不是地理实体（男生、闺蜜、周末等）。
+2. 地名不确定时宁可放行，不要误拒。
+3. 不允许跨语料借信息。
 
 ---
 
 ## 输出要求（严格JSON）
 
-输出 `results` 数组，每条包含：
+输出根字段：
+1. `results`（长度应等于输入语料数）
+2. `overall_confidence`（high/medium/low）
+
+每个 `results[*]` 必须包含：
 1. `corpus_id`
 2. `is_valid`
 3. `skip_reason`（仅 `is_valid=false` 时必填，否则为 null）
 4. `confidence`（high/medium/low）
-5. `has_geo_entity`（是否出现地理实体）
-6. `has_spatial_relation`（是否出现空间关系线索）
-7. `geo_entity_hint`（简短提示，如"武汉大学, 珞喻路"；无则null）
+5. `has_geo_entity`
+6. `has_spatial_relation`
+7. `geo_entity_hint`（如"武汉大学, 珞喻路"；无则null）
 8. `is_non_wuhan_region`
 9. `region_hint`（武汉/非武汉城市名/未知）
 
-并输出 `overall_confidence`。"""
+仅输出JSON，不要代码块，不要解释。"""
 
 BATCH_FILTER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_FILTER_SYSTEM),
@@ -1852,42 +1853,46 @@ BATCH_FILTER_PROMPT = ChatPromptTemplate.from_messages([
 
 BATCH_NORMALIZE_SYSTEM = """你是一位"批量文本归一化专家"。
 你的职责是：在不改变语义的前提下，为后续地理关系抽取做标准化输入。
-你必须优先做地名简称统一、同名实体歧义消解和必要的轻量口语规范化。"""
+你必须优先做地名简称统一、同名实体歧义消解和必要的轻量口语规范化。
+请使用 BAB 技法执行：Before（原文）-> After（归一化结果）-> Bridge（改写依据）。"""
 
-BATCH_NORMALIZE_USER = """## 任务描述
-请同时归一化以下语料（共 {batch_size} 条）。
-
----
-
-## 归一化规则
-
-必须遵守：
-1. 不能添加原文不存在的事实；
-2. 不能删除关键地理语义；
-3. 尽量保持原句风格，只做必要归一化。
-
-重点动作：
-1. 别名统一：如"武大"->"武汉大学"、"华科"->"华中科技大学"；
-2. 指代消解：仅当上下文足够明确时，将"这里/那边"替换为具体地点；
-3. 轻量口语标准化：仅在不损失语义时进行。
-
----
-
-## 语料列表
-
+BATCH_NORMALIZE_USER = """## Before（输入语料）
+请同时归一化以下语料（共 {batch_size} 条）：
 {corpus_list}
 
 ---
 
-## 输出要求（严格JSON）
+## Bridge（归一化依据与规则）
 
-输出 `results` 数组，每条包含：
+硬约束：
+1. 不能添加原文不存在的事实。
+2. 不能删除关键地理语义和关系触发词。
+3. 归一化后应保持原句主观语气和评价方向。
+
+执行优先级：
+1. 地名别名统一：如武大->武汉大学，华科->华中科技大学。
+2. 指代消解：仅在证据充分时将“这里/那边”替换为具体地点；证据不足则保留原词。
+3. 口语规范化：仅做轻量改写（如“就在...上”->“位于...”），禁止过度改写。
+
+v3.4 对齐要求：
+1. 人群词和时间词默认保留为语义线索，不强转实体名。
+2. 对“适合人群/具有限制”等开放文本表达，保留原文细粒度信息（如“排队两小时”）。
+
+---
+
+## After（输出契约，严格JSON）
+
+输出根字段：
+1. `results`（长度应等于输入语料数）
+2. `overall_confidence`（high/medium/low）
+
+每个 `results[*]` 必须包含：
 1. `corpus_id`
 2. `normalized_text`
 3. `aliases`（简称->标准名映射；无则 `{{}}`）
 4. `confidence`（high/medium/low）
 
-并输出 `overall_confidence`。"""
+仅输出JSON，不要代码块，不要解释。"""
 
 BATCH_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_NORMALIZE_SYSTEM),
@@ -1896,47 +1901,73 @@ BATCH_NORMALIZE_PROMPT = ChatPromptTemplate.from_messages([
 
 
 BATCH_QA_SCAFFOLD_SYSTEM = """你是一位"批量QA脚手架专家"。
-你的目标是：通过5W1H问答，把社交媒体文本中的地理实体和关系线索显式化，
-为后续实体-关系抽取提供高召回提示。"""
+你负责把社交媒体文本中的地理实体与语义关系线索显式化，
+为后续批量实体-关系抽取提供高召回、低歧义的提示。
+请使用 RISE-IE 技法执行：Role（角色）+ Input（输入）+ Steps（步骤）+ Expectation（输出契约）。"""
 
-BATCH_QA_SCAFFOLD_USER = """## 任务描述
-请同时为以下语料（共 {batch_size} 条）构建5W1H问答脚手架。
+BATCH_QA_SCAFFOLD_USER = """## Role（角色与目标）
+你是批量地理语义脚手架构建器。请对每条语料产出可直接用于抽取节点的 QA 提示，
+重点提升地理实体召回与关系方向判定能力。
+
+## Input（任务输入）
+请同时为以下语料（共 {batch_size} 条）构建 5W1H 问答脚手架：
+{corpus_list}
+
+---
+
+## Steps（必须执行）
+
+1. 按单条语料独立分析，禁止把A语料信息写入B语料。
+2. 优先提取地理实体线索（道路/POI/建筑物/街区），再补充功能/事件线索。
+3. `where` 维度必须优先发现空间关系触发词（在/位于/旁边/附近/对面/里面/经过/连接等）。
+4. 人群词和时间词默认作为属性线索，不当作地理实体（如男生、游客、周末、晚上），符合 v3.4 开放文本属性原则。
+5. 模糊指代（这里/那边/附近）若无法消解，不进 `entity_hints`，放入 `context_dependencies`。
+6. 不臆造实体和关系；没有依据就留空。
 
 ---
 
 ## 5W1H侧重点（地理关系导向）
 
-1. WHERE：地点位置、上下位、周边方位；
-2. WHAT：地点类型、场所功能、事件信息；
-3. WHO：适合人群（作为属性，不当作实体）；
-4. WHEN：时间/时段（作为属性）；
-5. WHY：推荐或评价理由；
-6. HOW：到达方式与交通线索。
+1. `where`：地点位置、上下位、邻近/方位关系（最高优先级）
+2. `what`：地点类型、场所功能、事件信息
+3. `who`：适合人群（属性线索）
+4. `when`：时间/时段（属性线索）
+5. `why`：推荐或评价理由
+6. `how`：到达方式、交通线索、可达性
 
 ---
 
-## 语料列表
+## Expectation（输出契约，严格JSON）
 
-{corpus_list}
+输出根对象字段：
+1. `results`: 数组，长度应等于输入语料数
+2. `overall_confidence`: 批量级 high/medium/low
 
----
-
-## 输出要求（严格JSON）
-
-输出 `results` 数组，每条包含：
+每个 `results[*]` 必须包含：
 1. `corpus_id`
-2. `qa_pairs`：每个问答对必须包含
+2. `qa_pairs`: 数组；每个问答对字段固定为
    - `question`
    - `answer`
    - `dimension`（只能是 who/what/when/where/why/how）
-   - `entities_involved`（涉及实体名列表）
+   - `entities_involved`（实体名列表）
    - `confidence`（high/medium/low）
-3. `entity_hints`（地理实体提示）
-4. `relation_hints`（关系提示，优先使用：位于/包含/相对方位/具有功能/发生事件/优于/相似/劣于）
-5. `context_dependencies`（别名、指代、上下文依赖）
-6. `overall_confidence`
+3. `entity_hints`: 地理实体提示（优先真实地名/场所名）
+4. `relation_hints`: 关系提示（优先使用以下8类）
+   - 位于/包含/相对方位/具有功能/发生事件/优于/相似/劣于
+5. `context_dependencies`: 别名、指代、跨句依赖、待消解歧义
+6. `overall_confidence`: 单条 high/medium/low
 
-并输出 `overall_confidence`（批量级）。"""
+---
+
+## 质量底线
+
+1. 每条语料都必须返回一个结果对象（即使无地理信息）。
+2. 无地理信息时：
+   - `qa_pairs` = []
+   - `entity_hints` = []
+   - `relation_hints` = []
+   - `context_dependencies` 可给出“无明确地理线索”
+3. 仅输出 JSON，不要代码块，不要额外解释。"""
 
 BATCH_QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
     ("system", BATCH_QA_SCAFFOLD_SYSTEM),
@@ -1947,25 +1978,34 @@ BATCH_QA_SCAFFOLD_PROMPT = ChatPromptTemplate.from_messages([
 # ===== P10新增：批量LLM调用提示词 =====
 
 BATCH_JOINT_SYSTEM = """你是一位"地理实体与语义关系批量抽取专家"。
-你的首要目标是构建高质量"地理实体-关系"结构化结果。
-原则：关系正确性 > 实体数量 > 属性丰富度；无证据不输出。"""
+你的首要目标是构建高质量地理实体-关系结构化结果。
+原则：关系正确性 > 实体数量 > 属性丰富度；无证据不输出。
+请使用 RISEN 技法执行：Role（角色）+ Instructions（指令）+ Steps（步骤）+ End Goal（最终输出）+ Narrowing（边界约束）。"""
 
 BATCH_JOINT_USER = (
-    """## 任务描述
+    """## Role（角色与目标）
+你是批量地理实体-关系抽取器。请在多语料输入下稳定输出高质量结构化结果，
+重点保证地理实体覆盖和空间关系方向正确。
+
+## Instructions（任务）
 请同时处理以下多条语料（共 {batch_size} 条），为每条语料提取：
 1. 地理实体与语义实体（6种）
-2. 以地理实体为核心的语义关系三元组
-3. 每个实体/关系的原文证据
+2. 以地理实体为核心的关系三元组
+3. 实体与三元组的原文证据
 
 ---
 
-## 抽取策略（必须执行）
+## Steps（批处理执行规则，必须遵守）
 
-1. 先识别地理实体（道路/POI/建筑物/街区）；
-2. 再识别功能/事件实体；
-3. 优先抽取空间关系（位于/包含/相对方位）；
-4. 再补充语义关系（具有功能/发生事件/优于/相似/劣于）；
-5. 每条三元组都必须能在原文定位证据，无法定位则删除。
+1. 按 `corpus_id` 独立抽取，禁止跨语料污染。
+2. 单条语料输出顺序：
+   - 先地理实体（道路/POI/建筑物/街区）
+   - 后语义实体（功能/事件）
+   - 先空间关系（位于/包含/相对方位）
+   - 后语义和对比关系（具有功能/发生事件/优于/相似/劣于）
+3. 关系三元组必须满足“同条语料内可证据定位”，不能定位则删除。
+4. 不确定方向时宁缺毋滥，不要猜测输出。
+5. 输出前自检：实体类型、关系集合、证据、字段完整性。
 
 ---
 
@@ -2024,12 +2064,26 @@ BATCH_JOINT_USER = (
 
 ---
 
+## 方向判定规则（高优先级）
+
+1. “A在/位于B（里/内/上）” -> `<A, 位于, B>`
+2. “B里有A / B包含A” -> `<B, 包含, A>`
+3. “A在B旁边/对面/附近” -> `<A, 相对方位, B>`
+4. 若文本仅有共现、无明确关系词，不输出三元组。
+
+---
+
 ## 关键约束（必须遵守）
 
-1. 头尾实体不能是人物词（男生/女生/游客/闺蜜等）；
-2. 功能/事件实体不能参与空间关系（位于/包含/相对方位）；
-3. 每个 `triples[*].evidence` 必须来自原文短片段；
-4. 若关系方向不确定，宁缺毋滥，不要强行输出。
+1. 三元组头尾不能是人物词（男生/女生/游客/闺蜜等）。
+2. 功能/事件实体不能参与空间关系（位于/包含/相对方位）。
+3. `triples[*].evidence` 必须是原文短片段，禁止改写性证据。
+4. `triples[*].relation` 只能取8类关系之一。
+5. `entities` 与 `full_entities` 必须一致：`full_entities` 中每个实体都要计入对应类型桶。
+6. 无地理信息时不得硬抽实体或关系，返回空结果并写 `skip_reason`。
+7. `相对方位` 的 `attributes` 仅允许 `距离值`、`方向值`；禁止输出“联动推荐”。
+8. `具有功能` 的 `attributes` 优先使用 v3.4 开放文本属性：`时段`、`适合人群`、`具有限制`、`情感倾向`、`功能描述`。
+9. “适合人群/具有限制”应尽量保留原文细粒度表达（如“排队两小时”），不要粗暴枚举化。
 
 ---
 
@@ -2047,7 +2101,7 @@ BATCH_JOINT_USER = (
 
 ---
 
-## 输出要求
+## End Goal（输出要求）
 
 请输出：
 1. `results`: 每条语料的抽取结果
@@ -2074,6 +2128,13 @@ BATCH_JOINT_USER = (
 **重要**：
 1. `full_entities` 必须完整，特别是功能/事件实体属性；
 2. 若某条语料无有效地理信息，也要返回该 `corpus_id` 的空结果并给出 `skip_reason`。
+3. 每条输入语料必须对应一条 `results` 记录，禁止漏条。
+4. 仅输出 JSON，不要代码块，不要附加解释文本。
+
+## Narrowing（边界）
+1. 只根据当前批次文本输出，不使用外部常识扩写事实。
+2. 不输出 JSON 之外的任何内容。
+3. 若字段无依据，填空结构而非编造。
 
 输出JSON格式。
 """

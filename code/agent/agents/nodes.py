@@ -4923,12 +4923,23 @@ def create_batch_self_check_label_node(llm: Any):
             }
 
         try:
-            # 格式化输入
+            # 格式化输入 - 包含具体的 entity_attrs 内容供 LLM 校验
             label_str = ""
             for corpus_id, data in batch_label_results.items():
                 entity_attrs = data.get("entity_attrs", {})
                 relation_attrs = data.get("relation_attrs", {})
-                label_str += f"- [{corpus_id}] 实体属性: {len(entity_attrs)}个, 关系属性: {len(relation_attrs)}个\n"
+                # 输出具体的属性内容，而非仅数量
+                entity_attrs_str = ""
+                if entity_attrs:
+                    entity_attrs_str = ", ".join(
+                        [f"{name}: {attrs}" for name, attrs in entity_attrs.items()]
+                    )
+                relation_attrs_str = ""
+                if relation_attrs:
+                    relation_attrs_str = ", ".join(
+                        [f"{key}: {attrs}" for key, attrs in relation_attrs.items()]
+                    )
+                label_str += f"- [{corpus_id}]\n  实体属性: {entity_attrs_str or '(无)'}\n  关系属性: {relation_attrs_str or '(无)'}\n"
 
             texts_str = format_corpus_texts_for_check(corpus_texts)
 
@@ -6668,11 +6679,18 @@ async def process_corpus_batch_with_llm(
                     continue
 
                 if config.enable_full_self_check:
+                    # 只传入与 batch_label_results 相关的 corpus_texts，避免 LLM 幻觉返回额外的 corpus_id
+                    relevant_corpus_ids = set(label_result["batch_label_results"].keys())
+                    relevant_corpus_texts = {
+                        cid: corpus_texts.get(cid, corpus_texts.get(str(cid), ""))
+                        for cid in relevant_corpus_ids
+                        if corpus_texts.get(cid) or corpus_texts.get(str(cid))
+                    }
                     label_check_result = await _run_batch_stage_with_retry(
                         f"Batch {batch_num}/Batch_Self_Check_Label",
                         lambda: batch_self_check_label_node(
                             label_result["batch_label_results"],
-                            corpus_texts,
+                            relevant_corpus_texts,
                             dummy_writer,
                         ),
                         lambda r: (not isinstance(r, dict))
