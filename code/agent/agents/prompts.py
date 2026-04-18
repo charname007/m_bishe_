@@ -1816,7 +1816,8 @@ BATCH_FILTER_USER = """## Context
    - 明确仅非武汉且无武汉关联 -> `is_non_wuhan_region=true`
    - 出现武汉地点或无法确定地域 -> `is_non_wuhan_region=false`
 3. 最终判 `is_valid`：
-   - 有地理线索一般为 true（保守放行）
+   - 有地理线索且无法判断是否为武汉 -> `is_valid=true`（保守放行）
+    - 明确非武汉且无武汉关联 -> `is_valid=false`
    - 纯情绪、纯人群叙述、乱码、极短无语义、纯广告口号可为 false
 
 严禁误判规则：
