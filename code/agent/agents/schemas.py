@@ -2346,6 +2346,12 @@ class BatchEvalCorpusResult(LenientBaseModel):
         default_factory=list, description="修正后的三元组"
     )
     entity_issues: List[str] = Field(default_factory=list, description="实体问题列表")
+    rejected_entities: List[str] = Field(
+        default_factory=list, description="拒绝的实体名称列表（如人物词、时间词、非地理实体）"
+    )
+    corrected_entities: Dict[str, List[str]] = Field(
+        default_factory=dict, description="修正类型后的实体映射"
+    )
     confidence: str = Field(default="medium", description="评估置信度")
 
 

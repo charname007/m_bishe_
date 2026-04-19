@@ -2012,10 +2012,31 @@ def create_aggregator_node(similarity_threshold: float = 0.85):
                     "aligned_entity_ids", {}
                 )
 
-                # 收集实体
+                # 收集 rejected_entities（从 batch_eval 和 batch_self_check）
+                rejected_entities = set()
+                # 从 batch_eval_results 获取（key 为 corpus_id）
+                batch_eval_results = corpus_state.get("batch_eval_results", {})
+                if isinstance(batch_eval_results, dict) and corpus_id in batch_eval_results:
+                    corpus_eval_result = batch_eval_results.get(corpus_id, {})
+                    if isinstance(corpus_eval_result, dict):
+                        rejected_entities.update(
+                            corpus_eval_result.get("rejected_entities", [])
+                        )
+                # 从 batch_self_check 获取（已支持）
+                rejected_entities.update(
+                    corpus_state.get("rejected_entities", [])
+                )
+
+                # 收集实体（过滤 rejected_entities）
                 entities = corpus_state.get("entities", {})
                 for entity_type, names in entities.items():
                     for name in names:
+                        # 过滤被拒绝的实体
+                        if name in rejected_entities:
+                            logger.debug(
+                                f"[Aggregator] 跳过被拒绝实体: {name} (corpus={corpus_id})"
+                            )
+                            continue
                         entity_data = {
                             "name": name,
                             "type": entity_type,
@@ -4308,6 +4329,8 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
             corpus_id: {
                 "scores": [],
                 "entity_scores": [],
+                "rejected_entities": [],
+                "corrected_entities": {},
                 "triple_eval_passed": True,
                 "entity_eval_passed": True,
                 "eval_passed": True,
@@ -4363,6 +4386,8 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
                 eval_results_dict[r.corpus_id] = {
                     "scores": r.scores,
                     "entity_scores": getattr(r, "entity_scores", []),
+                    "rejected_entities": getattr(r, "rejected_entities", []),
+                    "corrected_entities": getattr(r, "corrected_entities", {}),
                     "triple_eval_passed": triple_eval_passed,
                     "entity_eval_passed": entity_eval_passed,
                     "eval_passed": merged_eval_passed,
@@ -4384,6 +4409,8 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
                     {
                         "scores": [],
                         "entity_scores": [],
+                        "rejected_entities": [],
+                        "corrected_entities": {},
                         "triple_eval_passed": False,
                         "entity_eval_passed": False,
                         "eval_passed": False,
@@ -4428,6 +4455,8 @@ def create_batch_eval_node(llm: Any, eval_threshold: float = 3.5):
                 corpus_id: {
                     "scores": [],
                     "entity_scores": [],
+                    "rejected_entities": [],
+                    "corrected_entities": {},
                     "triple_eval_passed": True,
                     "entity_eval_passed": True,
                     "eval_passed": True,

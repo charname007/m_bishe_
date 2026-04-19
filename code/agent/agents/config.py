@@ -26,7 +26,7 @@ class ExtractionConfig:
     """实体名称相似度阈值 (0-1，用于判断是否为同一实体)"""
 
     # ===== 分布式处理配置 =====
-    corpus_per_worker: int = 5
+    corpus_per_worker: int = 8
     """每个 Worker 处理的语料数量（与 batch_llm_size 对齐，实现 Worker 级并发）"""
 
     max_workers: int = 10
@@ -249,7 +249,7 @@ class ExtractionConfig:
         return cls(
             eval_threshold=get_float("EVAL_THRESHOLD", 3.5),
             similarity_threshold=get_float("SIMILARITY_THRESHOLD", 0.85),
-            corpus_per_worker=get_int("CORPUS_PER_WORKER", 5),
+            corpus_per_worker=get_int("CORPUS_PER_WORKER", 8),
             max_workers=get_int("MAX_WORKERS", 10),
             max_concurrent_corpus=get_int("MAX_CONCURRENT_CORPUS", 50),
             batch_size=get_int("BATCH_SIZE", 100),
@@ -316,7 +316,7 @@ class ExtractionConfig:
         return cls(
             eval_threshold=config_dict.get("eval_threshold", 3.5),
             similarity_threshold=config_dict.get("similarity_threshold", 0.85),
-            corpus_per_worker=config_dict.get("corpus_per_worker", 5),
+            corpus_per_worker=config_dict.get("corpus_per_worker", 8),
             max_workers=config_dict.get("max_workers", 10),
             max_concurrent_corpus=config_dict.get("max_concurrent_corpus", 50),
             batch_size=config_dict.get("batch_size", 100),
